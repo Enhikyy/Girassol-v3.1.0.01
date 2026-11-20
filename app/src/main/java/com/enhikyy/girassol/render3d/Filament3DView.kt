@@ -59,7 +59,6 @@ fun Filament3DView(
 ) {
     var renderer by remember { mutableStateOf<FilamentCityRenderer?>(null) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    var frameTick by remember { mutableIntStateOf(0) }
 
     DisposableEffect(lifecycle) {
         val obs = LifecycleEventObserver { _, e ->
@@ -79,17 +78,23 @@ fun Filament3DView(
     }
 
     LaunchedEffect(snapshot, renderer) { renderer?.update(snapshot) }
-    LaunchedEffect(frameTick, renderer) {
+    // Projeção dos cidadãos (balões de fala e testes): 10×/s, só depois que a superfície tem tamanho real.
+    LaunchedEffect(renderer) {
         val r = renderer ?: return@LaunchedEffect
-        val (w, h) = r.viewSize()
-        val out = HashMap<String, Offset>()
-        for ((id, p) in r.agentPositions()) {
-            val s = r.camera.project(V3(p.x, p.y + Raycast.AGENT_HEIGHT * 0.5f, p.z), w, h) ?: continue
-            if (s.first in -40f..(w + 40f) && s.second in -40f..(h + 40f)) out[id] = Offset(s.first, s.second)
+        while (true) {
+            val (w, h) = r.viewSize()
+            if (w > 1f && h > 1f) {
+                val out = HashMap<String, Offset>()
+                for ((id, p) in r.agentPositions()) {
+                    val s = r.camera.project(V3(p.x, p.y + Raycast.AGENT_HEIGHT * 0.5f, p.z), w, h) ?: continue
+                    if (s.first in 0f..w && s.second in 0f..h) out[id] = Offset(s.first, s.second)
+                }
+                WorldPickRegistry.mode = "3D"
+                WorldPickRegistry.positions = out
+                onProjected(out)
+            }
+            delay(100)
         }
-        WorldPickRegistry.mode = "3D"
-        WorldPickRegistry.positions = out
-        onProjected(out)
     }
 
     Box(modifier) {
@@ -100,8 +105,6 @@ fun Filament3DView(
                     val r = FilamentCityRenderer(ctx, sv)
                     try {
                         r.init()
-                        var n = 0
-                        r.onFrame = { if (++n % 3 == 0) frameTick++ }
                         r.update(snapshot)
                         if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) r.resume()
                         renderer = r
