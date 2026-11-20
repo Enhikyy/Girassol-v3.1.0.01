@@ -93,16 +93,12 @@ object GeaNativeBridge {
         xs: FloatArray, ys: FloatArray, n: Int, epochs: Int, lr: Float, ewc: Float
     ): FloatArray?
 
-    // ==================== 5b. LLM (llama.cpp + GGUF + GBNF) ====================
-    @JvmStatic external fun nativeLlmAvailable(): Boolean
-    /** Carrega o GGUF via mmap; string vazia = sucesso. */
-    @JvmStatic external fun nativeLlmLoad(path: String, threads: Int, nCtx: Int): String
-    @JvmStatic external fun nativeLlmUnload()
-    @JvmStatic external fun nativeLlmAbort()
-    /** "descrição|bytes" do modelo carregado, ou vazio. */
-    @JvmStatic external fun nativeLlmDescribe(): String
-    /** [texto, erro, promptTokens, genTokens, millis, tokens/s]. */
-    @JvmStatic external fun nativeLlmGenerate(system: String, user: String, grammar: String, maxTokens: Int): Array<String>
+    // ==================== 5b. CPU SIMD + MEMÓRIA ====================
+    // O motor LLM foi movido para LlmNativeBridge (bibliotecas por variante de CPU).
+    /** [neon, dotprod, fp16, i8mm, sve, sve2, aarch64, variante recomendada]. */
+    @JvmStatic external fun nativeCpuFeatures(): IntArray
+    /** [VmRSS, VmHWM, VmSize, RssAnon, RssFile, VmSwap] em kB, de /proc/self/status. */
+    @JvmStatic external fun nativeProcMemory(): LongArray
 
     // ==================== 6. HARDWARE / AUTOTESTE ====================
     /** Capacidades do SoC (HWCAP/cpuid + sondagem dlopen de OpenCL/Vulkan) em formato chave=valor;... */

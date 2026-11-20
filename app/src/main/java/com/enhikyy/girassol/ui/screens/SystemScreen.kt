@@ -107,6 +107,10 @@ fun SystemScreen() {
                 }
             }
         }
+        item { LlmCpuPanel() }
+        item { MemoryPanel() }
+        item { GpuPanel() }
+        item { SigningPanel() }
         item {
             SectionCard("Módulos nativos C++") {
                 ModuleSwitch("Navegação A* nativa", "toggle_nav", toggles.nativeNavigation,

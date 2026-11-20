@@ -51,6 +51,8 @@ import androidx.lifecycle.compose.currentStateAsState
 import com.enhikyy.girassol.core.world.AgentView
 import com.enhikyy.girassol.core.world.WorldRenderSnapshot
 import com.enhikyy.girassol.render3d.Filament3DView
+import com.enhikyy.girassol.render3d.EffectLevel
+import com.enhikyy.girassol.render3d.GpuCalibration
 import com.enhikyy.girassol.render3d.RenderMode
 import com.enhikyy.girassol.render3d.RenderModePolicy
 import com.enhikyy.girassol.render3d.WorldPickRegistry
@@ -81,7 +83,9 @@ fun WorldScreen(onOpenCitizen: (String) -> Unit) {
     var filamentFailure by remember { mutableStateOf<String?>(null) }
     var projected by remember { mutableStateOf<Map<String, Offset>>(emptyMap()) }
     val foreground = lifecycleState.isAtLeast(Lifecycle.State.STARTED)
-    val eff = RenderModePolicy.effective(preferred, status.thermalStatus, filamentFailure, foreground)
+    val gpu by GpuCalibration.state.collectAsStateWithLifecycle()
+    val eff = RenderModePolicy.effective(preferred, status.thermalStatus, filamentFailure, foreground, gpu)
+    val fxLevel = gpu.active ?: EffectLevel.NONE
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -98,7 +102,8 @@ fun WorldScreen(onOpenCitizen: (String) -> Unit) {
             }
         }
         Text(
-            "${eff.mode.label} · ${eff.reason}",
+            "${eff.mode.label} · ${eff.reason}" + if (eff.mode == RenderMode.MODE_3D)
+                " · FX ${fxLevel.label} · ${gpu.driver?.renderer ?: "GPU ?"}" else "",
             style = MonoStyle, color = if (eff.mode == RenderMode.MODE_3D) Lumon.Teal else Lumon.Sunflower,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp).testTag("world_mode_label")
                 .semantics { contentDescription = "modo:${eff.mode.name}" }
@@ -110,7 +115,8 @@ fun WorldScreen(onOpenCitizen: (String) -> Unit) {
                     onPick = { selected = it },
                     onFailure = { filamentFailure = it },
                     onProjected = { projected = it },
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    level = fxLevel
                 )
                 RenderMode.ECO_2D -> Iso2DView(s, selected, showTrail, showFood, onPick = { selected = it }, onProjected = { projected = it })
             }

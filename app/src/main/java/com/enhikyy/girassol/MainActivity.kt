@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.runtime.produceState
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -26,10 +25,6 @@ import androidx.compose.ui.unit.sp
 import com.enhikyy.girassol.llm.LlmStatus
 import com.enhikyy.girassol.llm.LocalLlmManager
 import com.enhikyy.girassol.render3d.Render3dTelemetry
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
-import java.io.File
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -88,6 +83,8 @@ class MainActivity : ComponentActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+        // GL_RENDERER/driver + nível de efeito: cache, GL por software ou sonda isolada.
+        com.enhikyy.girassol.render3d.GpuCalibration.ensure(this)
         setContent { GirassolTheme { GirassolApp() } }
     }
 }
@@ -140,13 +137,6 @@ private fun FloatingNavBar(current: Tab, onSelect: (Tab) -> Unit, modifier: Modi
     }
 }
 
-/** VmRSS do próprio processo (/proc/self/status), em MB. */
-internal fun readRssMb(): Double = runCatching {
-    File("/proc/self/status").useLines { lines ->
-        lines.firstOrNull { it.startsWith("VmRSS:") }?.filter { it.isDigit() }?.toLong()?.div(1024.0) ?: 0.0
-    }
-}.getOrDefault(0.0)
-
 @Composable
 private fun TopStatusBar() {
     val render by SimulationHub.render.collectAsStateWithLifecycle()
@@ -154,7 +144,7 @@ private fun TopStatusBar() {
     val dash by SimulationHub.dashboard.collectAsStateWithLifecycle()
     val r3d by Render3dTelemetry.stats.collectAsStateWithLifecycle()
     val llm by LocalLlmManager.stats.collectAsStateWithLifecycle()
-    val rss by produceState(0.0) { while (true) { value = withContext(Dispatchers.IO) { readRssMb() }; delay(2000) } }
+    val mem by com.enhikyy.girassol.system.MemoryGuard.state.collectAsStateWithLifecycle()
     Column(Modifier.fillMaxWidth().padding(top = 36.dp, start = 16.dp, end = 16.dp, bottom = 6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("GIRASSOL", style = MaterialTheme.typography.titleLarge, color = Lumon.Sunflower)
@@ -174,7 +164,8 @@ private fun TopStatusBar() {
             Text(if (r3d.active) "3D ${r3d.fps.f(0)} fps" else "2D eco", style = MonoStyle.copy(fontSize = 10.sp), color = if (r3d.active) Lumon.Teal else Lumon.Sunflower)
             Text("llama: ${llm.status.label}${if (llm.tokensPerSecond > 0) " ${llm.tokensPerSecond.f(1)} tok/s" else ""}", style = MonoStyle.copy(fontSize = 10.sp), color = llmColor, maxLines = 1)
             Text("LoRA ${dash?.mind?.loraAcceptedCycles ?: 0}", style = MonoStyle.copy(fontSize = 10.sp), color = Lumon.Violet)
-            Text("RSS ${rss.f(0)} MB", style = MonoStyle.copy(fontSize = 10.sp), color = Lumon.CreamDim)
+            Text("RSS ${if (mem.rssKb > 0) mem.rssKb / 1024 else 0} MB", style = MonoStyle.copy(fontSize = 10.sp),
+                color = if (mem.breakerOpen) Lumon.Danger else Lumon.CreamDim)
         }
     }
 }

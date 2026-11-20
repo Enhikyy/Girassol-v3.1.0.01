@@ -41,7 +41,7 @@
 | `qd` | MAP-Elites + AURORA |
 | `rsi` | Auto-aperfeiçoamento delimitado: proposta → Shadow-Replay em cópia profunda → promoção só com ganho líquido, sem queda de diversidade semântica abaixo de 0,35 |
 
-## Módulos nativos e portas (v3.2)
+## Módulos nativos e portas (v3.3)
 
 O `core` continua JVM puro. Os módulos nativos entram por interfaces em `core/ports` (`PathfinderPort`,
 `LoraPort`, `NeuralDeliberatorPort`), montadas pelo `SimulationHub`. Cada porta tem implementação Kotlin de
@@ -51,15 +51,32 @@ estado.
 
 ### Motor cognitivo híbrido (llama.cpp + GBNF)
 
-- `llm/llm_engine.cpp` liga o llama.cpp `v1.0.0` (CMake/NDK, `arm64-v8a`, GGML portátil armv8-a) ao JNI.
+- `llm/llm_engine.cpp` liga o llama.cpp `v1.0.0` (CMake/NDK) ao JNI (`llm/llm_jni.cpp`, classe `LlmNativeBridge`).
   Modelo carregado com `mmap` (sem `mlock`, sem GPU), `n_ctx = 1024`, lote 256, threads = metade dos núcleos (2 a 4).
+- Aceleração ARM64 sem risco de `SIGILL` (v3.3): o motor LLM é empacotado em três bibliotecas separadas, e só o
+  backend `ggml-cpu` muda entre elas (`GGML_NATIVE=OFF`, `GGML_CPU_ARM_ARCH`):
+
+  | Biblioteca | `-march` | Alvo |
+  |---|---|---|
+  | `libgirassol_llm_base.so` | armv8-a | qualquer arm64 (Cortex-A53) e o emulador x86_64 |
+  | `libgirassol_llm_dotprod.so` | armv8.2-a+dotprod+fp16 + KleidiAI | Snapdragon 695 (A78/A55), Helio G99 (A76/A55) |
+  | `libgirassol_llm_i8mm.so` | armv8.2-a+dotprod+fp16+i8mm + KleidiAI | Cortex-A510/A710/X2 em diante |
+
+  `hardware/cpu_features.hpp` lê `getauxval(AT_HWCAP/AT_HWCAP2)` dentro de `libgirassol_core.so` (compilada
+  para armv8-a) **antes** de qualquer biblioteca LLM ser carregada; `LlmVariantSelector` só tenta `i8mm` quando o
+  HWCAP2 confirma FEAT_I8MM e cai para a próxima variante se o `System.loadLibrary` falhar. `i8mm` nunca é
+  exigido globalmente. Dentro da variante dotprod, os kernels KleidiAI com SMMLA existem, mas o próprio KleidiAI
+  só os seleciona em runtime quando a CPU anuncia i8mm. O repacking de pesos Q4_0/Q8_0 do ggml (`REPACK`) fica
+  ativo em todas as variantes.
+- Diagnóstico: aba Sistema mostra as flags (`NEON`, `DOTPROD`, `FP16`, `I8MM`, `SVE`, `SVE2`), a variante e o
+  `-march` carregados, o `llama_print_system_info()` e um benchmark de tokens/s (prompt em lote e geração).
 - Toda geração usa gramática GBNF (`NeuralProtocol`) e decodificação gulosa; a saída é ainda validada por um
   parser estrito. Saída inválida é descartada e o cidadão usa o deliberador simbólico.
 - Determinismo: a inferência roda fora da thread do mundo. O resultado aprovado é drenado no estágio 1 do tick
   seguinte e gravado como evento canônico `LLM_DECISAO` (ação, fala, tick do pedido). O replay a partir do log é
   bit a bit idêntico; a sequência ao vivo depende do tempo de inferência do aparelho.
-- Fallback automático para `SymbolicLookaheadDeliberator`: sem `.gguf`, tier térmico ≥ 2, `onTrimMemory`, RAM
-  livre baixa ou erro de carga. Shadow-Replay do RSI e sandbox LoRA usam sempre o simbólico.
+- Fallback automático para `SymbolicLookaheadDeliberator`: sem `.gguf`, tier térmico ≥ 2, disjuntor de memória
+  aberto, RAM livre baixa ou erro de carga. Shadow-Replay do RSI e sandbox LoRA usam sempre o simbólico.
 - Falas e pensamentos (LLM ou modelos simbólicos) aparecem como balões na aba Mundo.
 
 ### Renderização 3D (Filament 1.75.1) e Modo Eco 2D
@@ -71,7 +88,38 @@ estado.
   vinheta, neblina, FXAA, gradação Filmic com balanço de branco tungstênio, sombras profundas e granulação
   (overlay Compose em `BlendMode.Overlay`). Limitado a 30 fps com resolução dinâmica.
 - `OrbitCamera` (órbita, pinça, rotação, pan) e `Raycast` (raio × AABB dos cidadãos, testado em JVM).
-- `RenderModePolicy`: 3D/2D manual; 2D obrigatório em segundo plano, tier térmico ≥ 3 ou falha de GLES.
+- `RenderModePolicy`: 3D/2D manual; 2D obrigatório em segundo plano, tier térmico ≥ 3, falha de GLES, durante a
+  calibração de GPU ou quando nenhum nível de efeito é seguro.
+
+### Resiliência de shaders em GPUs reais (v3.3)
+
+Falha de compilação de shader no Filament não vira exceção Java: o driver aborta o processo. Por isso:
+
+- `GlInfo` lê `GL_RENDERER`/`GL_VENDOR`/`GL_VERSION` num contexto EGL pbuffer. GL por software (SwiftShader,
+  llvmpipe) recebe direto o nível `NONE` (comportamento da v3.2 no CI).
+- Em GPU de hardware, `GpuCalibration` testa os níveis `FULL → REDUCED → MINIMAL → NONE` no serviço
+  `GpuProbeService`, que roda no processo isolado `:gpuprobe` e renderiza fora da tela a mesma cena, materiais
+  `.filamat` e passes (bloom, halation, gradação, FXAA). Se o processo morrer ou expirar (25 s), o nível é
+  descartado e o próximo é testado; o processo principal nunca cai. O resultado é guardado por
+  aparelho + versão do app + versão do Filament + driver.
+- Sentinela: enquanto o 3D roda, o nível ativo fica gravado; se o app morrer no meio, o próximo início rebaixa um
+  nível.
+- `FpsGovernor`: após 5 s de aquecimento, se a média de 8 s ficar abaixo de 20 fps, o nível cai um degrau sem
+  recriar a superfície (`applyEffectLevel`).
+- Níveis: `FULL` (bloom 6 níveis, halação, grão, gradação 500T, vinheta, névoa, FXAA), `REDUCED` (bloom 3, sem
+  FXAA/névoa), `MINIMAL` (só gradação, halação e grão), `NONE` (cena sem pós). A aba Sistema e o rótulo da aba
+  Mundo mostram o nível ativo e o `GL_RENDERER`.
+
+### Memória real e disjuntor (v3.3)
+
+- `hardware/proc_memory.hpp` lê `/proc/self/status` em C++ (`VmRSS`, `VmHWM`, `VmSize`, `RssAnon`, `RssFile`,
+  `VmSwap`); `MemoryGuard` amostra a cada 2 s e combina com `ActivityManager.MemoryInfo`, heap nativo e o estado
+  térmico ADPF (`PowerManager.currentThermalStatus` e `getThermalHeadroom`).
+- `MemoryBreaker` (puro, testado em JVM): limite de VmRSS por RAM física (≤ 3,2 GB → 1,2 GB; ≤ 4,6 GB →
+  1,8 GB; ≤ 6,6 GB → 2,6 GB; acima → 3,2 GB). Dispara ao passar do limite ou em `TRIM_MEMORY_RUNNING_CRITICAL`/
+  `onLowMemory`; descarrega o contexto e o modelo do llama.cpp, chama `SQLiteDatabase.releaseMemory()`, limpa o
+  `cacheDir` e pede GC. O loop determinístico continua com o deliberador simbólico. Rearma depois de 60 s abaixo
+  de 80 % do limite e sem novo sinal crítico (ou pelo botão "Rearmar").
 
 ### Navegação, LoRA e áudio
 
@@ -89,23 +137,42 @@ estado.
 `proguard-rules.pro` mantém classes/métodos `native`, o pacote `com.google.android.filament`, o bridge JNI e os
 campos `Long` que guardam ponteiros nativos do llama.cpp.
 
+Símbolos nativos (v3.3): llama.cpp/ggml compilados com `-fvisibility=hidden`, e as bibliotecas do Girassol
+ligadas com `exports.map` (version script: só `Java_*` e `JNI_OnLoad`), `--exclude-libs,ALL`, `--gc-sections`
+e páginas de 16 KB. O CI confere a tabela dinâmica de cada `.so` nos APKs (`scripts/check_native_symbols.sh`).
+
+Assinatura: `SigningInfo` lê o certificado do APK instalado (`GET_SIGNING_CERTIFICATES`) e o classifica como chave
+de debug (`CN=Android Debug`) ou keystore de release, com o SHA-256. Como o Android não permite atualizar um app
+com outra assinatura, a aba Sistema avisa para exportar o snapshot `.grs` (SAF) antes de desinstalar e oferece
+a importação depois.
+
 ## Testes e CI
 
-- `native-tests`: ASan/UBSan em duas configurações (sem llama; com llama.cpp + GGUF `stories260K` e gramática).
-- `:core:test`, `:app:testDebugUnitTest` (câmera/raycast), `:app:lintDebug`, `compileFilamentMaterials`,
-  APKs debug e release.
+- `native-tests`: ASan/UBSan em duas configurações (sem llama; com llama.cpp + GGUF `stories260K` e gramática),
+  incluindo decodificação de HWCAP (Cortex-A78 → dotprod, nunca i8mm), parser de `/proc/self/status` e o
+  benchmark de tokens/s.
+- `:core:test`, `:app:testDebugUnitTest` (câmera/raycast, disjuntor, seletor de variante LLM, níveis de efeito e
+  `FpsGovernor`, classificação de assinatura), `:app:lintDebug`, `compileFilamentMaterials`, APKs debug e release
+  e a checagem de símbolos exportados.
 - `androidTest` em emulador x86_64 (API 34): aba Mundo (alternância 3D/2D, toque em cidadão) e aba Sistema
-  (diagnóstico C++, benchmark, chaves dos módulos nativos).
+  (diagnóstico C++, benchmark, chaves dos módulos nativos, painéis de SIMD, memória/disjuntor, GPU e assinatura,
+  sonda de GPU em processo separado).
 
 ## Limitações conhecidas
 
-- Não testado em aparelho físico de 4 GB; o orçamento de RAM e os 30 fps são estimativas de projeto.
+- Não testado em aparelho físico de 4 GB; o orçamento de RAM e os 30 fps são estimativas de projeto. Use
+  [VALIDACAO_APARELHO.md](VALIDACAO_APARELHO.md) para conferir.
   O emulador usa GPU por software (SwiftShader), que não compila os shaders de pós-processamento do Filament
   (o FXAA aborta o processo); em GL por software o app desativa o pós-processamento, então o CI valida a cena
-  3D, a câmera e o raycast, mas não a estética Kodak.
+  3D, a câmera e o raycast, mas não a estética Kodak nem a sonda de GPU em hardware (no emulador ela só roda o
+  nível `NONE`).
+- A sonda de GPU cobre crashes de compilação e de primeiro frame; bugs de driver que só aparecem depois de
+  minutos de uso dependem da sentinela (rebaixamento no próximo início) e do `FpsGovernor`.
+- Os limites do disjuntor são heurísticos; o Android pode matar o processo (LMK) antes dele em aparelhos com
+  muitos apps em segundo plano.
 - Filament fixado em 1.75.1: versões ≥ 1.76 exigem compileSdk 37, e o AGP 8.7.3 suporta até o 35.
-- GGML compilado para armv8-a portátil (sem dotprod/i8mm específicos, KleidiAI e OpenMP desligados):
-  compatível com qualquer arm64, mas não é o máximo de tokens/s possível.
+- OpenMP desligado (threadpool do ggml). As variantes dotprod/i8mm não foram medidas em aparelho real; o ganho
+  de tokens/s depende do modelo e da quantização (Q4_0 aproveita mais o repacking/KleidiAI que Q4_K_M).
+- O APK de release fica maior (três variantes do backend ggml-cpu).
 - O LLM só atua no mundo ao vivo; RSI e sandbox LoRA usam o deliberador simbólico para manter replay fixo.
-- Os símbolos do llama.cpp ficam exportados em `libgirassol_core.so`.
 - Iluminação do 3D é pré-calculada (sem sombras dinâmicas) para caber no orçamento térmico 24/7.

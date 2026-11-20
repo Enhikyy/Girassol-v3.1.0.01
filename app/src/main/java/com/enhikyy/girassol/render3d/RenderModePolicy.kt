@@ -32,11 +32,16 @@ object RenderModePolicy {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("mode", mode.name).apply()
     }
 
-    fun effective(preferred: RenderMode, thermalStatus: Int, filamentFailed: String?, foreground: Boolean): EffectiveRender = when {
+    fun effective(
+        preferred: RenderMode, thermalStatus: Int, filamentFailed: String?, foreground: Boolean,
+        gpu: GpuCalibrationState? = null
+    ): EffectiveRender = when {
         preferred == RenderMode.ECO_2D -> EffectiveRender(RenderMode.ECO_2D, "escolhido manualmente")
         !foreground -> EffectiveRender(RenderMode.ECO_2D, "segundo plano")
         thermalStatus >= THERMAL_ECO_STATUS -> EffectiveRender(RenderMode.ECO_2D, "alerta térmico (status $thermalStatus)")
         filamentFailed != null -> EffectiveRender(RenderMode.ECO_2D, "3D indisponível: $filamentFailed")
+        gpu != null && gpu.status != GpuCalStatus.DONE -> EffectiveRender(RenderMode.ECO_2D, "calibrando shaders da GPU…")
+        gpu != null && gpu.active == null -> EffectiveRender(RenderMode.ECO_2D, "GPU sem nível de shader estável")
         else -> EffectiveRender(RenderMode.MODE_3D, "primeiro plano")
     }
 }

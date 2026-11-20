@@ -55,16 +55,19 @@ fun Filament3DView(
     onPick: (String?) -> Unit,
     onFailure: (String) -> Unit,
     onProjected: (Map<String, Offset>) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    level: EffectLevel = EffectLevel.FULL
 ) {
     var renderer by remember { mutableStateOf<FilamentCityRenderer?>(null) }
+    var activeLevel by remember { mutableStateOf(level) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
 
     DisposableEffect(lifecycle) {
         val obs = LifecycleEventObserver { _, e ->
             when (e) {
-                Lifecycle.Event.ON_RESUME -> renderer?.resume()
-                Lifecycle.Event.ON_PAUSE -> renderer?.pause()
+                Lifecycle.Event.ON_RESUME -> renderer?.let { GpuCalibration.markRendering(appContext, it.level); it.resume() }
+                Lifecycle.Event.ON_PAUSE -> { renderer?.pause(); GpuCalibration.clearRendering(appContext) }
                 else -> Unit
             }
         }
@@ -73,6 +76,7 @@ fun Filament3DView(
             lifecycle.removeObserver(obs)
             renderer?.destroy()
             renderer = null
+            GpuCalibration.clearRendering(appContext)
             WorldPickRegistry.positions = emptyMap()
         }
     }
@@ -102,8 +106,12 @@ fun Filament3DView(
             modifier = Modifier.fillMaxSize().testTag("world_viewport_3d"),
             factory = { ctx ->
                 SurfaceView(ctx).also { sv ->
-                    val r = FilamentCityRenderer(ctx, sv)
+                    val r = FilamentCityRenderer(ctx, sv, level)
                     try {
+                        // Sentinela: se o driver abortar o processo durante a compilação dos
+                        // shaders deste nível, a próxima abertura desce um nível.
+                        GpuCalibration.markRendering(ctx.applicationContext, level)
+                        r.onFpsLow = { from -> GpuCalibration.onFpsDowngrade(from)?.let { r.setEffectLevel(it); activeLevel = it } }
                         r.init()
                         r.update(snapshot)
                         if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) r.resume()
@@ -117,7 +125,7 @@ fun Filament3DView(
                 }
             }
         )
-        FilmGrainOverlay(Modifier.fillMaxSize())
+        if (activeLevel.grain) FilmGrainOverlay(Modifier.fillMaxSize())
         Box(
             Modifier.fillMaxSize()
                 .pointerInput(renderer) {

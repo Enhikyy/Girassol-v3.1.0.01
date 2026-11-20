@@ -1,0 +1,9 @@
+/* Exporta somente o necessário para a JVM. Todo o resto (llama.cpp, ggml, KleidiAI,
+   código interno do Girassol) fica local à biblioteca. */
+{
+  global:
+    Java_*;
+    JNI_OnLoad;
+  local:
+    *;
+};

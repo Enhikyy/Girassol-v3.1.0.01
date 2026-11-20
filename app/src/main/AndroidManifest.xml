@@ -52,5 +52,10 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+        <!-- Sonda de shaders em processo isolado: um abort do driver/Filament não derruba o app. -->
+        <service
+            android:name=".render3d.GpuProbeService"
+            android:exported="false"
+            android:process=":gpuprobe" />
     </application>
 </manifest>

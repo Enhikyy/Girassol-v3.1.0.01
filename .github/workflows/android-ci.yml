@@ -63,7 +63,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/third_party
-          key: third-party-${{ hashFiles('app/build.gradle.kts', 'gradle/libs.versions.toml') }}
+          key: third-party-v33-${{ hashFiles('app/build.gradle.kts', 'gradle/libs.versions.toml') }}
       - name: Assinatura de release (opcional)
         env:
           KEYSTORE_B64: ${{ secrets.GIRASSOL_KEYSTORE_BASE64 }}
@@ -81,6 +81,8 @@ jobs:
           GIRASSOL_KEY_ALIAS: ${{ secrets.GIRASSOL_KEY_ALIAS }}
           GIRASSOL_KEY_PASSWORD: ${{ secrets.GIRASSOL_KEY_PASSWORD }}
         run: ./gradlew --no-daemon :core:test :app:testDebugUnitTest :app:lintDebug :app:compileFilamentMaterials :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest
+      - name: Exportação de símbolos nativos (-fvisibility=hidden + version script)
+        run: scripts/check_native_symbols.sh app/build/outputs/apk/debug/*.apk app/build/outputs/apk/release/*.apk
       - name: Relatórios
         if: always()
         uses: actions/upload-artifact@v4
@@ -122,7 +124,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/third_party
-          key: third-party-${{ hashFiles('app/build.gradle.kts', 'gradle/libs.versions.toml') }}
+          key: third-party-v33-${{ hashFiles('app/build.gradle.kts', 'gradle/libs.versions.toml') }}
       - name: Pré-compilar APKs de teste (x86_64)
         run: ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest -Pgirassol.abis=x86_64
       - name: Rodar androidTest (abas Mundo e Sistema)
@@ -136,6 +138,7 @@ jobs:
           disable-animations: true
           script: |
             adb logcat -c || true
+            adb shell settings put global hide_error_dialogs 1 || true
             adb logcat -v threadtime > logcat-emulador.txt 2>&1 & LP=$!; ./gradlew --no-daemon :app:connectedDebugAndroidTest -Pgirassol.abis=x86_64; rc=$?; sleep 2; kill $LP 2>/dev/null; exit $rc
       - name: Relatórios de instrumentação
         if: always()

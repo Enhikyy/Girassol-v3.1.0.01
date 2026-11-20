@@ -78,6 +78,26 @@ val prepareLlama by tasks.registering(Copy::class) {
     into(thirdParty.map { it.dir("llama") })
 }
 
+// KleidiAI (micro-kernels Arm para ggml-cpu nas variantes dotprod/i8mm). Mesma versão e
+// hash MD5 fixados pelo llama.cpp 1.0.0; aqui verificamos por SHA-256 e passamos o
+// diretório local ao CMake (o build nativo nunca acessa a rede).
+val kleidiaiVersion = "1.32.0"
+val kleidiaiSha256 = "a48d373e7c5d721a0aecbf5ddaf0bdf245bc8064e6b84086f13db0e102b553a6"
+val kleidiaiDirOverride = providers.gradleProperty("girassol.kleidiaiDir").orNull
+val kleidiaiDir: File = kleidiaiDirOverride?.let { file(it) } ?: thirdParty.get().dir("kleidiai/kleidiai-v$kleidiaiVersion").asFile
+val downloadKleidiai by tasks.registering(DownloadVerified::class) {
+    enabled = kleidiaiDirOverride == null && !llamaDisabled
+    url.set("https://github.com/ARM-software/kleidiai/releases/download/v$kleidiaiVersion/kleidiai-v$kleidiaiVersion-src.tar.gz")
+    sha256.set(kleidiaiSha256)
+    dest.set(thirdParty.map { it.file("downloads/kleidiai-v$kleidiaiVersion-src.tar.gz") })
+}
+val prepareKleidiai by tasks.registering(Copy::class) {
+    enabled = kleidiaiDirOverride == null && !llamaDisabled
+    dependsOn(downloadKleidiai)
+    from(downloadKleidiai.flatMap { it.dest }.map { tarTree(resources.gzip(it.asFile)) })
+    into(thirdParty.map { it.dir("kleidiai") })
+}
+
 val matcOverride = providers.gradleProperty("girassol.matc").orNull
 val downloadFilamentTools by tasks.registering(DownloadVerified::class) {
     enabled = matcOverride == null
@@ -113,15 +133,22 @@ android {
         applicationId = "com.enhikyy.girassol"
         minSdk = 33
         targetSdk = 35
-        versionCode = 3200000
-        versionName = "3.2.0.00"
+        versionCode = 3300000
+        versionName = "3.3.0.00"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "FILAMENT_VERSION", "\"$filamentVersion\"")
         externalNativeBuild {
             cmake {
                 cppFlags += "-std=c++20"
                 arguments += listOf("-DANDROID_STL=c++_shared")
-                if (!llamaDisabled) arguments += "-DGIRASSOL_LLAMA_DIR=${llamaDir.absolutePath}"
-                targets += "girassol_core"
+                if (!llamaDisabled) {
+                    arguments += "-DGIRASSOL_LLAMA_DIR=${llamaDir.absolutePath}"
+                    arguments += "-DGIRASSOL_KLEIDIAI_DIR=${kleidiaiDir.absolutePath}"
+                }
+                // Núcleo determinístico + 3 variantes do motor LLM (escolhidas em runtime).
+                // Fora do arm64 (ou sem llama.cpp) dotprod/i8mm viram stubs sem motor e nunca são
+                // escolhidos pelo seletor de runtime.
+                targets += listOf("girassol_core", "girassol_llm_base", "girassol_llm_dotprod", "girassol_llm_i8mm")
             }
         }
     }
@@ -167,7 +194,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     packaging {
         jniLibs { useLegacyPackaging = false }
         resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
@@ -188,7 +215,7 @@ androidComponents {
 }
 
 tasks.configureEach {
-    if (name.startsWith("configureCMake") || name.startsWith("buildCMake") || name.startsWith("generateJsonModel")) dependsOn(prepareLlama)
+    if (name.startsWith("configureCMake") || name.startsWith("buildCMake") || name.startsWith("generateJsonModel")) dependsOn(prepareLlama, prepareKleidiai)
 }
 
 dependencies {

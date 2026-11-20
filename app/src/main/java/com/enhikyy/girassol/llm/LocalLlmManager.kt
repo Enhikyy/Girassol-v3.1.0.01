@@ -10,7 +10,7 @@ import com.enhikyy.girassol.core.cognition.NeuralProtocol
 import com.enhikyy.girassol.core.ports.NeuralDecision
 import com.enhikyy.girassol.core.ports.NeuralDeliberationPort
 import com.enhikyy.girassol.core.ports.NeuralRequest
-import com.enhikyy.girassol.nativebridge.GeaNativeBridge
+import com.enhikyy.girassol.nativebridge.LlmNativeBridge
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -44,7 +44,11 @@ data class LlmStats(
     val lastOutput: String = "",
     val lastError: String = "",
     val nativeHeapMb: Double = 0.0,
-    val budgetMb: Long = 0
+    val budgetMb: Long = 0,
+    val genTokensPerSecond: Double = 0.0,
+    val benchPromptTps: Double = 0.0,
+    val benchGenTps: Double = 0.0,
+    val memoryUnloads: Int = 0
 )
 
 /**
@@ -79,7 +83,7 @@ object LocalLlmManager : NeuralDeliberationPort {
     private var appContext: Context? = null
 
     val engineCompiled: Boolean
-        get() = GeaNativeBridge.isNativeLoaded && runCatching { GeaNativeBridge.nativeLlmAvailable() }.getOrDefault(false)
+        get() = LlmNativeBridge.isLoaded && runCatching { LlmNativeBridge.nativeLlmAvailable() }.getOrDefault(false)
 
     fun init(context: Context) {
         appContext = context.applicationContext
@@ -106,25 +110,65 @@ object LocalLlmManager : NeuralDeliberationPort {
     /** Tier térmico (0..3): ≥ 2 suspende o LLM e aborta a geração em curso. */
     fun setThermalTier(tier: Int) {
         val paused = tier >= 2
-        if (paused && !thermalPaused && ready) runCatching { GeaNativeBridge.nativeLlmAbort() }
+        if (paused && !thermalPaused && ready) runCatching { LlmNativeBridge.nativeLlmAbort() }
         thermalPaused = paused
         refreshStatus()
     }
 
+    /** Disjuntor de memória aberto: nenhum recarregamento até o MemoryGuard rearmar. */
+    @Volatile var memoryBreakerOpen = false
+        private set
+
     fun onTrimMemory(level: Int) {
-        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL && ready) {
-            Log.w(TAG, "pressão de memória ($level): descarregando modelo")
-            worker.execute {
-                runCatching { GeaNativeBridge.nativeLlmUnload() }
-                ready = false
-                _stats.update { it.copy(status = LlmStatus.PAUSED_MEMORY) }
-            }
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) unloadForMemory("onTrimMemory($level)")
+    }
+
+    /**
+     * Chamado pelo MemoryGuard (VmRSS acima do limite ou TRIM_MEMORY_RUNNING_CRITICAL).
+     * Aborta a geração em curso e libera modelo + KV-cache na thread do LLM; o loop
+     * determinístico do mundo não é tocado (cai no deliberador simbólico).
+     */
+    fun unloadForMemory(reason: String) {
+        memoryBreakerOpen = true
+        if (!ready && _stats.value.status != LlmStatus.LOADING) {
+            if (_stats.value.status == LlmStatus.READY || _stats.value.status == LlmStatus.BUSY) _stats.update { it.copy(status = LlmStatus.PAUSED_MEMORY) }
+            return
         }
+        Log.w(TAG, "disjuntor de memória: $reason — descarregando modelo")
+        ready = false
+        runCatching { LlmNativeBridge.nativeLlmAbort() }
+        worker.execute {
+            runCatching { LlmNativeBridge.nativeLlmUnload() }
+            ready = false
+            _stats.update { it.copy(status = LlmStatus.PAUSED_MEMORY, lastError = "disjuntor: $reason", memoryUnloads = it.memoryUnloads + 1) }
+        }
+    }
+
+    /** Rearma o disjuntor (memória voltou abaixo da histerese) e tenta recarregar. */
+    fun rearmMemoryBreaker() {
+        if (!memoryBreakerOpen) return
+        memoryBreakerOpen = false
+        maybeReload()
+    }
+
+    /** Benchmark pp/tg no modelo carregado (bloqueia até 60 s; chamar fora da main thread). */
+    fun benchmark(nPrompt: Int = 64, nGen: Int = 32): String {
+        if (!engineCompiled) return "Motor llama.cpp indisponível"
+        if (!ready) return "Carregue um modelo .gguf para medir tokens/s"
+        val f = java.util.concurrent.FutureTask {
+            runCatching { LlmNativeBridge.nativeLlmBench(nPrompt, nGen) }.getOrNull()
+        }
+        worker.execute(f)
+        val r = runCatching { f.get(60, java.util.concurrent.TimeUnit.SECONDS) }.getOrNull()
+        if (r == null || r.size < 4) return "Benchmark falhou"
+        _stats.update { it.copy(benchPromptTps = r[0], benchGenTps = r[1]) }
+        return "pp${r[2].toInt()} %.1f tok/s · tg${r[3].toInt()} %.1f tok/s · ${LlmNativeBridge.loadedVariant}".format(r[0], r[1])
     }
 
     /** Recarrega um modelo descarregado por memória, se houver folga. */
     fun maybeReload() {
         val ctx = appContext ?: return
+        if (memoryBreakerOpen) return
         if (ready || _stats.value.status != LlmStatus.PAUSED_MEMORY) return
         val path = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("model", null) ?: return
         loadAsync(File(path))
@@ -181,7 +225,7 @@ object LocalLlmManager : NeuralDeliberationPort {
 
     fun removeModel(context: Context) {
         worker.execute {
-            runCatching { GeaNativeBridge.nativeLlmUnload() }
+            runCatching { LlmNativeBridge.nativeLlmUnload() }
             ready = false
             File(context.filesDir, "models").listFiles()?.forEach { it.delete() }
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove("model").apply()
@@ -194,6 +238,10 @@ object LocalLlmManager : NeuralDeliberationPort {
         _stats.update { it.copy(status = LlmStatus.LOADING, modelName = file.name, lastError = "") }
         worker.execute {
             ready = false
+            if (memoryBreakerOpen) {
+                _stats.update { it.copy(status = LlmStatus.PAUSED_MEMORY, lastError = "disjuntor de memória aberto") }
+                return@execute
+            }
             val am = ctx.getSystemService(ActivityManager::class.java)
             val mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
             if (mi.availMem - file.length() < MIN_FREE_AFTER_LOAD || mi.lowMemory) {
@@ -201,12 +249,12 @@ object LocalLlmManager : NeuralDeliberationPort {
                 return@execute
             }
             val threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 4)
-            val err = runCatching { GeaNativeBridge.nativeLlmLoad(file.absolutePath, threads, N_CTX) }.getOrElse { it.message ?: "erro" }
+            val err = runCatching { LlmNativeBridge.nativeLlmLoad(file.absolutePath, threads, N_CTX) }.getOrElse { it.message ?: "erro" }
             if (err.isNotEmpty()) {
                 _stats.update { it.copy(status = LlmStatus.ERROR, lastError = err) }
                 return@execute
             }
-            val desc = runCatching { GeaNativeBridge.nativeLlmDescribe() }.getOrDefault("")
+            val desc = runCatching { LlmNativeBridge.nativeLlmDescribe() }.getOrDefault("")
             ready = true
             _stats.update {
                 it.copy(modelName = file.name, description = desc.substringBefore('|'),
@@ -229,11 +277,12 @@ object LocalLlmManager : NeuralDeliberationPort {
         worker.execute {
             try {
                 if (!isAvailable()) return@execute
-                val r = GeaNativeBridge.nativeLlmGenerate(request.prompt.system, request.prompt.user, request.prompt.grammar, MAX_TOKENS)
+                val r = LlmNativeBridge.nativeLlmGenerate(request.prompt.system, request.prompt.user, request.prompt.grammar, MAX_TOKENS)
                 val text = r[0]; val err = r[1]
                 val genTokens = r[3].toIntOrNull() ?: 0
                 val ms = r[4].toDoubleOrNull() ?: 0.0
                 val tps = r[5].toDoubleOrNull() ?: 0.0
+                val genTps = r.getOrNull(6)?.toDoubleOrNull() ?: 0.0
                 val parsed = if (err.isEmpty()) NeuralProtocol.parse(text, request.allowedActions) else null
                 if (parsed != null) {
                     results += NeuralDecision(request.agentId, request.tick, parsed.action, parsed.thought, parsed.speech,
@@ -241,6 +290,7 @@ object LocalLlmManager : NeuralDeliberationPort {
                 }
                 _stats.update {
                     it.copy(tokensPerSecond = if (tps > 0) tps else it.tokensPerSecond, lastLatencyMs = ms,
+                        genTokensPerSecond = if (genTps > 0) genTps else it.genTokensPerSecond,
                         decisions = it.decisions + if (parsed != null) 1 else 0,
                         rejected = it.rejected + if (parsed == null) 1 else 0,
                         lastOutput = text.take(220), lastError = err,

@@ -161,6 +161,7 @@ LlmResult LlmEngine::generate(const std::string& system, const std::string& user
             return res;
         }
     }
+    const auto tGen0 = std::chrono::steady_clock::now();
     std::string out;
     char piece[256];
     for (int32_t g = 0; g < maxTokens; ++g) {
@@ -180,6 +181,8 @@ LlmResult LlmEngine::generate(const std::string& system, const std::string& user
     const auto t1 = std::chrono::steady_clock::now();
     res.millis = std::chrono::duration<double, std::milli>(t1 - t0).count();
     res.tokensPerSecond = res.millis > 0 ? (res.genTokens + res.promptTokens) * 1000.0 / res.millis : 0.0;
+    const double genSecs = std::chrono::duration<double>(t1 - tGen0).count();
+    res.genTokensPerSecond = genSecs > 0 ? res.genTokens / genSecs : 0.0;
     res.text = out;
     res.ok = res.error.empty() && !out.empty();
     return res;
@@ -187,6 +190,54 @@ LlmResult LlmEngine::generate(const std::string& system, const std::string& user
     (void)system; (void)user; (void)grammar; (void)maxTokens;
     res.error = "compilado sem llama.cpp";
     return res;
+#endif
+}
+
+LlmBench LlmEngine::bench(int32_t nPrompt, int32_t nGen) {
+    LlmBench b;
+#if defined(GIRASSOL_HAS_LLAMA)
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!model_ || !ctx_) { b.error = "modelo não carregado"; return b; }
+    abort_.store(false);
+    const llama_vocab* vocab = llama_model_get_vocab(model_);
+    const int32_t nCtx = static_cast<int32_t>(llama_n_ctx(ctx_));
+    const int32_t nBatch = static_cast<int32_t>(llama_n_batch(ctx_));
+    nPrompt = std::clamp(nPrompt, 1, std::min(nBatch, nCtx / 2));
+    nGen = std::clamp(nGen, 1, nCtx - nPrompt - 1);
+    const int32_t nVocab = llama_vocab_n_tokens(vocab);
+    std::vector<llama_token> toks(static_cast<size_t>(nPrompt));
+    for (int32_t i = 0; i < nPrompt; ++i) toks[static_cast<size_t>(i)] = static_cast<llama_token>((i * 7919 + 13) % std::max(1, nVocab));
+    llama_memory_clear(llama_get_memory(ctx_), true);
+    const auto t0 = std::chrono::steady_clock::now();
+    if (llama_decode(ctx_, llama_batch_get_one(toks.data(), nPrompt)) != 0) { b.error = "decode pp falhou"; return b; }
+    const auto t1 = std::chrono::steady_clock::now();
+    llama_token tok = toks.back();
+    for (int32_t g = 0; g < nGen; ++g) {
+        tok = static_cast<llama_token>((tok * 31 + 17) % std::max(1, nVocab));
+        if (llama_decode(ctx_, llama_batch_get_one(&tok, 1)) != 0) { b.error = "decode tg falhou"; break; }
+        b.nGen++;
+    }
+    const auto t2 = std::chrono::steady_clock::now();
+    llama_memory_clear(llama_get_memory(ctx_), true);
+    b.nPrompt = nPrompt;
+    const double pp = std::chrono::duration<double>(t1 - t0).count();
+    const double tg = std::chrono::duration<double>(t2 - t1).count();
+    b.promptTps = pp > 0 ? nPrompt / pp : 0.0;
+    b.genTps = tg > 0 ? b.nGen / tg : 0.0;
+    b.ok = b.error.empty();
+#else
+    (void)nPrompt; (void)nGen;
+    b.error = "compilado sem llama.cpp";
+#endif
+    return b;
+}
+
+std::string LlmEngine::systemInfo() {
+#if defined(GIRASSOL_HAS_LLAMA)
+    const char* s = llama_print_system_info();
+    return s ? std::string(s) : std::string();
+#else
+    return "sem llama.cpp";
 #endif
 }
 

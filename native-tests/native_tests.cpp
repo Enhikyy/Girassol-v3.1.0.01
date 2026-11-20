@@ -12,7 +12,10 @@
 #include "evolution/map_elites_aurora.hpp"
 #include "audio/ambient_binaural_synth.hpp"
 #include "forge/lora_trainer_realtime.hpp"
+#include "hardware/cpu_features.hpp"
+#include "hardware/proc_memory.hpp"
 #include "hardware/soc_hardware_probe.hpp"
+#include "common/utf8.hpp"
 #include "llm/llm_engine.hpp"
 #include "navigation/grid_astar.hpp"
 #include <cstring>
@@ -134,6 +137,46 @@ static void llmTest() {
     CHECK(!bad.ok, "gramática inválida é rejeitada");
     eng.unload();
     CHECK(!eng.loaded(), "descarregamento do modelo");
+
+    // benchmark tokens/s (pp + tg), mesmo caminho usado pelo botão da aba Sistema
+    girassol::llm::LlmEngine eb;
+    CHECK(eb.load(path, 2, 512, &err), "recarrega para benchmark");
+    const auto bm = eb.bench(32, 16);
+    std::printf("bench: pp=%.1f tok/s tg=%.1f tok/s (%d+%d) %s\n", bm.promptTps, bm.genTps, bm.nPrompt, bm.nGen, bm.error.c_str());
+    CHECK(bm.ok && bm.promptTps > 0 && bm.genTps > 0, "benchmark de tokens/s do llama.cpp");
+    const std::string si = girassol::llm::LlmEngine::systemInfo();
+    std::printf("llama system_info: %s\n", si.c_str());
+    CHECK(!si.empty(), "llama_print_system_info disponível");
+    eb.unload();
+}
+
+static void cpuFeatureTests() {
+    using namespace girassol::hw;
+    // Snapdragon 695 (Cortex-A78 + A55) / Helio G99 (A76 + A55): ASIMD, FPHP, ASIMDHP, ASIMDDP; sem I8MM
+    const uint64_t a78 = kHwcapAsimd | kHwcapFphp | kHwcapAsimdhp | kHwcapAsimddp | 1ULL; // +FP
+    auto f = decodeAarch64Hwcaps(a78, 0);
+    CHECK(f.neon && f.dotprod && f.fp16 && !f.i8mm, "decodifica HWCAP do Cortex-A78");
+    CHECK(selectLlmVariant(f, true) == LlmVariant::DotProd, "Cortex-A78 → variante dotprod (sem i8mm → sem SIGILL)");
+    auto g = decodeAarch64Hwcaps(a78 | kHwcapSve, kHwcap2I8mm | kHwcap2Sve2);
+    CHECK(g.i8mm && g.sve2, "decodifica HWCAP2 I8MM/SVE2");
+    CHECK(selectLlmVariant(g, true) == LlmVariant::I8mm, "ARMv9 com i8mm → variante i8mm");
+    auto h = decodeAarch64Hwcaps(kHwcapAsimd | kHwcapFphp | kHwcapAsimddp, kHwcap2I8mm);
+    CHECK(!h.fp16 && selectLlmVariant(h, true) == LlmVariant::Base, "FPHP sem ASIMDHP → base");
+    auto a53 = decodeAarch64Hwcaps(kHwcapAsimd, 0);
+    CHECK(selectLlmVariant(a53, true) == LlmVariant::Base, "Cortex-A53 → base");
+    CHECK(selectLlmVariant(g, false) == LlmVariant::Base, "build não-arm64 → base");
+    CHECK(describeCpuFeatures(f) == "NEON=1 DOTPROD=1 FP16=1 I8MM=0 SVE=0 SVE2=0", "descrição das flags SIMD");
+
+    const std::string status = "Name:\tgirassol\nVmPeak:\t 9000 kB\nVmSize:\t 8000 kB\nVmHWM:\t  1900000 kB\nVmRSS:\t  1234567 kB\n"
+                               "RssAnon:\t  1000 kB\nRssFile:\t 2000 kB\nVmSwap:\t 0 kB\n";
+    auto m = parseProcStatus(status);
+    CHECK(m.vmRssKb == 1234567 && m.vmHwmKb == 1900000 && m.vmSizeKb == 8000, "parse de /proc/self/status");
+    CHECK(m.rssAnonKb == 1000 && m.rssFileKb == 2000 && m.vmSwapKb == 0, "parse RssAnon/RssFile/VmSwap");
+    CHECK(parseKbField("XVmRSS: 5 kB\n", "VmRSS") == -1, "campo só casa no início de linha");
+    auto self = readSelfProcMemory();
+    std::printf("proc: rss=%lld kB hwm=%lld kB\n", (long long)self.vmRssKb, (long long)self.vmHwmKb);
+    CHECK(self.vmRssKb > 0 && self.vmHwmKb >= self.vmRssKb, "VmRSS/VmHWM reais do processo");
+    CHECK(girassol::sanitizeUtf8(std::string("ok\xff\xc3")) .find('\xff') == std::string::npos, "sanitização UTF-8");
 }
 
 int main() {
@@ -189,6 +232,7 @@ int main() {
     for (size_t i = 0; i + 1 < buf.size(); i += 2) diffLR += std::fabs(buf[i] - buf[i + 1]);
     CHECK(diffLR > 0.01f, "canais esquerdo/direito diferem (batimento binaural)");
 
+    cpuFeatureTests();
     llmTest();
 
     std::printf(gFailures == 0 ? "TODOS OS TESTES NATIVOS PASSARAM\n" : "%d FALHA(S)\n", gFailures);

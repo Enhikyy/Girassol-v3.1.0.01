@@ -9,7 +9,8 @@
 #include "../evolution/map_elites_aurora.hpp"
 #include "../navigation/grid_astar.hpp"
 #include "../audio/aaudio_engine.hpp"
-#include "../llm/llm_engine.hpp"
+#include "../hardware/cpu_features.hpp"
+#include "../hardware/proc_memory.hpp"
 #include <cmath>
 #include <cstring>
 #include "../audio/binaural_hrtf_spatializer.hpp"
@@ -32,28 +33,13 @@ std::unordered_map<int64_t, std::unique_ptr<girassol::tsetlin::PersistentTsetlin
 std::unordered_map<int64_t, std::unique_ptr<AuroraArchiveBundle>> gQdPool;
 std::mutex gAudioMutex;
 std::unique_ptr<girassol::audio::AAudioEngine> gAudio;
-girassol::llm::LlmEngine gLlm;
-
-// NewStringUTF exige "Modified UTF-8" válido; tokens podem cortar sequências multibyte.
-std::string sanitizeUtf8(const std::string& in) {
-    std::string out;
-    out.reserve(in.size());
-    size_t i = 0;
-    while (i < in.size()) {
-        const unsigned char c = static_cast<unsigned char>(in[i]);
-        size_t len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : 0;
-        if (len == 0 || i + len > in.size()) { ++i; continue; }
-        bool ok = true;
-        for (size_t k = 1; k < len; ++k) if ((static_cast<unsigned char>(in[i + k]) >> 6) != 0x2) ok = false;
-        if (ok && c != 0) out.append(in, i, len);
-        i += ok ? len : 1;
-    }
-    return out;
-}
 
 } // namespace
 
 extern "C" {
+
+// Ponto de entrada exportado (version script). Sem registro dinâmico: os nomes Java_* bastam.
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM*, void*) { return JNI_VERSION_1_6; }
 
 // ==================== 1. TSETLIN MACHINE ====================
 
@@ -344,63 +330,30 @@ Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLoraTrain(
     return arr;
 }
 
-// ==================== 5b. MOTOR LLM (llama.cpp + GGUF + GBNF) ====================
+// ==================== 5b. CPU SIMD + MEMÓRIA DO PROCESSO ====================
+// O motor LLM vive em bibliotecas separadas (libgirassol_llm_{base,dotprod,i8mm}.so),
+// escolhidas em runtime pelo HWCAP abaixo — o núcleo nunca usa instruções além de armv8-a.
 
-JNIEXPORT jboolean JNICALL
-Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLlmAvailable(JNIEnv*, jobject) {
-    return girassol::llm::LlmEngine::available() ? JNI_TRUE : JNI_FALSE;
+// [neon, dotprod, fp16, i8mm, sve, sve2, aarch64, variante recomendada (0 base,1 dotprod,2 i8mm)]
+JNIEXPORT jintArray JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeCpuFeatures(JNIEnv* env, jobject) {
+    const auto f = girassol::hw::detectCpuFeatures();
+    const bool a64 = girassol::hw::isAarch64Build();
+    const jint v[8] = {f.neon, f.dotprod, f.fp16, f.i8mm, f.sve, f.sve2, a64,
+                       static_cast<jint>(girassol::hw::selectLlmVariant(f, a64))};
+    jintArray arr = env->NewIntArray(8);
+    if (arr) env->SetIntArrayRegion(arr, 0, 8, v);
+    return arr;
 }
 
-JNIEXPORT jstring JNICALL
-Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLlmLoad(JNIEnv* env, jobject, jstring pathStr, jint threads, jint nCtx) {
-    const char* p = env->GetStringUTFChars(pathStr, nullptr);
-    std::string path(p ? p : "");
-    if (p) env->ReleaseStringUTFChars(pathStr, p);
-    std::string err;
-    bool ok = gLlm.load(path, threads, nCtx, &err);
-    const std::string s = ok ? std::string() : err;
-    return env->NewStringUTF(s.c_str());
-}
-
-JNIEXPORT void JNICALL
-Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLlmUnload(JNIEnv*, jobject) {
-    gLlm.requestAbort();
-    gLlm.unload();
-}
-
-JNIEXPORT void JNICALL
-Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLlmAbort(JNIEnv*, jobject) {
-    gLlm.requestAbort();
-}
-
-JNIEXPORT jstring JNICALL
-Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLlmDescribe(JNIEnv* env, jobject) {
-    const std::string s = gLlm.loaded() ? (gLlm.description() + "|" + std::to_string(gLlm.modelBytes())) : std::string();
-    return env->NewStringUTF(s.c_str());
-}
-
-// Retorna [texto, erro, promptTokens, genTokens, millis, tokens/s].
-JNIEXPORT jobjectArray JNICALL
-Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLlmGenerate(
-    JNIEnv* env, jobject, jstring sysStr, jstring userStr, jstring grammarStr, jint maxTokens
-) {
-    auto read = [&](jstring js) {
-        const char* c = js ? env->GetStringUTFChars(js, nullptr) : nullptr;
-        std::string s(c ? c : "");
-        if (c) env->ReleaseStringUTFChars(js, c);
-        return s;
-    };
-    const auto r = gLlm.generate(read(sysStr), read(userStr), read(grammarStr), maxTokens);
-    jclass strCls = env->FindClass("java/lang/String");
-    jobjectArray out = env->NewObjectArray(6, strCls, nullptr);
-    const std::string vals[6] = {sanitizeUtf8(r.text), r.error, std::to_string(r.promptTokens), std::to_string(r.genTokens),
-                                 std::to_string(r.millis), std::to_string(r.tokensPerSecond)};
-    for (int i = 0; i < 6; ++i) {
-        jstring js = env->NewStringUTF(vals[i].c_str());
-        env->SetObjectArrayElement(out, i, js);
-        env->DeleteLocalRef(js);
-    }
-    return out;
+// [VmRSS, VmHWM, VmSize, RssAnon, RssFile, VmSwap] em kB (-1 = indisponível).
+JNIEXPORT jlongArray JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeProcMemory(JNIEnv* env, jobject) {
+    const auto m = girassol::hw::readSelfProcMemory();
+    const jlong v[6] = {m.vmRssKb, m.vmHwmKb, m.vmSizeKb, m.rssAnonKb, m.rssFileKb, m.vmSwapKb};
+    jlongArray arr = env->NewLongArray(6);
+    if (arr) env->SetLongArrayRegion(arr, 0, 6, v);
+    return arr;
 }
 
 // ==================== 6. HARDWARE / AUTOTESTE ====================

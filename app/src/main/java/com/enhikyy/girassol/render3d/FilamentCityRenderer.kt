@@ -20,6 +20,7 @@ import com.google.android.filament.RenderableManager
 import com.google.android.filament.Renderer
 import com.google.android.filament.Scene
 import com.google.android.filament.SwapChain
+import com.google.android.filament.SwapChainFlags
 import com.google.android.filament.ToneMapper
 import com.google.android.filament.VertexBuffer
 import com.google.android.filament.View
@@ -32,7 +33,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /** Telemetria do viewport 3D, lida pela faixa de status e pela aba Sistema. */
-data class Render3dStats(val active: Boolean = false, val fps: Double = 0.0, val vertices: Int = 0, val citizens: Int = 0, val error: String = "")
+data class Render3dStats(val active: Boolean = false, val fps: Double = 0.0, val vertices: Int = 0, val citizens: Int = 0, val error: String = "",
+    val effectLevel: String = "")
 
 object Render3dTelemetry {
     private val _stats = MutableStateFlow(Render3dStats())
@@ -46,7 +48,11 @@ object Render3dTelemetry {
  * principal (Choreographer). Limitado a ~30 FPS para operação contínua sem estrangulamento
  * térmico; resolução dinâmica reduz a escala de renderização se a GPU não acompanhar.
  */
-class FilamentCityRenderer(private val context: Context, private val surfaceView: SurfaceView) {
+class FilamentCityRenderer(
+    private val context: Context,
+    private val surfaceView: SurfaceView?,
+    initialLevel: EffectLevel = EffectLevel.FULL
+) {
     companion object {
         private const val TAG = "GirassolFilament"
         private const val TARGET_FRAME_NS = 1_000_000_000L / 30
@@ -56,6 +62,15 @@ class FilamentCityRenderer(private val context: Context, private val surfaceView
             return filamentReady
         }
     }
+
+    /** Nível de efeito ativo (ver [EffectLevel]); pode descer em runtime via [setEffectLevel]. */
+    var level: EffectLevel = initialLevel
+        private set
+    private var headless = false
+    private var lastSnapshot: WorldRenderSnapshot? = null
+    private val fpsGovernor = FpsGovernor()
+    /** Chamado quando o FPS fica abaixo do piso por tempo prolongado (thread principal). */
+    var onFpsLow: ((EffectLevel) -> Unit)? = null
 
     val camera = OrbitCamera()
     private lateinit var engine: Engine
@@ -103,25 +118,8 @@ class FilamentCityRenderer(private val context: Context, private val surfaceView
 
     /** Cria o Engine e os recursos; lança exceção se o dispositivo não suportar (ex.: sem GLES 3). */
     fun init() {
-        check(ensureFilament()) { "biblioteca Filament não carregou" }
-        engine = Engine.create()
-        renderer = engine.createRenderer()
-        scene = engine.createScene()
-        view = engine.createView()
-        fCamera = engine.createCamera(EntityManager.get().create())
-        view.setScene(scene)
-        view.setCamera(fCamera)
-        renderer.setClearOptions(Renderer.ClearOptions().apply { clear = true; clearColor = doubleArrayOf(0.0, 0.0, 0.0, 1.0) })
-        fCamera.setExposure(1.0f)
-        configurePostProcessing()
-        cityMat = loadMaterial("materials/city.filamat")
-        glowMat = loadMaterial("materials/glow.filamat")
-        cityMi = cityMat.createInstance().apply { setParameter("tint", 1f, 1f, 1f, 1f); setParameter("emissiveBoost", 1.2f) }
-        glowMi = glowMat.createInstance().apply { setParameter("size", 0.55f); setParameter("intensity", 1.0f) }
-        val agentMesh = CityMeshBuilder.citizenMesh()
-        agentVb = colorVertexBuffer(agentMesh.positions, agentMesh.colors)
-        agentIb = indexBuffer(agentMesh.indices)
-        agentIndexCount = agentMesh.indices.size
+        val sv = checkNotNull(surfaceView) { "init() exige SurfaceView; use initHeadless()" }
+        initCore()
         uiHelper.setRenderCallback(object : UiHelper.RendererCallback {
             override fun onNativeWindowChanged(surface: Surface) {
                 swapChain?.let { engine.destroySwapChain(it) }
@@ -137,50 +135,123 @@ class FilamentCityRenderer(private val context: Context, private val surfaceView
                 updateProjection()
             }
         })
-        uiHelper.attachTo(surfaceView)
+        uiHelper.attachTo(sv)
         initialized = true
-        Render3dTelemetry.set(Render3dStats(active = true))
+        Render3dTelemetry.set(Render3dStats(active = true, effectLevel = level.label))
     }
 
-    /** Pós-processamento "Kodak 500T / 70 mm": bloom suave, sombras profundas, balanço tungstênio, vinheta e névoa liminar. */
-    private fun configurePostProcessing() {
-        if (isSoftwareGl()) {
-            // Rasterizadores por software (SwiftShader do emulador) não compilam os shaders de
-            // pós-processamento do Filament (FXAA aborta o processo). Renderiza a cena sem pós.
+    /** Modo fora da tela (sonda de GPU): swap chain headless com os mesmos materiais e pós. */
+    fun initHeadless(width: Int, height: Int) {
+        headless = true
+        initCore()
+        swapChain = engine.createSwapChain(width, height, SwapChainFlags.CONFIG_DEFAULT)
+        widthPx = width; heightPx = height
+        view.setViewport(Viewport(0, 0, width, height))
+        updateProjection()
+        initialized = true
+    }
+
+    /** Renderiza [frames] quadros fora da tela e espera a GPU (força a compilação dos shaders). */
+    fun renderHeadless(frames: Int): Int {
+        check(headless && initialized)
+        val sc = swapChain ?: return 0
+        var done = 0
+        var attempts = 0
+        while (done < frames && attempts < frames * 4) {
+            attempts++
+            night = done % 2 == 1
+            applyDayNight()
+            val eye = camera.eye(); val tgt = camera.target()
+            fCamera.lookAt(eye.x.toDouble(), eye.y.toDouble(), eye.z.toDouble(), tgt.x.toDouble(), tgt.y.toDouble(), tgt.z.toDouble(), 0.0, 1.0, 0.0)
+            if (renderer.beginFrame(sc, System.nanoTime())) {
+                renderer.render(view)
+                renderer.endFrame()
+                done++
+            }
+            Thread.sleep(8)
+        }
+        engine.flushAndWait()
+        return done
+    }
+
+    private fun initCore() {
+        check(ensureFilament()) { "biblioteca Filament não carregou" }
+        engine = Engine.create()
+        renderer = engine.createRenderer()
+        scene = engine.createScene()
+        view = engine.createView()
+        fCamera = engine.createCamera(EntityManager.get().create())
+        view.setScene(scene)
+        view.setCamera(fCamera)
+        renderer.setClearOptions(Renderer.ClearOptions().apply { clear = true; clearColor = doubleArrayOf(0.0, 0.0, 0.0, 1.0) })
+        fCamera.setExposure(1.0f)
+        applyEffectLevel(level)
+        cityMat = loadMaterial("materials/city.filamat")
+        glowMat = loadMaterial("materials/glow.filamat")
+        cityMi = cityMat.createInstance().apply { setParameter("tint", 1f, 1f, 1f, 1f); setParameter("emissiveBoost", 1.2f) }
+        glowMi = glowMat.createInstance().apply { setParameter("size", 0.55f); setParameter("intensity", 1.0f) }
+        val agentMesh = CityMeshBuilder.citizenMesh()
+        agentVb = colorVertexBuffer(agentMesh.positions, agentMesh.colors)
+        agentIb = indexBuffer(agentMesh.indices)
+        agentIndexCount = agentMesh.indices.size
+    }
+
+    /**
+     * Pós-processamento "Kodak 500T / 70 mm" graduado por [EffectLevel]: bloom suave, sombras
+     * profundas, balanço tungstênio, vinheta, névoa liminar e FXAA só nos níveis que a GPU
+     * comprovadamente compila (sonda isolada).
+     */
+    private fun applyEffectLevel(l: EffectLevel) {
+        view.setShadowingEnabled(false)
+        if (!l.postProcessing) {
             view.setPostProcessingEnabled(false)
-            view.setShadowingEnabled(false)
-            Log.w(TAG, "GL por software detectado: pós-processamento desativado")
             return
         }
         view.setPostProcessingEnabled(true)
-        view.setAntiAliasing(View.AntiAliasing.FXAA)
-        view.setDithering(View.Dithering.TEMPORAL)
-        view.setShadowingEnabled(false)
+        view.setAntiAliasing(if (l.fxaa) View.AntiAliasing.FXAA else View.AntiAliasing.NONE)
+        view.setDithering(if (l.temporalDithering) View.Dithering.TEMPORAL else View.Dithering.NONE)
         view.setBloomOptions(View.BloomOptions().apply {
-            enabled = true; strength = 0.22f; levels = 6; resolution = 256; threshold = true; highlight = 1000f; lensFlare = false
+            enabled = l.bloomLevels > 0; strength = 0.22f; levels = l.bloomLevels.coerceAtLeast(1); resolution = if (l.bloomLevels >= 6) 256 else 192
+            threshold = true; highlight = 1000f; lensFlare = false
         })
         view.setVignetteOptions(View.VignetteOptions().apply {
-            enabled = true; midPoint = 0.42f; roundness = 0.55f; feather = 0.62f; color = floatArrayOf(0f, 0f, 0f, 1f)
+            enabled = l.vignette; midPoint = 0.42f; roundness = 0.55f; feather = 0.62f; color = floatArrayOf(0f, 0f, 0f, 1f)
         })
         view.setFogOptions(View.FogOptions().apply {
-            enabled = true; distance = 14f; density = 0.028f; maximumOpacity = 0.75f; height = 0f; heightFalloff = 0.35f
+            enabled = l.fog; distance = 14f; density = 0.028f; maximumOpacity = 0.75f; height = 0f; heightFalloff = 0.35f
             color = floatArrayOf(0.10f, 0.085f, 0.06f)
         })
-        view.setDynamicResolutionOptions(View.DynamicResolutionOptions().apply { enabled = true; minScale = 0.55f; maxScale = 1.0f; quality = View.QualityLevel.LOW })
-        colorGrading = ColorGrading.Builder()
-            .toneMapper(ToneMapper.Filmic())
-            .whiteBalance(-0.10f, 0.03f)
-            .shadowsMidtonesHighlights(
-                floatArrayOf(0.94f, 1.0f, 1.08f, 0f),
-                floatArrayOf(1.03f, 1.0f, 0.97f, 0f),
-                floatArrayOf(1.08f, 1.0f, 0.90f, 0f),
-                floatArrayOf(0f, 0.30f, 0.55f, 1f))
-            .curves(floatArrayOf(1.18f, 1.18f, 1.12f), floatArrayOf(1f, 1f, 1f), floatArrayOf(1f, 1f, 1f))
-            .contrast(1.12f)
-            .saturation(0.88f)
-            .vibrance(1.05f)
-            .build(engine)
-        view.setColorGrading(colorGrading)
+        view.setDynamicResolutionOptions(View.DynamicResolutionOptions().apply {
+            enabled = l.dynamicResolution; minScale = 0.55f; maxScale = 1.0f; quality = View.QualityLevel.LOW
+        })
+        if (l.colorGrading) {
+            if (!::colorGrading.isInitialized) colorGrading = ColorGrading.Builder()
+                .toneMapper(ToneMapper.Filmic())
+                .whiteBalance(-0.10f, 0.03f)
+                .shadowsMidtonesHighlights(
+                    floatArrayOf(0.94f, 1.0f, 1.08f, 0f),
+                    floatArrayOf(1.03f, 1.0f, 0.97f, 0f),
+                    floatArrayOf(1.08f, 1.0f, 0.90f, 0f),
+                    floatArrayOf(0f, 0.30f, 0.55f, 1f))
+                .curves(floatArrayOf(1.18f, 1.18f, 1.12f), floatArrayOf(1f, 1f, 1f), floatArrayOf(1f, 1f, 1f))
+                .contrast(1.12f)
+                .saturation(0.88f)
+                .vibrance(1.05f)
+                .build(engine)
+            view.setColorGrading(colorGrading)
+        } else {
+            view.setColorGrading(null)
+        }
+    }
+
+    /** Troca o nível em runtime (fallback por FPS): reaplica o pós e os sprites de halação. */
+    fun setEffectLevel(l: EffectLevel) {
+        if (!initialized || l == level) return
+        level = l
+        applyEffectLevel(l)
+        lastSnapshot?.let { rebuildCity(it) }
+        fpsGovernor.reset()
+        Render3dTelemetry.update { it.copy(effectLevel = l.label) }
     }
 
     private fun loadMaterial(asset: String): Material {
@@ -243,7 +314,7 @@ class FilamentCityRenderer(private val context: Context, private val surfaceView
         scene.addEntity(cityEntity)
 
         val glow = CityMeshBuilder.glowSprites(s.widthTiles, s.tiles, s.objects)
-        if (glow.count > 0) {
+        if (glow.count > 0 && level.halationSprites) {
             val gvb = VertexBuffer.Builder().bufferCount(3).vertexCount(glow.count * 4)
                 .attribute(VertexBuffer.VertexAttribute.POSITION, 0, VertexBuffer.AttributeType.FLOAT3, 0, 12)
                 .attribute(VertexBuffer.VertexAttribute.UV0, 1, VertexBuffer.AttributeType.FLOAT2, 0, 8)
@@ -268,6 +339,7 @@ class FilamentCityRenderer(private val context: Context, private val surfaceView
     /** Recebe o snapshot imutável publicado pelo SimulationHub (thread principal). */
     fun update(s: WorldRenderSnapshot) {
         if (!initialized) return
+        lastSnapshot = s
         camera.boundsW = s.widthTiles.toFloat()
         val key = s.widthTiles.toLong() * 1_000_003L + s.tiles.contentHashCode() * 31L + s.objects.size
         if (key != meshKey) {
@@ -276,11 +348,7 @@ class FilamentCityRenderer(private val context: Context, private val surfaceView
             rebuildCity(s)
         }
         night = s.night
-        if (night) {
-            cityMi.setParameter("tint", 0.42f, 0.46f, 0.62f, 1f); cityMi.setParameter("emissiveBoost", 6.0f); glowMi.setParameter("intensity", 2.4f)
-        } else {
-            cityMi.setParameter("tint", 1.0f, 0.97f, 0.9f, 1f); cityMi.setParameter("emissiveBoost", 1.2f); glowMi.setParameter("intensity", 0.6f)
-        }
+        applyDayNight()
         val newTargets = HashMap<String, FloatArray>(s.agents.size * 2)
         val rm = engine.renderableManager
         for (a in s.agents) {
@@ -313,6 +381,14 @@ class FilamentCityRenderer(private val context: Context, private val surfaceView
         }
         targets = newTargets
         Render3dTelemetry.update { it.copy(vertices = vertexCount, citizens = agentEntities.size) }
+    }
+
+    private fun applyDayNight() {
+        if (night) {
+            cityMi.setParameter("tint", 0.42f, 0.46f, 0.62f, 1f); cityMi.setParameter("emissiveBoost", 6.0f); glowMi.setParameter("intensity", 2.4f)
+        } else {
+            cityMi.setParameter("tint", 1.0f, 0.97f, 0.9f, 1f); cityMi.setParameter("emissiveBoost", 1.2f); glowMi.setParameter("intensity", 0.6f)
+        }
     }
 
     private fun actionRgb(a: ActionType?): FloatArray {
@@ -373,7 +449,8 @@ class FilamentCityRenderer(private val context: Context, private val surfaceView
         if (span >= 1_000_000_000L) {
             val fps = fpsFrames / (span / 1e9)
             fpsFrames = 0; fpsWindowStart = frameTimeNanos
-            Render3dTelemetry.update { it.copy(active = true, fps = fps) }
+            Render3dTelemetry.update { it.copy(active = true, fps = fps, effectLevel = level.label) }
+            if (fpsGovernor.onSecond(fps)) onFpsLow?.invoke(level)
         }
         onFrame?.invoke()
     }
@@ -394,7 +471,7 @@ class FilamentCityRenderer(private val context: Context, private val surfaceView
         pause()
         if (!initialized) return
         initialized = false
-        uiHelper.detach()
+        if (!headless) uiHelper.detach()
         for ((_, pair) in agentEntities) { destroyRenderable(pair.first); engine.destroyMaterialInstance(pair.second) }
         agentEntities.clear(); visual.clear()
         destroyRenderable(cityEntity); destroyRenderable(glowEntity)
@@ -409,7 +486,7 @@ class FilamentCityRenderer(private val context: Context, private val surfaceView
         val camEntity = fCamera.entity
         engine.destroyCameraComponent(camEntity); EntityManager.get().destroy(camEntity)
         engine.destroy()
-        Render3dTelemetry.set(Render3dStats(active = false))
+        if (!headless) Render3dTelemetry.set(Render3dStats(active = false))
     }
 }
 

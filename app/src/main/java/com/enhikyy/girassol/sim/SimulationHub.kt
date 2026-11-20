@@ -135,9 +135,9 @@ object SimulationHub {
         }
     }
 
-    fun onTrimMemory(level: Int) {
-        LocalLlmManager.onTrimMemory(level)
-    }
+    /** O disjuntor (MemoryGuard) já descarrega o LLM; aqui só aliviamos caches do mundo. */
+    @Suppress("UNUSED_PARAMETER")
+    fun onTrimMemory(level: Int) = Unit
 
     fun start() {
         scope.launch {
@@ -281,6 +281,26 @@ object SimulationHub {
         persistSnapshot()
         _status.update { it.copy(running = false, seed = newSeed, rsiCycles = 0, restoredFromSnapshot = false, lastMessage = "Mundo reiniciado (semente $newSeed)") }
         publish(force = true)
+    }
+
+    /** Snapshot completo (cabeçalho GRS + SHA-256) para exportar como arquivo .grs. */
+    suspend fun exportSnapshotBytes(): ByteArray? = withContext(simDispatcher) {
+        if (!_status.value.loaded) null else WorldSnapshotCodec.encode(core.state)
+    }
+
+    /** Importa um .grs (valida cabeçalho e SHA-256) e substitui o mundo atual. */
+    suspend fun importSnapshot(bytes: ByteArray): String = withContext(simDispatcher) {
+        if (!_status.value.loaded) return@withContext "Mundo não carregado"
+        val state = runCatching { WorldSnapshotCodec.decode(bytes) }.getOrElse { return@withContext "Snapshot inválido: ${it.message}" }
+        val wasRunning = loopJob?.isActive == true
+        loopJob?.cancel(); loopJob = null
+        core = WorldCore(state, ports)
+        persistSnapshot()
+        _status.update { it.copy(running = false, seed = state.seed, restoredFromSnapshot = true,
+            lastMessage = "Snapshot .grs importado (tick ${state.tick}, semente ${state.seed})") }
+        publish(force = true)
+        if (wasRunning) start()
+        "Importado: tick ${state.tick} · ${bytes.size / 1024} KB"
     }
 
     fun persistedEventCount(): Long = if (::writer.isInitialized) writer.countRows("canonical_events") else 0L
