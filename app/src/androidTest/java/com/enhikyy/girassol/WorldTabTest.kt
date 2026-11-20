@@ -85,9 +85,13 @@ class WorldTabTest {
             rule.onNodeWithTag("world_viewport_2d").assertIsDisplayed()
             return
         }
-        val pos = WorldPickRegistry.positions.values.first()
-        // posição projetada = cabeça (y + 1.55); toque um pouco abaixo, no corpo
-        rule.onNodeWithTag("world_viewport_3d").performTouchInput { click(pos.copy(y = pos.y + 8f)) }
-        rule.waitUntilAtLeastOneExists(hasTestTag("agent_card"), 10_000)
+        // posição projetada = centro do corpo; tenta alguns cidadãos (eles se movem entre quadros)
+        var opened = false
+        for (pos in WorldPickRegistry.positions.values.take(5)) {
+            rule.onNodeWithTag("world_viewport_3d").performTouchInput { click(pos) }
+            opened = runCatching { rule.waitUntilAtLeastOneExists(hasTestTag("agent_card"), 4_000); true }.getOrDefault(false)
+            if (opened) break
+        }
+        assertTrue("toque 3D não selecionou nenhum cidadão", opened)
     }
 }

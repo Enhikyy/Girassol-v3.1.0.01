@@ -138,6 +138,23 @@ object Raycast {
         return best
     }
 
+    /**
+     * Raycast com tolerância de toque: se o raio não cruza nenhuma caixa, escolhe o cidadão cujo
+     * centro projetado está mais perto do dedo, dentro de [slopPx] (alvos pequenos em telas de celular).
+     */
+    fun pickWithSlop(camera: OrbitCamera, sx: Float, sy: Float, w: Float, h: Float, agents: Map<String, V3>, slopPx: Float): String? {
+        pick(camera.ray(sx, sy, w, h), agents)?.let { return it }
+        var best: String? = null
+        var bestD = slopPx * slopPx
+        for ((id, p) in agents) {
+            val s = camera.project(V3(p.x, p.y + AGENT_HEIGHT * 0.5f, p.z), w, h) ?: continue
+            val dx = s.first - sx; val dy = s.second - sy
+            val d = dx * dx + dy * dy
+            if (d <= bestD) { bestD = d; best = id }
+        }
+        return best
+    }
+
     /** Interseção com o plano do chão (y = 0). */
     fun groundHit(ray: Ray): V3? {
         if (kotlin.math.abs(ray.dir.y) < 1e-6f) return null

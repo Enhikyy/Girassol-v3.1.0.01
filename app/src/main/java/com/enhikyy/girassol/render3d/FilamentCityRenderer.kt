@@ -334,7 +334,9 @@ class FilamentCityRenderer(private val context: Context, private val surfaceView
     fun agentPositions(): Map<String, V3> = visual.mapValues { (_, p) -> V3(p[0], p[1], p[2]) }
     fun viewSize(): Pair<Float, Float> = widthPx.toFloat() to heightPx.toFloat()
 
-    fun pick(sx: Float, sy: Float): String? = Raycast.pick(camera.ray(sx, sy, widthPx.toFloat(), heightPx.toFloat()), agentPositions())
+    /** Raycast 3D (AABB) com tolerância de ~24 dp em espaço de tela. */
+    fun pick(sx: Float, sy: Float): String? = Raycast.pickWithSlop(camera, sx, sy, widthPx.toFloat(), heightPx.toFloat(),
+        agentPositions(), 24f * context.resources.displayMetrics.density)
 
     private fun updateProjection() {
         fCamera.setProjection(camera.fovDeg.toDouble(), widthPx.toDouble() / heightPx, 0.3, 600.0, Camera.Fov.VERTICAL)

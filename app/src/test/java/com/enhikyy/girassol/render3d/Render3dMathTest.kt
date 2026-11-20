@@ -24,6 +24,15 @@ class Render3dMathTest {
     }
 
     @Test
+    fun pickWithSlopToleratesNearMiss() {
+        val cam = OrbitCamera(targetX = 20f, targetZ = 20f, yaw = 0.78f, pitch = 0.8f, distance = 30f)
+        val agents = mapOf("a" to V3(20.5f, 0f, 20.5f))
+        val (sx, sy) = cam.project(V3(20.5f, Raycast.AGENT_HEIGHT * 0.5f, 20.5f), w, h)!!
+        assertNull(Raycast.pickWithSlop(cam, sx + 400f, sy, w, h, agents, 40f))
+        assertEquals("a", Raycast.pickWithSlop(cam, sx + 30f, sy + 20f, w, h, agents, 60f))
+    }
+
+    @Test
     fun targetProjectsToScreenCenter() {
         val cam = OrbitCamera(targetX = 10f, targetZ = 30f)
         val (sx, sy) = cam.project(cam.target(), w, h)!!

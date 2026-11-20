@@ -85,7 +85,7 @@ fun Filament3DView(
         val (w, h) = r.viewSize()
         val out = HashMap<String, Offset>()
         for ((id, p) in r.agentPositions()) {
-            val s = r.camera.project(V3(p.x, p.y + 1.55f, p.z), w, h) ?: continue
+            val s = r.camera.project(V3(p.x, p.y + Raycast.AGENT_HEIGHT * 0.5f, p.z), w, h) ?: continue
             if (s.first in -40f..(w + 40f) && s.second in -40f..(h + 40f)) out[id] = Offset(s.first, s.second)
         }
         WorldPickRegistry.mode = "3D"
