@@ -63,19 +63,19 @@ abstract class CompileFilamentMaterials : DefaultTask() {
 
 val llamaDirOverride = providers.gradleProperty("girassol.llamaDir").orNull
 val llamaDisabled = providers.gradleProperty("girassol.noLlama").map { it.toBoolean() }.getOrElse(false)
-val llamaDir: File = llamaDirOverride?.let { file(it) } ?: thirdParty.get().dir("llama.cpp-$llamaVersion").asFile
+val llamaDir: File = llamaDirOverride?.let { file(it) } ?: thirdParty.get().dir("llama/llama.cpp-$llamaVersion").asFile
 
 val downloadLlama by tasks.registering(DownloadVerified::class) {
     enabled = llamaDirOverride == null && !llamaDisabled
     url.set("https://github.com/ggml-org/llama.cpp/archive/refs/tags/v$llamaVersion.tar.gz")
     sha256.set(llamaSha256)
-    dest.set(thirdParty.map { it.file("llama.cpp-$llamaVersion.tar.gz") })
+    dest.set(thirdParty.map { it.file("downloads/llama.cpp-$llamaVersion.tar.gz") })
 }
 val prepareLlama by tasks.registering(Copy::class) {
     enabled = llamaDirOverride == null && !llamaDisabled
     dependsOn(downloadLlama)
     from(downloadLlama.flatMap { it.dest }.map { tarTree(resources.gzip(it.asFile)) })
-    into(thirdParty)
+    into(thirdParty.map { it.dir("llama") })
 }
 
 val matcOverride = providers.gradleProperty("girassol.matc").orNull
@@ -83,7 +83,7 @@ val downloadFilamentTools by tasks.registering(DownloadVerified::class) {
     enabled = matcOverride == null
     url.set("https://github.com/google/filament/releases/download/v$filamentVersion/filament-v$filamentVersion-linux.tgz")
     sha256.set(filamentToolsSha256)
-    dest.set(thirdParty.map { it.file("filament-v$filamentVersion-linux.tgz") })
+    dest.set(thirdParty.map { it.file("downloads/filament-v$filamentVersion-linux.tgz") })
 }
 val prepareMatc by tasks.registering(Copy::class) {
     enabled = matcOverride == null
