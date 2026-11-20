@@ -136,7 +136,7 @@ jobs:
           disable-animations: true
           script: |
             adb logcat -c || true
-            adb logcat -v threadtime > logcat-emulador.txt 2>&1 & ./gradlew --no-daemon :app:connectedDebugAndroidTest -Pgirassol.abis=x86_64; rc=$?; sleep 2; kill %1 2>/dev/null; exit $rc
+            adb logcat -v threadtime > logcat-emulador.txt 2>&1 & LP=$!; ./gradlew --no-daemon :app:connectedDebugAndroidTest -Pgirassol.abis=x86_64; rc=$?; sleep 2; kill $LP 2>/dev/null; exit $rc
       - name: Relatórios de instrumentação
         if: always()
         uses: actions/upload-artifact@v4
