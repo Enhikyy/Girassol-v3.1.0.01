@@ -9,7 +9,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateRotation
 import androidx.compose.foundation.gestures.calculateZoom
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -120,26 +119,35 @@ fun Filament3DView(
             Modifier.fillMaxSize()
                 .pointerInput(renderer) {
                     val r = renderer ?: return@pointerInput
+                    val slop = viewConfiguration.touchSlop
                     awaitEachGesture {
-                        awaitFirstDown(requireUnconsumed = false)
+                        // Um único detector: toque curto sem arrasto = seleção por raycast; senão câmera.
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        var moved = 0f
+                        var multi = false
+                        var lastPos = down.position
                         do {
                             val event = awaitPointerEvent()
                             val pressed = event.changes.count { it.pressed }
                             val pan = event.calculatePan()
                             if (pressed >= 2) {
+                                multi = true
                                 r.camera.zoom(event.calculateZoom())
                                 r.camera.rotate(event.calculateRotation())
                                 r.camera.pan(pan.x, pan.y, size.height.toFloat())
                             } else if (pressed == 1) {
-                                r.camera.orbit(pan.x, pan.y, size.height.toFloat())
+                                moved += pan.getDistance()
+                                if (moved > slop) r.camera.orbit(pan.x, pan.y, size.height.toFloat())
                             }
-                            if (pan.getDistance() > 0.5f) event.changes.forEach { if (it.positionChanged()) it.consume() }
+                            event.changes.firstOrNull { it.id == down.id }?.let { lastPos = it.position }
+                            if (moved > slop || multi) event.changes.forEach { if (it.positionChanged()) it.consume() }
                         } while (event.changes.any { it.pressed })
+                        if (!multi && moved <= slop) {
+                            val id = r.pick(lastPos.x, lastPos.y)
+                            Log.i("GirassolFilament", "toque 3D em (${lastPos.x.toInt()}, ${lastPos.y.toInt()}) → ${id ?: "nenhum"}")
+                            onPick(id)
+                        }
                     }
-                }
-                .pointerInput(renderer) {
-                    val r = renderer ?: return@pointerInput
-                    detectTapGestures { p -> onPick(r.pick(p.x, p.y)) }
                 }
         )
     }

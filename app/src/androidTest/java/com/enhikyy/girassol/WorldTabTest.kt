@@ -88,7 +88,10 @@ class WorldTabTest {
         // posição projetada = centro do corpo; tenta alguns cidadãos (eles se movem entre quadros)
         var opened = false
         for (pos in WorldPickRegistry.positions.values.take(5)) {
-            rule.onNodeWithTag("world_viewport_3d").performTouchInput { click(pos) }
+            rule.onNodeWithTag("world_viewport_3d").performTouchInput {
+                android.util.Log.i("WorldTabTest", "toque em $pos; nó ${width}x$height")
+                click(pos)
+            }
             opened = runCatching { rule.waitUntilAtLeastOneExists(hasTestTag("agent_card"), 4_000); true }.getOrDefault(false)
             if (opened) break
         }
