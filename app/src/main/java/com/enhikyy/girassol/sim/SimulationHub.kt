@@ -2,7 +2,12 @@ package com.enhikyy.girassol.sim
 
 import android.content.Context
 import android.util.Log
+import com.enhikyy.girassol.audio.AmbientAudioController
+import com.enhikyy.girassol.core.ports.CorePorts
 import com.enhikyy.girassol.core.rsi.RsiCoordinator
+import com.enhikyy.girassol.llm.LocalLlmManager
+import com.enhikyy.girassol.nativebridge.ModuleToggles
+import com.enhikyy.girassol.nativebridge.NativeModules
 import com.enhikyy.girassol.core.world.CitizenDetail
 import com.enhikyy.girassol.core.world.DashboardSnapshot
 import com.enhikyy.girassol.core.world.TelemetryInput
@@ -63,7 +68,9 @@ object SimulationHub {
 
     private lateinit var core: WorldCore
     private lateinit var writer: PersistenceWriter
-    private val rsi = RsiCoordinator()
+    @Volatile private var ports = CorePorts()
+    private val rsi = RsiCoordinator(portsFactory = { ports })
+    private var appContext: Context? = null
     private var loopJob: Job? = null
 
     private val _render = MutableStateFlow<WorldRenderSnapshot?>(null)
@@ -83,10 +90,17 @@ object SimulationHub {
         val app = context.applicationContext
         scope.launch {
             if (_status.value.loaded) return@launch
+            appContext = app
             _hardware.value = runCatching { HardwareAutoTuner.detect(app) }.getOrNull()
+            NativeModules.load(app)
+            val parity = NativeModules.verifyParity()
+            Log.i(TAG, "paridade nativa: ${parity.message}")
+            LocalLlmManager.init(app)
+            LocalLlmManager.setEnabled(NativeModules.toggles.value.localLlm)
+            ports = buildPorts(NativeModules.toggles.value)
             writer = PersistenceWriter(app)
             val restored = writer.loadLatestSnapshot()
-            core = if (restored != null) WorldCore(restored) else WorldCore.create(System.currentTimeMillis())
+            core = if (restored != null) WorldCore(restored, ports) else WorldCore.create(System.currentTimeMillis(), ports = ports)
             val cap = _hardware.value?.maxTicksPerSecond ?: 30
             _status.update {
                 it.copy(loaded = true, restoredFromSnapshot = restored != null, seed = core.state.seed,
@@ -95,7 +109,34 @@ object SimulationHub {
             }
             if (restored == null) persistSnapshot()
             publish(force = true)
+            if (NativeModules.toggles.value.binauralAudio) AmbientAudioController.start()
         }
+    }
+
+    /** Backends: C++ só quando o toggle está ligado E a paridade dourada passou; LLM opcional. */
+    private fun buildPorts(t: ModuleToggles) = CorePorts(
+        pathfinder = NativeModules.pathfinder(),
+        lora = NativeModules.loraTrainer(),
+        neural = if (t.localLlm) LocalLlmManager else null
+    )
+
+    /** Liga/desliga módulos nativos. O WorldCore é reconstruído sobre o MESMO estado na thread da simulação. */
+    fun updateModules(context: Context, transform: (ModuleToggles) -> ModuleToggles) {
+        NativeModules.update(context.applicationContext, transform)
+        val t = NativeModules.toggles.value
+        LocalLlmManager.setEnabled(t.localLlm)
+        if (t.binauralAudio && !AmbientAudioController.running) AmbientAudioController.start()
+        if (!t.binauralAudio && AmbientAudioController.running) AmbientAudioController.stop()
+        scope.launch {
+            if (!_status.value.loaded) return@launch
+            ports = buildPorts(t)
+            core = WorldCore(core.state, ports)
+            _status.update { it.copy(lastMessage = "Módulos: nav ${if (ports.pathfinder === com.enhikyy.girassol.core.ports.KotlinPathfinder) "Kotlin" else "C++"} · LoRA ${ports.lora.backend} · LLM ${if (ports.neural != null) "ligado" else "desligado"}") }
+        }
+    }
+
+    fun onTrimMemory(level: Int) {
+        LocalLlmManager.onTrimMemory(level)
     }
 
     fun start() {
@@ -129,6 +170,7 @@ object SimulationHub {
             else -> 0
         }
         telemetry = TelemetryInput(tier, (availableMemMb / 512) * 512, (batteryPct / 10) * 10, charging)
+        LocalLlmManager.setThermalTier(tier)
         _status.update { it.copy(thermalStatus = thermalStatus) }
     }
 
@@ -172,6 +214,8 @@ object SimulationHub {
         if (force || now - lastDashboardNs > 900_000_000L) {
             _dashboard.value = DashboardSnapshot.of(core.state)
             lastDashboardNs = now
+            AmbientAudioController.update(_dashboard.value, _render.value)
+            LocalLlmManager.maybeReload()
         }
     }
 
@@ -233,7 +277,7 @@ object SimulationHub {
         if (!_status.value.loaded) return@launch
         loopJob?.cancel(); loopJob = null
         writer.deleteAllSnapshots()
-        core = WorldCore.create(newSeed)
+        core = WorldCore.create(newSeed, ports = ports)
         persistSnapshot()
         _status.update { it.copy(running = false, seed = newSeed, rsiCycles = 0, restoredFromSnapshot = false, lastMessage = "Mundo reiniciado (semente $newSeed)") }
         publish(force = true)

@@ -7,7 +7,11 @@
 
 #include "../cognitive/tsetlin_machine.hpp"
 #include "../evolution/map_elites_aurora.hpp"
-#include "../navigation/recast_rvo2_nav.hpp"
+#include "../navigation/grid_astar.hpp"
+#include "../audio/aaudio_engine.hpp"
+#include "../llm/llm_engine.hpp"
+#include <cmath>
+#include <cstring>
 #include "../audio/binaural_hrtf_spatializer.hpp"
 #include "../forge/lora_trainer_realtime.hpp"
 #include "../hardware/soc_hardware_probe.hpp"
@@ -26,9 +30,26 @@ int64_t gNextHandle = 1;
 
 std::unordered_map<int64_t, std::unique_ptr<girassol::tsetlin::PersistentTsetlinMachine>> gTsetlinPool;
 std::unordered_map<int64_t, std::unique_ptr<AuroraArchiveBundle>> gQdPool;
-std::unordered_map<int64_t, std::unique_ptr<girassol::nav::DistrictNavMesh>> gNavPool;
-std::unordered_map<int64_t, std::unique_ptr<girassol::audio::BinauralHrtfMixer>> gAudioPool;
-std::unordered_map<int64_t, std::unique_ptr<girassol::forge::RealTimeLoraAdapter>> gLoraPool;
+std::mutex gAudioMutex;
+std::unique_ptr<girassol::audio::AAudioEngine> gAudio;
+girassol::llm::LlmEngine gLlm;
+
+// NewStringUTF exige "Modified UTF-8" válido; tokens podem cortar sequências multibyte.
+std::string sanitizeUtf8(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    size_t i = 0;
+    while (i < in.size()) {
+        const unsigned char c = static_cast<unsigned char>(in[i]);
+        size_t len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : 0;
+        if (len == 0 || i + len > in.size()) { ++i; continue; }
+        bool ok = true;
+        for (size_t k = 1; k < len; ++k) if ((static_cast<unsigned char>(in[i + k]) >> 6) != 0x2) ok = false;
+        if (ok && c != 0) out.append(in, i, len);
+        i += ok ? len : 1;
+    }
+    return out;
+}
 
 } // namespace
 
@@ -195,140 +216,192 @@ Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeMapElitesCoverage(J
     return (it != gQdPool.end()) ? it->second->archive.coverageRatio() : 0.0f;
 }
 
-// ==================== 3. NAVMESH + RVO2 / ORCA ====================
+// ==================== 3. NAVEGAÇÃO (A* estigmérgico, espelho do Kotlin) ====================
 
-JNIEXPORT jlong JNICALL
-Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeCreateNavWorld(
-    JNIEnv*, jobject, jint gridW, jint gridH, jfloat cellSize, jfloat originX, jfloat originZ
+JNIEXPORT jintArray JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeNavFindPathGrid(
+    JNIEnv* env, jobject, jint w, jintArray tilesArr, jint sx, jint sz, jint gx, jint gz,
+    jfloatArray trailArr, jfloatArray dangerArr
 ) {
-    std::lock_guard<std::mutex> lock(gRegistryMutex);
-    const int64_t id = gNextHandle++;
-    gNavPool[id] = std::make_unique<girassol::nav::DistrictNavMesh>(gridW, gridH, cellSize, originX, originZ);
-    return id;
-}
-
-JNIEXPORT void JNICALL
-Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeDestroyNavWorld(JNIEnv*, jobject, jlong handle) {
-    std::lock_guard<std::mutex> lock(gRegistryMutex);
-    gNavPool.erase(handle);
-}
-
-JNIEXPORT void JNICALL
-Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeNavBakeObstacles(
-    JNIEnv* env, jobject, jlong handle, jfloatArray flatBoxesMinXMinZMaxXMaxZ, jfloat clearance
-) {
-    if (!flatBoxesMinXMinZMaxXMaxZ) return;
-    const jsize len = env->GetArrayLength(flatBoxesMinXMinZMaxXMaxZ);
-    std::vector<float> raw(static_cast<size_t>(len));
-    env->GetFloatArrayRegion(flatBoxesMinXMinZMaxXMaxZ, 0, len, raw.data());
-
-    std::vector<girassol::nav::ObstacleBox2D> boxes;
-    for (size_t i = 0; i + 3 < raw.size(); i += 4) {
-        boxes.push_back({raw[i], raw[i + 1], raw[i + 2], raw[i + 3]});
+    if (!tilesArr || w <= 0 || env->GetArrayLength(tilesArr) < w * w) return env->NewIntArray(0);
+    thread_local girassol::nav::GridAStar astar;
+    thread_local std::vector<int32_t> tiles;
+    thread_local std::vector<float> trail, danger;
+    const jsize n = w * w;
+    tiles.resize(static_cast<size_t>(n));
+    env->GetIntArrayRegion(tilesArr, 0, n, tiles.data());
+    const float* tp = nullptr;
+    const float* dp = nullptr;
+    if (trailArr && env->GetArrayLength(trailArr) >= n) {
+        trail.resize(static_cast<size_t>(n));
+        env->GetFloatArrayRegion(trailArr, 0, n, trail.data());
+        tp = trail.data();
     }
-
-    std::lock_guard<std::mutex> lock(gRegistryMutex);
-    auto it = gNavPool.find(handle);
-    if (it != gNavPool.end()) {
-        it->second->bakeObstacles(boxes, clearance);
+    if (dangerArr && env->GetArrayLength(dangerArr) >= n) {
+        danger.resize(static_cast<size_t>(n));
+        env->GetFloatArrayRegion(dangerArr, 0, n, danger.data());
+        dp = danger.data();
     }
-}
-
-JNIEXPORT jfloatArray JNICALL
-Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeNavFindPath(
-    JNIEnv* env, jobject, jlong handle, jfloat startX, jfloat startZ, jfloat goalX, jfloat goalZ
-) {
-    std::vector<girassol::nav::Vec2> path;
-    {
-        std::lock_guard<std::mutex> lock(gRegistryMutex);
-        auto it = gNavPool.find(handle);
-        if (it != gNavPool.end()) {
-            path = it->second->findStraightPath({startX, startZ}, {goalX, goalZ});
-        }
-    }
-    std::vector<float> flat;
-    flat.reserve(path.size() * 2);
-    for (const auto& pt : path) {
-        flat.push_back(pt.x);
-        flat.push_back(pt.z);
-    }
-    jfloatArray out = env->NewFloatArray(static_cast<jsize>(flat.size()));
-    if (!flat.empty()) {
-        env->SetFloatArrayRegion(out, 0, static_cast<jsize>(flat.size()), flat.data());
-    }
+    const auto path = astar.findPath(w, tiles.data(), sx, sz, gx, gz, tp, dp);
+    jintArray out = env->NewIntArray(static_cast<jsize>(path.size()));
+    if (out && !path.empty()) env->SetIntArrayRegion(out, 0, static_cast<jsize>(path.size()), path.data());
     return out;
 }
 
-// ==================== 4. ÁUDIO BINAURAL HRTF ====================
+// ==================== 4. ÁUDIO BINAURAL (AAudio) ====================
 
-JNIEXPORT jlong JNICALL
-Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeCreateBinauralMixer(
-    JNIEnv*, jobject, jint sampleRate
-) {
-    std::lock_guard<std::mutex> lock(gRegistryMutex);
-    const int64_t id = gNextHandle++;
-    gAudioPool[id] = std::make_unique<girassol::audio::BinauralHrtfMixer>(static_cast<uint32_t>(sampleRate));
-    return id;
+JNIEXPORT jboolean JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeAudioStart(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lock(gAudioMutex);
+    if (!gAudio) gAudio = std::make_unique<girassol::audio::AAudioEngine>();
+    return gAudio->start() ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
-Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeDestroyBinauralMixer(JNIEnv*, jobject, jlong handle) {
-    std::lock_guard<std::mutex> lock(gRegistryMutex);
-    gAudioPool.erase(handle);
-}
-
-// ==================== 5. TREINAMENTO LORA TEMPO REAL ====================
-
-JNIEXPORT jlong JNICALL
-Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeCreateLoraAdapter(
-    JNIEnv*, jobject, jint inDim, jint outDim, jint rank, jfloat alpha, jlong seed
-) {
-    std::lock_guard<std::mutex> lock(gRegistryMutex);
-    const int64_t id = gNextHandle++;
-    gLoraPool[id] = std::make_unique<girassol::forge::RealTimeLoraAdapter>(
-        static_cast<uint32_t>(inDim),
-        static_cast<uint32_t>(outDim),
-        static_cast<uint32_t>(rank),
-        alpha,
-        static_cast<uint64_t>(seed)
-    );
-    return id;
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeAudioStop(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lock(gAudioMutex);
+    if (gAudio) gAudio->stop();
+    gAudio.reset();
 }
 
 JNIEXPORT void JNICALL
-Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeDestroyLoraAdapter(JNIEnv*, jobject, jlong handle) {
-    std::lock_guard<std::mutex> lock(gRegistryMutex);
-    gLoraPool.erase(handle);
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeAudioSetParams(
+    JNIEnv*, jobject, jfloat stability, jfloat mood, jfloat tension, jfloat gain
+) {
+    std::lock_guard<std::mutex> lock(gAudioMutex);
+    if (!gAudio) return;
+    girassol::audio::AmbientParams p;
+    p.stability = stability; p.mood = mood; p.tension = tension; p.masterGain = gain;
+    gAudio->synth().setParams(p);
 }
 
-JNIEXPORT jfloat JNICALL
-Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLoraTrainStepMse(
-    JNIEnv* env, jobject, jlong handle, jfloatArray baseOutArr, jfloatArray xArr, jfloatArray targetYArr,
-    jfloat lrA, jfloat ewcLambda
+JNIEXPORT void JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeAudioSpeech(JNIEnv*, jobject, jfloat x, jfloat z, jfloat pitch) {
+    std::lock_guard<std::mutex> lock(gAudioMutex);
+    if (gAudio && gAudio->running()) gAudio->synth().pushSpeech(x, z, pitch);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeAudioStatus(JNIEnv* env, jobject) {
+    std::lock_guard<std::mutex> lock(gAudioMutex);
+    std::string s = "parado";
+    if (gAudio) {
+        s = gAudio->running() ? ("tocando " + std::to_string(gAudio->sampleRate()) + " Hz, quadros=" +
+                                 std::to_string(gAudio->synth().framesRendered()))
+                              : ("erro: " + gAudio->lastError());
+    }
+    return env->NewStringUTF(s.c_str());
+}
+
+// Renderização offline (diagnóstico/benchmark): [rms, pico, quadros].
+JNIEXPORT jfloatArray JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeAudioOfflineProbe(JNIEnv* env, jobject, jfloat stability, jint frames) {
+    girassol::audio::AmbientBinauralSynth synth(48000);
+    girassol::audio::AmbientParams p; p.stability = stability; p.masterGain = 0.5f;
+    synth.setParams(p);
+    synth.pushSpeech(2.0f, 1.0f, 0.5f);
+    std::vector<float> buf(static_cast<size_t>(std::max(1, static_cast<int>(frames))) * 2);
+    synth.render(buf.data(), std::max(1, static_cast<int>(frames)));
+    double sum = 0; float peak = 0;
+    for (float v : buf) { sum += v * v; peak = std::max(peak, std::fabs(v)); }
+    const jfloat vals[3] = {static_cast<float>(std::sqrt(sum / buf.size())), peak, static_cast<float>(frames)};
+    jfloatArray out = env->NewFloatArray(3);
+    if (out) env->SetFloatArrayRegion(out, 0, 3, vals);
+    return out;
+}
+
+// ==================== 5. TREINAMENTO LORA (espelho do LoraMath) ====================
+
+// Retorna estado empacotado' + [mseFirst, mseLast, bits(step)].
+JNIEXPORT jfloatArray JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLoraTrain(
+    JNIEnv* env, jobject, jint inDim, jint outDim, jint rank, jfloat scaling, jfloatArray packedArr, jint step,
+    jfloatArray xsArr, jfloatArray ysArr, jint n, jint epochs, jfloat lr, jfloat ewc
 ) {
-    if (!baseOutArr || !xArr || !targetYArr) return 0.0f;
-    auto readFloats = [&](jfloatArray arr) {
-        const jsize n = env->GetArrayLength(arr);
-        std::vector<float> v(static_cast<size_t>(n));
-        env->GetFloatArrayRegion(arr, 0, n, v.data());
-        return v;
+    if (!packedArr || !xsArr || !ysArr || inDim <= 0 || outDim <= 0 || rank <= 0 || n < 0) return nullptr;
+    girassol::forge::LoraState s(inDim, outDim, rank, scaling);
+    const jsize pn = env->GetArrayLength(packedArr);
+    if (static_cast<size_t>(pn) < s.packedSize()) return nullptr;
+    std::vector<float> packed(static_cast<size_t>(pn));
+    env->GetFloatArrayRegion(packedArr, 0, pn, packed.data());
+    s.unpack(packed.data(), packed.size());
+    s.step = step;
+    if (env->GetArrayLength(xsArr) < n * inDim || env->GetArrayLength(ysArr) < n * outDim) return nullptr;
+    std::vector<float> xs(static_cast<size_t>(n * inDim)), ys(static_cast<size_t>(n * outDim));
+    if (n > 0) {
+        env->GetFloatArrayRegion(xsArr, 0, n * inDim, xs.data());
+        env->GetFloatArrayRegion(ysArr, 0, n * outDim, ys.data());
+    }
+    const auto mse = girassol::forge::LoraMath::trainEpochs(s, xs.data(), ys.data(), n, epochs, lr, ewc);
+    std::vector<float> out = s.pack();
+    out.push_back(mse.first);
+    out.push_back(mse.second);
+    float stepBits;
+    std::memcpy(&stepBits, &s.step, sizeof(float));
+    out.push_back(stepBits);
+    jfloatArray arr = env->NewFloatArray(static_cast<jsize>(out.size()));
+    if (arr) env->SetFloatArrayRegion(arr, 0, static_cast<jsize>(out.size()), out.data());
+    return arr;
+}
+
+// ==================== 5b. MOTOR LLM (llama.cpp + GGUF + GBNF) ====================
+
+JNIEXPORT jboolean JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLlmAvailable(JNIEnv*, jobject) {
+    return girassol::llm::LlmEngine::available() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLlmLoad(JNIEnv* env, jobject, jstring pathStr, jint threads, jint nCtx) {
+    const char* p = env->GetStringUTFChars(pathStr, nullptr);
+    std::string path(p ? p : "");
+    if (p) env->ReleaseStringUTFChars(pathStr, p);
+    std::string err;
+    bool ok = gLlm.load(path, threads, nCtx, &err);
+    const std::string s = ok ? std::string() : err;
+    return env->NewStringUTF(s.c_str());
+}
+
+JNIEXPORT void JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLlmUnload(JNIEnv*, jobject) {
+    gLlm.requestAbort();
+    gLlm.unload();
+}
+
+JNIEXPORT void JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLlmAbort(JNIEnv*, jobject) {
+    gLlm.requestAbort();
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLlmDescribe(JNIEnv* env, jobject) {
+    const std::string s = gLlm.loaded() ? (gLlm.description() + "|" + std::to_string(gLlm.modelBytes())) : std::string();
+    return env->NewStringUTF(s.c_str());
+}
+
+// Retorna [texto, erro, promptTokens, genTokens, millis, tokens/s].
+JNIEXPORT jobjectArray JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLlmGenerate(
+    JNIEnv* env, jobject, jstring sysStr, jstring userStr, jstring grammarStr, jint maxTokens
+) {
+    auto read = [&](jstring js) {
+        const char* c = js ? env->GetStringUTFChars(js, nullptr) : nullptr;
+        std::string s(c ? c : "");
+        if (c) env->ReleaseStringUTFChars(js, c);
+        return s;
     };
-    const auto baseOut = readFloats(baseOutArr);
-    const auto x = readFloats(xArr);
-    const auto targetY = readFloats(targetYArr);
-
-    std::lock_guard<std::mutex> lock(gRegistryMutex);
-    auto it = gLoraPool.find(handle);
-    return (it != gLoraPool.end()) ? it->second->trainStepMse(baseOut, x, targetY, lrA, ewcLambda) : 0.0f;
+    const auto r = gLlm.generate(read(sysStr), read(userStr), read(grammarStr), maxTokens);
+    jclass strCls = env->FindClass("java/lang/String");
+    jobjectArray out = env->NewObjectArray(6, strCls, nullptr);
+    const std::string vals[6] = {sanitizeUtf8(r.text), r.error, std::to_string(r.promptTokens), std::to_string(r.genTokens),
+                                 std::to_string(r.millis), std::to_string(r.tokensPerSecond)};
+    for (int i = 0; i < 6; ++i) {
+        jstring js = env->NewStringUTF(vals[i].c_str());
+        env->SetObjectArrayElement(out, i, js);
+        env->DeleteLocalRef(js);
+    }
+    return out;
 }
-
-JNIEXPORT void JNICALL
-Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLoraConsolidateEwc(JNIEnv*, jobject, jlong handle) {
-    std::lock_guard<std::mutex> lock(gRegistryMutex);
-    auto it = gLoraPool.find(handle);
-    if (it != gLoraPool.end()) it->second->consolidateEwcAnchor();
-}
-
 
 // ==================== 6. HARDWARE / AUTOTESTE ====================
 

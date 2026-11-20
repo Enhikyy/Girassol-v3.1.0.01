@@ -71,57 +71,38 @@ object GeaNativeBridge {
 
     @JvmStatic external fun nativeMapElitesCoverage(handle: Long): Float
 
-    // ==================== 3. NAVMESH + RVO2 / ORCA ====================
-    @JvmStatic external fun nativeCreateNavWorld(
-        gridW: Int,
-        gridH: Int,
-        cellSize: Float,
-        originX: Float,
-        originZ: Float
-    ): Long
+    // ==================== 3. NAVEGAÇÃO (espelho exato do Pathfinding Kotlin) ====================
+    /** A* 4-conexo estigmérgico em C++; retorna os índices de tile do caminho (sem a origem). */
+    @JvmStatic external fun nativeNavFindPathGrid(
+        w: Int, tiles: IntArray, sx: Int, sz: Int, gx: Int, gz: Int, trail: FloatArray?, danger: FloatArray?
+    ): IntArray
 
-    @JvmStatic external fun nativeDestroyNavWorld(handle: Long)
+    // ==================== 4. ÁUDIO BINAURAL (AAudio) ====================
+    @JvmStatic external fun nativeAudioStart(): Boolean
+    @JvmStatic external fun nativeAudioStop()
+    @JvmStatic external fun nativeAudioSetParams(stability: Float, mood: Float, tension: Float, gain: Float)
+    @JvmStatic external fun nativeAudioSpeech(x: Float, z: Float, pitch: Float)
+    @JvmStatic external fun nativeAudioStatus(): String
+    /** Renderização offline: [rms, pico, quadros]. */
+    @JvmStatic external fun nativeAudioOfflineProbe(stability: Float, frames: Int): FloatArray
 
-    @JvmStatic external fun nativeNavBakeObstacles(
-        handle: Long,
-        flatBoxesMinXMinZMaxXMaxZ: FloatArray,
-        clearance: Float
-    )
+    // ==================== 5. LORA (espelho exato do LoraMath Kotlin) ====================
+    /** Estado empacotado' + [mseFirst, mseLast, bits(step)]; null em entrada inválida. */
+    @JvmStatic external fun nativeLoraTrain(
+        inDim: Int, outDim: Int, rank: Int, scaling: Float, packed: FloatArray, step: Int,
+        xs: FloatArray, ys: FloatArray, n: Int, epochs: Int, lr: Float, ewc: Float
+    ): FloatArray?
 
-    @JvmStatic external fun nativeNavFindPath(
-        handle: Long,
-        startX: Float,
-        startZ: Float,
-        goalX: Float,
-        goalZ: Float
-    ): FloatArray
-
-    // ==================== 4. ÁUDIO BINAURAL HRTF ====================
-    @JvmStatic external fun nativeCreateBinauralMixer(sampleRate: Int): Long
-
-    @JvmStatic external fun nativeDestroyBinauralMixer(handle: Long)
-
-    // ==================== 5. TREINAMENTO LORA TEMPO REAL ====================
-    @JvmStatic external fun nativeCreateLoraAdapter(
-        inDim: Int,
-        outDim: Int,
-        rank: Int,
-        alpha: Float,
-        seed: Long
-    ): Long
-
-    @JvmStatic external fun nativeDestroyLoraAdapter(handle: Long)
-
-    @JvmStatic external fun nativeLoraTrainStepMse(
-        handle: Long,
-        baseOutArr: FloatArray,
-        xArr: FloatArray,
-        targetYArr: FloatArray,
-        lrA: Float,
-        ewcLambda: Float
-    ): Float
-
-    @JvmStatic external fun nativeLoraConsolidateEwc(handle: Long)
+    // ==================== 5b. LLM (llama.cpp + GGUF + GBNF) ====================
+    @JvmStatic external fun nativeLlmAvailable(): Boolean
+    /** Carrega o GGUF via mmap; string vazia = sucesso. */
+    @JvmStatic external fun nativeLlmLoad(path: String, threads: Int, nCtx: Int): String
+    @JvmStatic external fun nativeLlmUnload()
+    @JvmStatic external fun nativeLlmAbort()
+    /** "descrição|bytes" do modelo carregado, ou vazio. */
+    @JvmStatic external fun nativeLlmDescribe(): String
+    /** [texto, erro, promptTokens, genTokens, millis, tokens/s]. */
+    @JvmStatic external fun nativeLlmGenerate(system: String, user: String, grammar: String, maxTokens: Int): Array<String>
 
     // ==================== 6. HARDWARE / AUTOTESTE ====================
     /** Capacidades do SoC (HWCAP/cpuid + sondagem dlopen de OpenCL/Vulkan) em formato chave=valor;... */

@@ -10,20 +10,25 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
-/** Paleta inspirada na estética "Lumon": petróleo profundo, creme e acentos de girassol. */
+/**
+ * Paleta OLED "Kodak 70 mm": preto absoluto (pixels apagados em OLED, menor consumo 24/7),
+ * creme de emulsão, ouro girassol, teal Lumon e o vermelho-alaranjado da halação 500T.
+ */
 object Lumon {
-    val Background = Color(0xFF0B1A1E)
-    val Surface = Color(0xFF12262B)
-    val SurfaceHigh = Color(0xFF1A3238)
-    val Outline = Color(0xFF2C4A50)
+    val Background = Color(0xFF000000)
+    val Surface = Color(0xFF0B0B0A)
+    val SurfaceHigh = Color(0xFF161512)
+    val Outline = Color(0xFF2A2722)
     val Teal = Color(0xFF5FC9BF)
-    val TealDim = Color(0xFF2F7F78)
-    val Cream = Color(0xFFE8DFC8)
-    val CreamDim = Color(0xFFA9A28F)
+    val TealDim = Color(0xFF24615C)
+    val Cream = Color(0xFFEDE3CC)
+    val CreamDim = Color(0xFF9A9384)
     val Sunflower = Color(0xFFE7B53C)
-    val Danger = Color(0xFFE06B5F)
+    val Danger = Color(0xFFE5603F)
     val Ok = Color(0xFF7BC67E)
     val Violet = Color(0xFF9C8FE0)
+    val Halation = Color(0xFFFF5A2A)
+    val Glass = Color(0xE60B0B0A)
 }
 
 private val scheme = darkColorScheme(

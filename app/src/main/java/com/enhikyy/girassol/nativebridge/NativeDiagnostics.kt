@@ -51,6 +51,36 @@ object NativeDiagnostics {
         }
     }
 
+    /**
+     * Benchmark de CPU sob demanda: A* na grade de paridade (64 consultas × repetições) em
+     * Kotlin/ART e em C++ (JNI), mais o probe offline do sintetizador binaural.
+     */
+    fun cpuBenchmark(rounds: Int = 20): String {
+        val g = com.enhikyy.girassol.core.ports.ParityVectors.navGrid()
+        val q = g.queries
+        val nq = q.size / 4
+        var t0 = System.nanoTime()
+        var acc = 0
+        repeat(rounds) { for (k in 0 until nq) acc += com.enhikyy.girassol.core.world.Pathfinding.findPathGrid(g.w, g.tiles, q[k * 4], q[k * 4 + 1], q[k * 4 + 2], q[k * 4 + 3], g.trail, g.danger).size }
+        val kt = rounds * nq / ((System.nanoTime() - t0) / 1e9)
+        val sb = StringBuilder(String.format(Locale.ROOT, "A* Kotlin %,.0f rotas/s", kt))
+        if (GeaNativeBridge.isNativeLoaded) {
+            t0 = System.nanoTime()
+            var acc2 = 0
+            repeat(rounds) { for (k in 0 until nq) acc2 += GeaNativeBridge.nativeNavFindPathGrid(g.w, g.tiles, q[k * 4], q[k * 4 + 1], q[k * 4 + 2], q[k * 4 + 3], g.trail, g.danger).size }
+            val cpp = rounds * nq / ((System.nanoTime() - t0) / 1e9)
+            sb.append(String.format(Locale.ROOT, " · C++ %,.0f rotas/s (×%.1f) · %s", cpp, cpp / kt, if (acc == acc2) "caminhos iguais" else "DIVERGENTE"))
+            runCatching {
+                t0 = System.nanoTime()
+                val probe = GeaNativeBridge.nativeAudioOfflineProbe(0.7f, 48_000)
+                val ms = (System.nanoTime() - t0) / 1e6
+                sb.append(String.format(Locale.ROOT, " · áudio 1 s sintetizado em %.1f ms (RMS %.3f)", ms, probe.getOrElse(0) { 0f }))
+            }
+        }
+        sb.append(" · núcleos ${Runtime.getRuntime().availableProcessors()}")
+        return sb.toString()
+    }
+
     private fun kotlinBenchmark(): String {
         val tm = KotlinTsetlinMachine(16, 20, 64, 3.5f, 8, 5L)
         val rng = SplitMix64(5L xor 0xA5A5A5A5L)

@@ -16,6 +16,16 @@ import com.enhikyy.girassol.core.cognition.GlobalWorkspaceStage
 import com.enhikyy.girassol.core.cognition.PerceptualSignal
 import com.enhikyy.girassol.core.cognition.PianoCognitiveBusSnapshot
 import com.enhikyy.girassol.core.cognition.SymbolicLookaheadDeliberator
+import com.enhikyy.girassol.core.cognition.NeuralProtocol
+import com.enhikyy.girassol.core.cognition.SymbolicSpeech
+import com.enhikyy.girassol.core.forge.LoraAdapterState
+import com.enhikyy.girassol.core.forge.LoraCycleRecord
+import com.enhikyy.girassol.core.forge.LoraFeatures
+import com.enhikyy.girassol.core.forge.LoraMath
+import com.enhikyy.girassol.core.forge.LoraSample
+import com.enhikyy.girassol.core.ports.CorePorts
+import com.enhikyy.girassol.core.ports.NeuralDecision
+import com.enhikyy.girassol.core.ports.NeuralRequest
 import com.enhikyy.girassol.core.memory.AssimilationOutcome
 import com.enhikyy.girassol.core.memory.AssociativeMemoryNode
 import com.enhikyy.girassol.core.memory.EpistemicImmunity
@@ -109,10 +119,11 @@ private data class Proposal(val citizen: Citizen, val intention: Intention, val 
  */
 class WorldCore(
     val state: WorldState,
-    private val deliberator: Deliberator = SymbolicLookaheadDeliberator(),
+    val ports: CorePorts = CorePorts(),
     /** Em shadow-replay os eventos não são retidos para persistência. */
     private val shadow: Boolean = false
 ) {
+    private val deliberator: Deliberator = ports.deliberator
     private val memoryEngine = FourLayerMemoryAndSleepEngine(maxNodesPerAgent = MAX_MEMORIES)
     private val workspace = GlobalWorkspaceStage(3)
     private val tickEvents = mutableListOf<CanonicalEvent>()
@@ -127,14 +138,20 @@ class WorldCore(
         const val MAX_DISTRICTS_PER_SIDE = 9
         const val REFLEX_CONFIDENCE = 0.6
 
-        fun create(seed: Long, initialPopulation: Int = 24, deliberator: Deliberator = SymbolicLookaheadDeliberator()): WorldCore {
+        const val LORA_DECISION_WEIGHT = 0.08
+        const val LORA_SANDBOX_TICKS = 120
+        const val LORA_MIN_SAMPLES = 16
+        const val NEURAL_SUGGESTION_TTL = 120L
+        const val SPEECH_MIN_GAP = 40L
+
+        fun create(seed: Long, initialPopulation: Int = 24, ports: CorePorts = CorePorts()): WorldCore {
             val state = WorldState(seed = seed, board = SpatialStigmergyAndReservationBoard(36, 36, cellSize = 1f))
             state.districts += CityGenerator.initialLayout(seed)
             CityGenerator.rebuildTiles(state)
             state.board.resize(state.widthTiles, state.widthTiles)
             for (d in state.districts) CityGenerator.spawnObjectsFor(state, d)
             state.institutions += defaultInstitutions()
-            val core = WorldCore(state, deliberator)
+            val core = WorldCore(state, ports)
             core.emit("GENESE", null, "seed=$seed;districts=${state.districts.size};rules=$CURRENT_RULES_VERSION")
             state.ledger.mintInitialEndowment(COMMUNAL_COMMONS, FOOD, 40.0, 0L, state.lastEventHash)
             state.ledger.mintInitialEndowment(COMMUNAL_COMMONS, MATERIAL, 6.0, 0L, state.lastEventHash)
@@ -229,6 +246,7 @@ class WorldCore(
             state.telemetry = telemetry
             emit("TELEMETRIA", null, "termico=${telemetry.thermalTier};memMb=${telemetry.availableMemoryMb}")
         }
+        if (!shadow) ports.neural?.let { applyNeuralDecisions(it.drainResults()) }
         val tier = when {
             state.telemetry.thermalTier >= 3 -> AllostaticThermalCoupling.ThermalTier.SEVERE_OR_CRITICAL
             state.telemetry.thermalTier == 2 -> AllostaticThermalCoupling.ThermalTier.MODERATE
@@ -288,14 +306,30 @@ class WorldCore(
             )
             var viaDelib = false
             var viaReflex = false
+            var viaNeural = false
+            val suggestion = c.neuralSuggestion?.takeIf { tick - c.neuralSuggestionTick <= NEURAL_SUGGESTION_TTL }
             if (invoke) {
-                val bus = buildBus(c, broadcast, recalled)
-                val ctx = DeliberationContext(bus, sorted.map { cand ->
-                    DeliberationOption(cand.intention.action.name, cand.efe, cand.projected, cand.travel)
-                }, Need.entries.map { decayFor(c, it) }.toDoubleArray())
-                val res = deliberator.deliberate(ctx)
-                if (res.chosenIndex in sorted.indices) idx = res.chosenIndex
-                c.lastThought = res.rationale
+                val neuralIdx = suggestion?.let { sug -> sorted.indexOfFirst { it.intention.action.name == sug } } ?: -1
+                if (neuralIdx >= 0) {
+                    // decisão neural chegada como evento canônico em tick anterior
+                    idx = neuralIdx
+                    viaNeural = true
+                    c.neuralSuggestion = null
+                } else {
+                    val bus = buildBus(c, broadcast, recalled)
+                    val ctx = DeliberationContext(bus, sorted.map { cand ->
+                        DeliberationOption(cand.intention.action.name, cand.efe, cand.projected, cand.travel)
+                    }, Need.entries.map { decayFor(c, it) }.toDoubleArray())
+                    val res = deliberator.deliberate(ctx)
+                    if (res.chosenIndex in sorted.indices) idx = res.chosenIndex
+                    c.lastThought = res.rationale
+                    // pedido assíncrono ao motor GGUF (só em temperatura nominal); não altera o estado
+                    if (!shadow && tier == AllostaticThermalCoupling.ThermalTier.NONE_OR_LIGHT) ports.neural?.let { port ->
+                        if (port.isAvailable()) port.trySubmit(neuralRequest(c, sorted.take(6), recalled))
+                    }
+                    val worst = c.needs.minByOrNull { it.value }?.key?.name ?: "PROPOSITO"
+                    speak(c, SymbolicSpeech.forDecision(worst, sorted[idx].intention.action, rng.nextLong()))
+                }
                 val cost = AllostaticThermalCoupling.computeNeuralDeliberationCost(tier, state.policy.thermalThrottleSensitivity, c.needs.getValue(Need.ENERGIA))
                 c.needs[Need.ENERGIA] = (c.needs.getValue(Need.ENERGIA) - cost * 0.05).coerceIn(0.0, 1.0)
                 state.deliberationTicks += tick
@@ -309,7 +343,7 @@ class WorldCore(
             }
             val chosen = sorted[idx]
             // 9. Submissão simultânea de propostas
-            proposals += Proposal(c, chosen.intention.copy(viaDeliberation = viaDelib, viaReflex = viaReflex), urgency)
+            proposals += Proposal(c, chosen.intention.copy(viaDeliberation = viaDelib || viaNeural, viaReflex = viaReflex, viaNeural = viaNeural), urgency)
         }
 
         // 10. Arbitragem & reservas (ordem determinística: urgência desc, id asc)
@@ -319,7 +353,7 @@ class WorldCore(
                 p.citizen.consecutiveFailures++
                 continue
             }
-            val path = Pathfinding.findPath(state, p.citizen.x, p.citizen.z, p.intention.targetX, p.intention.targetZ, trail, danger)
+            val path = ports.pathfinder.findPath(state, p.citizen.x, p.citizen.z, p.intention.targetX, p.intention.targetZ, trail, danger)
             if (path.isEmpty() && (p.citizen.x != p.intention.targetX || p.citizen.z != p.intention.targetZ)) {
                 objId?.let { state.board.releaseReservation(it, p.citizen.id) }
                 p.citizen.consecutiveFailures++
@@ -505,6 +539,11 @@ class WorldCore(
         ) - 0.12 * memQ - novelty + 0.002 * travel
         if (obj != null && state.board.readPheromone(CH_DANGER, obj.tileX.toFloat(), obj.tileZ.toFloat()) > 2f) efe += 0.05
         if (action == ActionType.SOCIALIZAR && obj != null) efe -= 0.02 * state.board.readPheromone(CH_SOCIAL, obj.tileX.toFloat(), obj.tileZ.toFloat()).coerceAtMost(5f)
+        // viés aprendido pelo adaptador LoRA coletivo (zero até o primeiro ciclo aceito)
+        if (state.lora.acceptedCycles > 0) {
+            val pred = LoraMath.predict(state.lora, LoraFeatures.of(action, state.tick))[0].toDouble()
+            efe -= LORA_DECISION_WEIGHT * pred.coerceIn(-1.0, 1.0)
+        }
 
         val (tx, tz, objId) = if (obj != null) Triple(obj.tileX, obj.tileZ, obj.id) else {
             // EXPLORAR: vai verificar o alvo com crença mais incerta/não verificada
@@ -859,6 +898,15 @@ class WorldCore(
         }
         val pruned = report.prunedNodeIds.toSet()
         if (pruned.isNotEmpty()) c.memories.removeAll { it.id in pruned }
+        // amostras para o adaptador LoRA: memórias episódicas consolidadas com ação conhecida
+        if (!shadow) {
+            val episodic = c.memories.filter { it.layer == MemoryLayer.EPISODIC }.sortedBy { it.id }.takeLast(24)
+            for (m in episodic) {
+                val action = ActionType.entries.firstOrNull { it.name in m.tags } ?: continue
+                state.loraPendingSamples += LoraSample(LoraFeatures.of(action, m.createdTick), m.qUtility.coerceIn(-1.0, 1.0).toFloat())
+            }
+            if (state.loraPendingSamples.size > 512) state.loraPendingSamples.subList(0, state.loraPendingSamples.size - 512).clear()
+        }
     }
 
     private fun activeCondition(): String = when {
@@ -873,6 +921,87 @@ class WorldCore(
         if (amount > 0) state.ledger.transfer(c.id, COMMUNAL_COMMONS, CREDIT, amount, state.tick, h)
         c.sanctionsReceived++
         c.emotion.valence = (c.emotion.valence - 0.2).coerceAtLeast(-1.0)
+    }
+
+    // ===================================================================== LLM, falas e LoRA
+
+    private fun speak(c: Citizen, text: String) {
+        if (c.lastSpeechTick >= 0 && state.tick - c.lastSpeechTick < SPEECH_MIN_GAP) return
+        c.lastSpeech = text
+        c.lastSpeechTick = state.tick
+        state.speechesEmitted++
+    }
+
+    private fun neuralRequest(c: Citizen, options: List<Candidate>, recalled: List<AssociativeMemoryNode>): NeuralRequest {
+        val prompt = NeuralProtocol.build(
+            name = c.name,
+            identity = "Geração ${c.generation}, ${"%.0f".fmt(c.ageDays(state.tick))} dias de vida.",
+            needs = Need.entries.associate { it.name.lowercase() to c.needs.getValue(it) },
+            mood = c.emotion.mood,
+            recentMemories = recalled.take(3).map { it.content.take(60) },
+            options = options.map { it.intention.action to it.efe },
+            night = state.isNight(),
+            drought = state.inDrought()
+        )
+        return NeuralRequest(c.id, state.tick, prompt, options.map { it.intention.action.name }.distinct())
+    }
+
+    /** Estágio 1: decisões neurais concluídas entram como eventos canônicos (ordem por agente). */
+    private fun applyNeuralDecisions(results: List<NeuralDecision>) {
+        for (r in results.sortedWith(compareBy<NeuralDecision> { it.agentId }.thenBy { it.requestTick })) {
+            val c = state.citizen(r.agentId)?.takeIf { it.alive } ?: continue
+            if (ActionType.entries.none { it.name == r.action }) continue
+            val thought = NeuralProtocol.sanitize(r.thought)
+            val speech = NeuralProtocol.sanitize(r.speech)
+            emit("LLM_DECISAO", c.id, "acao=${r.action};tokens=${r.tokens};ms=${r.millis};backend=${r.backend};pedido=${r.requestTick};fala=$speech")
+            c.neuralSuggestion = r.action
+            c.neuralSuggestionTick = state.tick
+            c.neuralDecisions++
+            c.lastThought = "Neural (GGUF): $thought"
+            c.lastSpeech = speech
+            c.lastSpeechTick = state.tick
+            state.neuralDecisionsApplied++
+            state.speechesEmitted++
+        }
+    }
+
+    /**
+     * Ciclo LoRA do sono: treina um candidato a partir das memórias consolidadas e o testa
+     * em sandbox (cópia profunda do mundo) contra a linha de base antes de aplicá-lo.
+     */
+    private fun runLoraSleepCycle() {
+        val samples = state.loraPendingSamples.toList()
+        if (samples.size < LORA_MIN_SAMPLES) return
+        state.loraPendingSamples.clear()
+        val result = ports.lora.train(state.lora, samples, epochs = 3, lr = 0.01f, ewcLambda = 15f)
+        val candidate = result.state.also { it.acceptedCycles = state.lora.acceptedCycles + 1; it.version = state.lora.version + 1 }
+        LoraMath.consolidateAnchor(candidate)
+        val base = sandboxScore(state.lora)
+        val cand = sandboxScore(candidate)
+        val accepted = cand.second == 0 && cand.first >= base.first - 1e-6
+        val record = LoraCycleRecord(state.tick, samples.size, result.mseFirstEpoch, result.mseLastEpoch,
+            base.first, cand.first, accepted, result.backend, candidate.deltaNorm())
+        if (accepted) state.lora = candidate
+        state.loraLedger += record
+        if (state.loraLedger.size > 60) state.loraLedger.removeAt(0)
+        emit("LORA_SONO", null, "amostras=${samples.size};mse=${"%.4f".fmt(result.mseFirstEpoch)}->${"%.4f".fmt(result.mseLastEpoch)};" +
+            "base=${"%.5f".fmt(base.first)};cand=${"%.5f".fmt(cand.first)};aceito=$accepted;backend=${result.backend}")
+    }
+
+    /** (pontuação média, violações) num replay sandbox de [LORA_SANDBOX_TICKS] ticks. */
+    private fun sandboxScore(adapter: LoraAdapterState): Pair<Double, Int> {
+        val copy = WorldSnapshotCodec.deepCopy(state)
+        copy.lora = adapter.copyState()
+        copy.forecastWindow.clear(); copy.outcomeWindow.clear()
+        val sandbox = WorldCore(copy, ports.forShadow(), shadow = true)
+        var score = 0.0
+        var violations = 0
+        repeat(LORA_SANDBOX_TICKS) {
+            val r = sandbox.step(copy.telemetry)
+            violations += r.invariantViolations.size
+            score += copy.metrics.survivalEfficiency - 0.35 * copy.metrics.meanFreeEnergy
+        }
+        return score / LORA_SANDBOX_TICKS to violations
     }
 
     // ===================================================================== estágio 12
@@ -893,6 +1022,7 @@ class WorldCore(
     }
 
     private fun interact(a: Citizen, b: Citizen, rng: SplitMix64) {
+        speak(a, SymbolicSpeech.forGreeting(b.name, rng.nextLong()))
         val tie = a.social.getOrCreateTie(b.id, a.intrinsicOpinionCommons)
         val similarity = 1.0 - TRAITS.sumOf { abs(a.trait(it) - b.trait(it)) } / TRAITS.size
         tie.familiarity = (tie.familiarity + 0.06).coerceAtMost(1.0)
@@ -955,6 +1085,7 @@ class WorldCore(
         val alive = state.aliveCitizens().sortedBy { it.id }
         val day = state.day()
         resolveStaleStressEvents()
+        if (!shadow) runLoraSleepCycle()
         // Reprodução determinística com genética diploide, Baldwin e simbiogênese
         reproduction(alive)
         // Heider: equilíbrio estrutural em tríades dos laços mais fortes

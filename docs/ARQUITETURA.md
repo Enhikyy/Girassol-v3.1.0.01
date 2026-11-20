@@ -41,18 +41,69 @@
 | `qd` | MAP-Elites + AURORA |
 | `rsi` | Auto-aperfeiçoamento delimitado: proposta → Shadow-Replay em cópia profunda → promoção só com ganho líquido, sem queda de diversidade semântica abaixo de 0,35 |
 
-## O que está implementado e o que não está
+## Módulos nativos e portas (v3.2)
 
-Implementado e testado: motor completo, persistência e restauração, serviço contínuo com reinício no boot,
-núcleo nativo com paridade verificada, autodetecção de hardware, painéis e teste de estresse epistêmico.
+O `core` continua JVM puro. Os módulos nativos entram por interfaces em `core/ports` (`PathfinderPort`,
+`LoraPort`, `NeuralDeliberatorPort`), montadas pelo `SimulationHub`. Cada porta tem implementação Kotlin de
+referência; a versão C++ só é usada depois que `NativeModules.verifyParity` confirma resultados idênticos
+nos vetores de `ParityVectors`. Ligar/desligar um módulo na aba Sistema recria o `WorldCore` a partir do mesmo
+estado.
 
-Diferenças em relação ao documento original, de forma explícita:
+### Motor cognitivo híbrido (llama.cpp + GBNF)
 
-- **Sem LLM local (llama.cpp/GGUF/Llamatik).** A deliberação usa `SymbolicLookaheadDeliberator`, que
-  implementa a interface `Deliberator`; um backend de LLM pode ser plugado nessa interface depois. Não há
-  modelos de linguagem embarcados no APK.
-- **Sem Filament/3D.** A cidade é desenhada em Canvas isométrico 2D.
-- **LoRA, mixer binaural e navegação nativos** estão compilados e expostos via JNI, mas o motor do mundo usa
-  as versões Kotlin para manter o determinismo idêntico entre aparelhos.
-- **RSI** usa replay de comprimento fixo (240 ticks) para que a decisão de promoção seja a mesma em qualquer aparelho.
-- O app não foi testado em aparelho físico neste ambiente; os testes rodam na JVM, no host (C++) e no lint/build do Android.
+- `llm/llm_engine.cpp` liga o llama.cpp `v1.0.0` (CMake/NDK, `arm64-v8a`, GGML portátil armv8-a) ao JNI.
+  Modelo carregado com `mmap` (sem `mlock`, sem GPU), `n_ctx = 1024`, lote 256, threads = metade dos núcleos (2 a 4).
+- Toda geração usa gramática GBNF (`NeuralProtocol`) e decodificação gulosa; a saída é ainda validada por um
+  parser estrito. Saída inválida é descartada e o cidadão usa o deliberador simbólico.
+- Determinismo: a inferência roda fora da thread do mundo. O resultado aprovado é drenado no estágio 1 do tick
+  seguinte e gravado como evento canônico `LLM_DECISAO` (ação, fala, tick do pedido). O replay a partir do log é
+  bit a bit idêntico; a sequência ao vivo depende do tempo de inferência do aparelho.
+- Fallback automático para `SymbolicLookaheadDeliberator`: sem `.gguf`, tier térmico ≥ 2, `onTrimMemory`, RAM
+  livre baixa ou erro de carga. Shadow-Replay do RSI e sandbox LoRA usam sempre o simbólico.
+- Falas e pensamentos (LLM ou modelos simbólicos) aparecem como balões na aba Mundo.
+
+### Renderização 3D (Filament 1.75.1) e Modo Eco 2D
+
+- `render3d/FilamentCityRenderer` desenha a cidade brutalista/liminar gerada pela semente (`CityMeshBuilder`):
+  lajes em balanço, corredores, janelas emissivas, luzes fluorescentes. Material `unlit` com iluminação e
+  oclusão pré-calculadas por vértice (barato em GPUs Mali/Adreno de entrada).
+- Pós-processamento "Kodak 500T/70mm": bloom suave, halation vermelho-alaranjado (sprites aditivos + bloom),
+  vinheta, neblina, FXAA, gradação Filmic com balanço de branco tungstênio, sombras profundas e granulação
+  (overlay Compose em `BlendMode.Overlay`). Limitado a 30 fps com resolução dinâmica.
+- `OrbitCamera` (órbita, pinça, rotação, pan) e `Raycast` (raio × AABB dos cidadãos, testado em JVM).
+- `RenderModePolicy`: 3D/2D manual; 2D obrigatório em segundo plano, tier térmico ≥ 3 ou falha de GLES.
+
+### Navegação, LoRA e áudio
+
+- Navegação: A* em grade em C++ (`navigation/grid_astar.hpp`), mesma ordem de expansão e desempate do Kotlin,
+  então trajetórias permanecem reprodutíveis pela semente.
+- LoRA: no sono, as memórias consolidadas viram amostras; o adaptador (rank 4) é treinado em C++ e testado num
+  replay sandbox de 120 ticks numa cópia profunda do mundo. Só é aplicado se não piorar a pontuação nem gerar
+  violações; cada ciclo entra no histórico (evento `LORA_SONO`). O LoRA ajusta a utilidade (peso 0,08), não os
+  pesos do GGUF.
+- Áudio: sintetizador binaural C++ em AAudio (a API nativa sobre a qual o Oboe é construído; sem biblioteca Oboe empacotada), batimento e timbre
+  modulados pela estabilidade social e pelo humor coletivo; ativar/silenciar na aba Sistema.
+
+### Proteção de release
+
+`proguard-rules.pro` mantém classes/métodos `native`, o pacote `com.google.android.filament`, o bridge JNI e os
+campos `Long` que guardam ponteiros nativos do llama.cpp.
+
+## Testes e CI
+
+- `native-tests`: ASan/UBSan em duas configurações (sem llama; com llama.cpp + GGUF `stories260K` e gramática).
+- `:core:test`, `:app:testDebugUnitTest` (câmera/raycast), `:app:lintDebug`, `compileFilamentMaterials`,
+  APKs debug e release.
+- `androidTest` em emulador x86_64 (API 34): aba Mundo (alternância 3D/2D, toque em cidadão) e aba Sistema
+  (diagnóstico C++, benchmark, chaves dos módulos nativos).
+
+## Limitações conhecidas
+
+- Não testado em aparelho físico de 4 GB; o orçamento de RAM e os 30 fps são estimativas de projeto.
+  O emulador usa GPU por software (swiftshader); se o GLES3 falhar, o teste valida a queda para o 2D.
+- Filament fixado em 1.75.1: versões ≥ 1.76 exigem compileSdk 37, e o AGP 8.7.3 suporta até o 35.
+- GGML compilado para armv8-a portátil (sem dotprod/i8mm específicos, KleidiAI e OpenMP desligados):
+  compatível com qualquer arm64, mas não é o máximo de tokens/s possível.
+- O LLM só atua no mundo ao vivo; RSI e sandbox LoRA usam o deliberador simbólico para manter replay fixo.
+- Os símbolos do llama.cpp ficam exportados em `libgirassol_core.so`.
+- Iluminação do 3D é pré-calculada (sem sombras dinâmicas) para caber no orçamento térmico 24/7.

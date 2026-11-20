@@ -18,7 +18,8 @@ import com.enhikyy.girassol.core.world.WorldState
 class RsiCoordinator(
     private val replayTicks: Int = 240,
     private val gate: BoundedRsiPromotionGate = BoundedRsiPromotionGate(),
-    private val deliberatorFactory: () -> Deliberator = { SymbolicLookaheadDeliberator() }
+    private val deliberatorFactory: () -> Deliberator = { SymbolicLookaheadDeliberator() },
+    private val portsFactory: () -> com.enhikyy.girassol.core.ports.CorePorts = { com.enhikyy.girassol.core.ports.CorePorts() }
 ) {
     fun isDue(state: WorldState): Boolean = state.tick > 0 && state.tick % WorldCore.RSI_PERIOD_TICKS == 0L
 
@@ -54,7 +55,7 @@ class RsiCoordinator(
         val copy = WorldSnapshotCodec.deepCopy(snapshot)
         copy.policy = genome
         copy.forecastWindow.clear(); copy.outcomeWindow.clear()
-        val core = WorldCore(copy, deliberatorFactory(), shadow = true)
+        val core = WorldCore(copy, portsFactory().forShadow().copy(deliberator = deliberatorFactory()), shadow = true)
         var fe = 0.0; var surv = 0.0; var div = 0.0; var delib = 0.0; var violations = 0
         for (i in 0 until replayTicks) {
             val r = core.step(copy.telemetry)

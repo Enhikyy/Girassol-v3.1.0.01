@@ -61,7 +61,15 @@ data class MindView(
     val metrics: WorldMetrics,
     val recentEvents: List<CanonicalEvent>,
     val quarantinedBeliefs: Int,
-    val unverifiedBeliefs: Int
+    val unverifiedBeliefs: Int,
+    val loraLedger: List<com.enhikyy.girassol.core.forge.LoraCycleRecord> = emptyList(),
+    val loraAcceptedCycles: Int = 0,
+    val loraVersion: Int = 0,
+    val loraDeltaNorm: Float = 0f,
+    val loraPendingSamples: Int = 0,
+    val neuralDecisionsApplied: Long = 0,
+    val speechesEmitted: Long = 0,
+    val meanMood: Double = 0.0
 )
 
 data class DashboardSnapshot(
@@ -103,7 +111,15 @@ data class DashboardSnapshot(
                 metrics = state.metrics.copy(),
                 recentEvents = state.recentEvents.takeLast(40).reversed(),
                 quarantinedBeliefs = beliefs.count { it.quarantined },
-                unverifiedBeliefs = beliefs.count { !it.verifiedByExperience }
+                unverifiedBeliefs = beliefs.count { !it.verifiedByExperience },
+                loraLedger = state.loraLedger.takeLast(20).reversed(),
+                loraAcceptedCycles = state.lora.acceptedCycles,
+                loraVersion = state.lora.version,
+                loraDeltaNorm = state.lora.deltaNorm(),
+                loraPendingSamples = state.loraPendingSamples.size,
+                neuralDecisionsApplied = state.neuralDecisionsApplied,
+                speechesEmitted = state.speechesEmitted,
+                meanMood = if (alive.isEmpty()) 0.0 else alive.sumOf { it.emotion.mood } / alive.size
             )
             return DashboardSnapshot(state.tick, citizens, society, mind)
         }

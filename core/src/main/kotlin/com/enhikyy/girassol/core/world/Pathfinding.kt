@@ -6,11 +6,26 @@ import kotlin.math.abs
 /**
  * A* em grade 4-conexa com custo estigmérgico: trilhas (TRAIL_WEAR) barateiam o
  * deslocamento, fazendo caminhos emergirem organicamente; DANGER_TRACE encarece.
+ *
+ * Esta é a implementação de referência. O espelho nativo (cpp/navigation/grid_astar.hpp)
+ * replica a mesma aritmética float, a mesma chave de prioridade (bits do float << 32 | índice)
+ * e o mesmo limite de expansão — os caminhos são idênticos, preservando a reprodutibilidade
+ * por semente qualquer que seja o backend.
  */
 object Pathfinding {
-    fun findPath(state: WorldState, sx: Int, sz: Int, gx: Int, gz: Int, trail: FloatArray?, danger: FloatArray?): MutableList<Int> {
-        val w = state.widthTiles
-        if (!state.inBounds(gx, gz)) return mutableListOf()
+    fun findPath(state: WorldState, sx: Int, sz: Int, gx: Int, gz: Int, trail: FloatArray?, danger: FloatArray?): MutableList<Int> =
+        findPathGrid(state.widthTiles, state.tiles, sx, sz, gx, gz, trail, danger)
+
+    fun stepCost(tileOrdinal: Int): Float = when (tileOrdinal) {
+        TileType.RUA.ordinal, TileType.CALCADA.ordinal -> 0.8f
+        TileType.CAMPO.ordinal -> 1.2f
+        else -> 1.0f
+    }
+
+    fun walkable(tileOrdinal: Int): Boolean = TileType.entries[tileOrdinal].walkable
+
+    fun findPathGrid(w: Int, tiles: IntArray, sx: Int, sz: Int, gx: Int, gz: Int, trail: FloatArray?, danger: FloatArray?): MutableList<Int> {
+        if (gx !in 0 until w || gz !in 0 until w) return mutableListOf()
         val start = sz * w + sx
         val goal = gz * w + gx
         if (start == goal) return mutableListOf()
@@ -38,9 +53,9 @@ object Pathfinding {
                 if (nx !in 0 until w || nz !in 0 until w) continue
                 val ni = nz * w + nx
                 if (closed[ni]) continue
-                val tile = TileType.entries[state.tiles[ni]]
-                if (!tile.walkable && ni != goal) continue
-                var cost = when (tile) { TileType.RUA, TileType.CALCADA -> 0.8f; TileType.CAMPO -> 1.2f; else -> 1.0f }
+                val tile = tiles[ni]
+                if (!walkable(tile) && ni != goal) continue
+                var cost = stepCost(tile)
                 if (trail != null) cost *= (1f - 0.35f * (trail[ni] / 10f).coerceAtMost(1f))
                 if (danger != null) cost *= (1f + (danger[ni] / 5f).coerceAtMost(2f))
                 val ng = g[cur] + cost

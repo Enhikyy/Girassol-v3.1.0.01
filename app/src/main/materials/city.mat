@@ -1,0 +1,24 @@
+// Cidade brutalista/liminar. Sombreamento lambertiano + oclusão pré-calculados por vértice
+// (CityMeshBuilder) para caber em GPUs modestas de aparelhos de 4 GB; o canal alfa da cor
+// do vértice marca superfícies emissivas (janelas, luminárias), que viram HDR > 1 e
+// alimentam o bloom/halação.
+material {
+    name : girassol_city,
+    shadingModel : unlit,
+    requires : [ color ],
+    parameters : [
+        { type : float4, name : tint },
+        { type : float, name : emissiveBoost }
+    ],
+    culling : back
+}
+
+fragment {
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+        vec4 c = getColor();
+        vec3 base = c.rgb * materialParams.tint.rgb;
+        float emissive = c.a * materialParams.emissiveBoost;
+        material.baseColor = vec4(base * (1.0 + emissive), 1.0);
+    }
+}

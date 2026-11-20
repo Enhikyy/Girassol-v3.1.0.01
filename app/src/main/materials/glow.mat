@@ -1,0 +1,38 @@
+// Halação/brilho (Kodak 500T): sprites aditivos voltados para a câmera ao redor das
+// fontes de luz, com núcleo quente e franja vermelho-alaranjada, somados ao bloom.
+material {
+    name : girassol_glow,
+    shadingModel : unlit,
+    requires : [ uv0, color ],
+    blending : add,
+    depthWrite : false,
+    culling : none,
+    parameters : [
+        { type : float, name : size },
+        { type : float, name : intensity }
+    ]
+}
+
+vertex {
+    void materialVertex(inout MaterialVertexInputs material) {
+        vec2 corner = material.uv0 * 2.0 - 1.0;
+        float s = materialParams.size * max(material.color.a, 0.2);
+        mat4 v2w = getWorldFromViewMatrix();
+        vec3 right = v2w[0].xyz;
+        vec3 up = v2w[1].xyz;
+        material.worldPosition.xyz += (right * corner.x + up * corner.y) * s;
+    }
+}
+
+fragment {
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+        vec2 p = getUV0() * 2.0 - 1.0;
+        float d = dot(p, p);
+        float core = exp(-d * 9.0);
+        float fringe = exp(-d * 2.2) * (1.0 - smoothstep(0.75, 1.0, d));
+        vec3 halation = vec3(1.0, 0.36, 0.12);
+        vec3 c = getColor().rgb * core + halation * fringe * 0.55;
+        material.baseColor = vec4(c * materialParams.intensity, 0.0);
+    }
+}

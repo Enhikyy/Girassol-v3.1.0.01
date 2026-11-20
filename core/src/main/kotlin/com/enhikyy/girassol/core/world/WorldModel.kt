@@ -13,10 +13,13 @@ import com.enhikyy.girassol.core.rsi.RsiPromotionDecision
 import com.enhikyy.girassol.core.social.AdicoInstitutionRule
 import com.enhikyy.girassol.core.social.CliodynamicsSnapshot
 import com.enhikyy.girassol.core.social.DunbarSocialNetwork
+import com.enhikyy.girassol.core.forge.LoraAdapterState
+import com.enhikyy.girassol.core.forge.LoraCycleRecord
+import com.enhikyy.girassol.core.forge.LoraSample
 import kotlinx.serialization.Serializable
 
 /** Versão das regras do mundo. Eventos de versões anteriores mantêm suas regras históricas. */
-const val CURRENT_RULES_VERSION = 9
+const val CURRENT_RULES_VERSION = 10
 
 @Serializable
 enum class DistrictType(val label: String) {
@@ -113,7 +116,8 @@ data class Intention(
     val viaDeliberation: Boolean,
     val viaReflex: Boolean,
     val claimUsed: String? = null,
-    val claimVerified: Boolean = true
+    val claimVerified: Boolean = true,
+    val viaNeural: Boolean = false
 )
 
 @Serializable
@@ -171,7 +175,12 @@ data class Citizen(
     var lastSleepConsolidationDay: Long = -1L,
     var successes: Int = 0,
     var failures: Int = 0,
-    var lastAction: ActionType? = null
+    var lastAction: ActionType? = null,
+    var lastSpeech: String = "",
+    var lastSpeechTick: Long = -1L,
+    var neuralSuggestion: String? = null,
+    var neuralSuggestionTick: Long = -1L,
+    var neuralDecisions: Int = 0
 ) {
     fun ageDays(tick: Long): Double = (tick - birthTick).toDouble() / TICKS_PER_DAY
     fun trait(name: String): Double = genome.expressTrait(name)
@@ -279,7 +288,12 @@ data class WorldState(
     var admissionCap: Int = 150,
     var dayFoodProduced: Double = 0.0,
     var dayFoodConsumed: Double = 0.0,
-    var lastExpansionTick: Long = -100000L
+    var lastExpansionTick: Long = -100000L,
+    var lora: LoraAdapterState = LoraAdapterState.initial(seed xor 0x10BA_0A0AL),
+    val loraPendingSamples: MutableList<LoraSample> = mutableListOf(),
+    val loraLedger: MutableList<LoraCycleRecord> = mutableListOf(),
+    var neuralDecisionsApplied: Long = 0L,
+    var speechesEmitted: Long = 0L
 ) {
     val widthTiles: Int get() = districtsPerSide * districtSize
     fun tileAt(x: Int, z: Int): TileType = TileType.entries[tiles[z * widthTiles + x]]

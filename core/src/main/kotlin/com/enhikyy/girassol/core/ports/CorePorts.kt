@@ -1,0 +1,67 @@
+package com.enhikyy.girassol.core.ports
+
+import com.enhikyy.girassol.core.cognition.Deliberator
+import com.enhikyy.girassol.core.cognition.SymbolicLookaheadDeliberator
+import com.enhikyy.girassol.core.forge.KotlinLoraTrainer
+import com.enhikyy.girassol.core.forge.LoraTrainerPort
+import com.enhikyy.girassol.core.world.Pathfinding
+import com.enhikyy.girassol.core.world.WorldState
+
+/**
+ * Portas do WorldCore. O núcleo é JVM puro; o app Android injeta implementações
+ * nativas (C++ via JNI) que precisam ser bit a bit equivalentes às de referência em
+ * Kotlin — a paridade é verificada por testes nos dois lados e na inicialização.
+ */
+interface PathfinderPort {
+    val backend: String
+    fun findPath(state: WorldState, sx: Int, sz: Int, gx: Int, gz: Int, trail: FloatArray?, danger: FloatArray?): MutableList<Int>
+}
+
+object KotlinPathfinder : PathfinderPort {
+    override val backend = "kotlin-astar"
+    override fun findPath(state: WorldState, sx: Int, sz: Int, gx: Int, gz: Int, trail: FloatArray?, danger: FloatArray?) =
+        Pathfinding.findPath(state, sx, sz, gx, gz, trail, danger)
+}
+
+/** Pedido de deliberação neural assíncrona (motor GGUF local). */
+data class NeuralRequest(
+    val agentId: String,
+    val tick: Long,
+    val prompt: NeuralPrompt,
+    val allowedActions: List<String>
+)
+
+data class NeuralPrompt(val system: String, val user: String, val grammar: String)
+
+/** Resultado validado pela gramática GBNF e pelo parser; vira evento canônico ao ser aplicado. */
+data class NeuralDecision(
+    val agentId: String,
+    val requestTick: Long,
+    val action: String,
+    val thought: String,
+    val speech: String,
+    val tokens: Int,
+    val millis: Long,
+    val backend: String
+)
+
+/**
+ * Porta assíncrona do LLM. Disponibilidade e latência não afetam o estado do mundo:
+ * apenas os resultados drenados no estágio 1 (registrados como eventos) entram na
+ * simulação — o determinismo é condicionado ao log de eventos.
+ */
+interface NeuralDeliberationPort {
+    fun isAvailable(): Boolean
+    fun trySubmit(request: NeuralRequest): Boolean
+    fun drainResults(): List<NeuralDecision>
+}
+
+data class CorePorts(
+    val deliberator: Deliberator = SymbolicLookaheadDeliberator(),
+    val pathfinder: PathfinderPort = KotlinPathfinder,
+    val lora: LoraTrainerPort = KotlinLoraTrainer,
+    val neural: NeuralDeliberationPort? = null
+) {
+    /** Portas usadas em Shadow-Replay/sandbox: sem LLM (contrafactual puramente simbólico). */
+    fun forShadow(): CorePorts = copy(neural = null)
+}
