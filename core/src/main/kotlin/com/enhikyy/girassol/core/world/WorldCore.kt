@@ -1,0 +1,1158 @@
+package com.enhikyy.girassol.core.world
+
+import com.enhikyy.girassol.core.biology.Allele
+import com.enhikyy.girassol.core.biology.DiploidGenome
+import com.enhikyy.girassol.core.biology.DiploidLocus
+import com.enhikyy.girassol.core.biology.SemanticCollapseGuard
+import com.enhikyy.girassol.core.biology.SkillMasteryState
+import com.enhikyy.girassol.core.biology.VoyagerProceduralSkill
+import com.enhikyy.girassol.core.cognition.ActiveInferencePianoOrchestrator
+import com.enhikyy.girassol.core.cognition.AllostaticThermalCoupling
+import com.enhikyy.girassol.core.cognition.CoreSelfAnchor
+import com.enhikyy.girassol.core.cognition.DeliberationContext
+import com.enhikyy.girassol.core.cognition.DeliberationOption
+import com.enhikyy.girassol.core.cognition.Deliberator
+import com.enhikyy.girassol.core.cognition.GlobalWorkspaceStage
+import com.enhikyy.girassol.core.cognition.PerceptualSignal
+import com.enhikyy.girassol.core.cognition.PianoCognitiveBusSnapshot
+import com.enhikyy.girassol.core.cognition.SymbolicLookaheadDeliberator
+import com.enhikyy.girassol.core.memory.AssimilationOutcome
+import com.enhikyy.girassol.core.memory.AssociativeMemoryNode
+import com.enhikyy.girassol.core.memory.EpistemicImmunity
+import com.enhikyy.girassol.core.memory.FourLayerMemoryAndSleepEngine
+import com.enhikyy.girassol.core.memory.MemoryLayer
+import com.enhikyy.girassol.core.memory.SubjectiveOpinion
+import com.enhikyy.girassol.core.qd.EliteNicheCell
+import com.enhikyy.girassol.core.reflex.KotlinTsetlinMachine
+import com.enhikyy.girassol.core.social.AdicoInstitutionRule
+import com.enhikyy.girassol.core.social.DeonticOperator
+import com.enhikyy.girassol.core.social.DunbarSocialNetwork
+import com.enhikyy.girassol.core.social.SocialDynamicsAndCliodynamics
+import com.enhikyy.girassol.core.util.SplitMix64
+import com.enhikyy.girassol.core.util.StreamSeeds
+import com.enhikyy.girassol.core.util.Sha256
+import com.enhikyy.girassol.core.util.fmt
+import com.enhikyy.girassol.core.world.StockFlowDoubleEntryLedger.Companion.CENTRAL_BANK
+import com.enhikyy.girassol.core.world.StockFlowDoubleEntryLedger.Companion.COMMUNAL_COMMONS
+import com.enhikyy.girassol.core.world.StockFlowDoubleEntryLedger.Companion.METABOLIC_SINK
+import com.enhikyy.girassol.core.world.StockFlowDoubleEntryLedger.Companion.NATURE_RESERVOIR
+import kotlin.math.abs
+import kotlin.math.ln
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.random.Random
+
+const val FOOD = "ALIMENTO"
+const val MATERIAL = "MATERIAL"
+const val CREDIT = "CREDITO"
+
+const val CH_TRAIL = "TRAIL_WEAR"
+const val CH_FOOD = "FOOD_SCENT"
+const val CH_DANGER = "DANGER_TRACE"
+const val CH_SOCIAL = "SOCIAL_GATHERING"
+
+/** Perfil de uma ação: ganho total de cada motivo, duração e tipo de objeto exigido. */
+data class ActionProfile(
+    val action: ActionType,
+    val objectType: SmartObjectType?,
+    val durationTicks: Int,
+    val needGains: Map<Need, Double>
+)
+
+val ACTION_PROFILES: Map<ActionType, ActionProfile> = listOf(
+    ActionProfile(ActionType.COMER, SmartObjectType.CASA, 20, mapOf(Need.FOME to 0.60)),
+    ActionProfile(ActionType.DESCANSAR, SmartObjectType.CASA, 90, mapOf(Need.ENERGIA to 0.65)),
+    ActionProfile(ActionType.BANHO, SmartObjectType.CASA, 15, mapOf(Need.HIGIENE to 0.70)),
+    ActionProfile(ActionType.COLHER, SmartObjectType.HORTA, 40, mapOf(Need.PROPOSITO to 0.18, Need.ENERGIA to -0.06)),
+    ActionProfile(ActionType.RECICLAR, SmartObjectType.COMPOSTEIRA, 40, mapOf(Need.PROPOSITO to 0.18, Need.HIGIENE to -0.10)),
+    ActionProfile(ActionType.MANTER_USINA, SmartObjectType.USINA_SOLAR, 40, mapOf(Need.PROPOSITO to 0.20, Need.ENERGIA to -0.06)),
+    ActionProfile(ActionType.PESQUISAR, SmartObjectType.LABORATORIO, 50, mapOf(Need.PROPOSITO to 0.30, Need.DIVERSAO to 0.12)),
+    ActionProfile(ActionType.ESTUDAR, SmartObjectType.ESCOLA, 40, mapOf(Need.PROPOSITO to 0.18, Need.SOCIAL to 0.08)),
+    ActionProfile(ActionType.SOCIALIZAR, SmartObjectType.PRACA, 45, mapOf(Need.SOCIAL to 0.50, Need.DIVERSAO to 0.30)),
+    ActionProfile(ActionType.CONTRIBUIR, SmartObjectType.PRACA, 10, mapOf(Need.PROPOSITO to 0.20, Need.SOCIAL to 0.10)),
+    ActionProfile(ActionType.CONSTRUIR, SmartObjectType.OFICINA, 60, mapOf(Need.PROPOSITO to 0.35, Need.ENERGIA to -0.08)),
+    ActionProfile(ActionType.EXPLORAR, null, 1, mapOf(Need.DIVERSAO to 0.20))
+).associateBy { it.action }
+
+private val BASE_DECAY = mapOf(
+    Need.FOME to 0.0016, Need.ENERGIA to 0.0011, Need.SOCIAL to 0.0010,
+    Need.DIVERSAO to 0.0008, Need.HIGIENE to 0.0007, Need.PROPOSITO to 0.0007
+)
+
+val TRAITS = listOf("metabolismo", "sociabilidade", "curiosidade", "aptidao", "conscienciosidade", "longevidade", "amabilidade")
+
+private val FIRST_NAMES = listOf(
+    "Ana", "Bento", "Cecília", "Davi", "Elisa", "Fábio", "Gabriela", "Heitor", "Iara", "João", "Kaique", "Lívia",
+    "Miguel", "Nina", "Otávio", "Paula", "Quitéria", "Rafael", "Sofia", "Tiago", "Ursula", "Vicente", "Wanda",
+    "Yuri", "Zélia", "Benedita", "Caio", "Dalva", "Enzo", "Flora", "Gael", "Helena", "Ícaro", "Jurema", "Lara",
+    "Moacir", "Noemi", "Orlando", "Pietra", "Raul", "Sara", "Teodoro", "Valentina", "Augusto", "Beatriz", "Cauã"
+)
+private val SURNAMES = listOf(
+    "Girassol", "Ipê", "Jatobá", "Aroeira", "Cajueiro", "Buriti", "Araçá", "Pitanga", "Jacarandá", "Umbu",
+    "Pequi", "Babaçu", "Carnaúba", "Imbuia", "Peroba", "Mangaba"
+)
+
+/** Relatório do tick (consumido pelo escritor único de persistência e pela UI). */
+data class TickReport(
+    val tick: Long,
+    val events: List<CanonicalEvent>,
+    val ledgerEntries: List<LedgerEntry>,
+    val invariantViolations: List<String>
+)
+
+private data class Proposal(val citizen: Citizen, val intention: Intention, val priority: Double)
+
+/**
+ * WorldCore — autoridade única da realidade física, econômica e temporal.
+ * Cada tick executa 12 estágios com barreiras (ver docs/ARQUITETURA.md). Toda
+ * mutação relevante emite um [CanonicalEvent] encadeado por SHA-256.
+ */
+class WorldCore(
+    val state: WorldState,
+    private val deliberator: Deliberator = SymbolicLookaheadDeliberator(),
+    /** Em shadow-replay os eventos não são retidos para persistência. */
+    private val shadow: Boolean = false
+) {
+    private val memoryEngine = FourLayerMemoryAndSleepEngine(maxNodesPerAgent = MAX_MEMORIES)
+    private val workspace = GlobalWorkspaceStage(3)
+    private val tickEvents = mutableListOf<CanonicalEvent>()
+    private val violations = mutableListOf<String>()
+
+    // ===================================================================== criação
+
+    companion object {
+        const val MAX_MEMORIES = 160
+        const val RSI_PERIOD_TICKS = TICKS_PER_DAY * 3
+        const val TSETLIN_FEATURES = 16
+        const val MAX_DISTRICTS_PER_SIDE = 9
+        const val REFLEX_CONFIDENCE = 0.6
+
+        fun create(seed: Long, initialPopulation: Int = 24, deliberator: Deliberator = SymbolicLookaheadDeliberator()): WorldCore {
+            val state = WorldState(seed = seed, board = SpatialStigmergyAndReservationBoard(36, 36, cellSize = 1f))
+            state.districts += CityGenerator.initialLayout(seed)
+            CityGenerator.rebuildTiles(state)
+            state.board.resize(state.widthTiles, state.widthTiles)
+            for (d in state.districts) CityGenerator.spawnObjectsFor(state, d)
+            state.institutions += defaultInstitutions()
+            val core = WorldCore(state, deliberator)
+            core.emit("GENESE", null, "seed=$seed;districts=${state.districts.size};rules=$CURRENT_RULES_VERSION")
+            state.ledger.mintInitialEndowment(COMMUNAL_COMMONS, FOOD, 40.0, 0L, state.lastEventHash)
+            state.ledger.mintInitialEndowment(COMMUNAL_COMMONS, MATERIAL, 6.0, 0L, state.lastEventHash)
+            val rng = StreamSeeds.rng(seed, "WORLD", 0L, "population")
+            repeat(initialPopulation) { core.spawnCitizen(randomGenome(rng), emptyList(), 0, rng) }
+            return core
+        }
+
+        fun defaultInstitutions(): List<AdicoInstitutionRule> = listOf(
+            AdicoInstitutionRule(
+                ruleId = "cota-comuns", attributes = setOf("MORADOR"), deontic = DeonticOperator.PERMITIDO,
+                aimAction = "RETIRAR_COMUNS", conditions = "", orElseSanctionUnits = 1, maxQuotaPerWindow = 3,
+                description = "Moradores PODEM retirar alimento dos comuns até a cota diária, SENÃO pagam sanção"
+            ),
+            AdicoInstitutionRule(
+                ruleId = "colheita-seca", attributes = setOf("MORADOR"), deontic = DeonticOperator.PERMITIDO,
+                aimAction = "COLHER", conditions = "SECA", orElseSanctionUnits = 2, maxQuotaPerWindow = 2,
+                description = "Durante a SECA, moradores PODEM colher no máximo 2 vezes por dia, SENÃO sanção"
+            ),
+            AdicoInstitutionRule(
+                ruleId = "manutencao-obrigatoria", attributes = setOf("ADULTO"), deontic = DeonticOperator.OBRIGADO,
+                aimAction = "CONTRIBUIR", conditions = "ESCASSEZ", orElseSanctionUnits = 1, maxQuotaPerWindow = 1,
+                description = "Em ESCASSEZ dos comuns, adultos DEVEM contribuir ao menos 1 vez por dia, SENÃO sanção"
+            )
+        )
+
+        fun randomGenome(rng: SplitMix64): DiploidGenome = DiploidGenome(
+            TRAITS.associateWith {
+                DiploidLocus(
+                    Allele(0.2 + 0.6 * rng.nextDouble(), 0.2 + 0.8 * rng.nextDouble()),
+                    Allele(0.2 + 0.6 * rng.nextDouble(), 0.2 + 0.8 * rng.nextDouble())
+                )
+            }
+        )
+    }
+
+    fun spawnCitizen(genome: DiploidGenome, parents: List<String>, generation: Int, rng: SplitMix64, nearHome: String? = null): Citizen {
+        val serial = state.nextCitizenSerial++
+        val id = "C$serial"
+        val name = FIRST_NAMES[rng.nextInt(FIRST_NAMES.size)] + " " + SURNAMES[rng.nextInt(SURNAMES.size)]
+        val home = nearHome?.let { state.obj(it) } ?: leastOccupiedHome()
+        val c = Citizen(
+            id = id, name = name, generation = generation, birthTick = state.tick, parents = parents, genome = genome,
+            x = home.tileX, z = home.tileZ, homeObjectId = home.id,
+            needs = Need.entries.associateWith { 0.65 + 0.3 * rng.nextDouble() }.toMutableMap(),
+            social = DunbarSocialNetwork(id),
+            skills = SKILLS.associateWith { SkillMasteryState(it, masteryProb = 0.05 + 0.15 * rng.nextDouble()) }.toMutableMap(),
+            reflex = KotlinTsetlinMachine(TSETLIN_FEATURES, 20, 64, 3.5f, 8, StreamSeeds.derive(state.seed, id, state.tick, "tsetlin")),
+            opinionCommons = rng.nextDouble() * 2 - 1,
+            intrinsicOpinionCommons = rng.nextDouble() * 2 - 1
+        )
+        state.citizens += c
+        val h = emit("NASCIMENTO", id, "nome=$name;geracao=$generation;pais=${parents.joinToString(",")}")
+        state.ledger.mintInitialEndowment(c.id, CREDIT, 10.0, state.tick, h)
+        if (parents.isEmpty()) state.ledger.mintInitialEndowment(c.id, FOOD, 6.0, state.tick, h)
+        return c
+    }
+
+    private fun leastOccupiedHome(): SmartObject {
+        val homes = state.objects.filter { it.type == SmartObjectType.CASA }
+        val counts = state.aliveCitizens().groupingBy { it.homeObjectId }.eachCount()
+        return homes.minWith(compareBy<SmartObject> { counts[it.id] ?: 0 }.thenBy { it.id })
+    }
+
+    // ===================================================================== eventos
+
+    fun emit(type: String, actorId: String?, payload: String): String {
+        val seq = ++state.eventSeq
+        val body = "$seq|${state.tick}|$CURRENT_RULES_VERSION|$type|${actorId ?: "-"}|$payload|${state.lastEventHash}"
+        val hash = Sha256.hex(body)
+        val ev = CanonicalEvent(seq, state.tick, CURRENT_RULES_VERSION, type, actorId, payload, state.lastEventHash, hash)
+        state.lastEventHash = hash
+        if (!shadow) {
+            tickEvents += ev
+            state.recentEvents += ev
+            if (state.recentEvents.size > 400) state.recentEvents.subList(0, state.recentEvents.size - 400).clear()
+        }
+        return hash
+    }
+
+    // ===================================================================== tick
+
+    fun step(telemetry: TelemetryInput? = null, wallClockUtc: Long = 0L): TickReport {
+        tickEvents.clear()
+        violations.clear()
+        state.tick++
+        state.wallClockUtcAtLastTick = wallClockUtc
+        val tick = state.tick
+
+        // 1. Telemetria & governança térmica
+        if (telemetry != null && telemetry != state.telemetry) {
+            state.telemetry = telemetry
+            emit("TELEMETRIA", null, "termico=${telemetry.thermalTier};memMb=${telemetry.availableMemoryMb}")
+        }
+        val tier = when {
+            state.telemetry.thermalTier >= 3 -> AllostaticThermalCoupling.ThermalTier.SEVERE_OR_CRITICAL
+            state.telemetry.thermalTier == 2 -> AllostaticThermalCoupling.ThermalTier.MODERATE
+            else -> AllostaticThermalCoupling.ThermalTier.NONE_OR_LIGHT
+        }
+
+        // 2. Ambiente, estigmergia & bioquímica
+        stageEnvironment()
+
+        val alive = state.aliveCitizens().sortedBy { it.id }
+        val actionCounts = populationActionCounts(alive)
+        val proposals = mutableListOf<Proposal>()
+        val trail = state.board.channelSnapshot(CH_TRAIL)
+        val danger = state.board.channelSnapshot(CH_DANGER)
+
+        for (c in alive) {
+            if (c.intention != null) continue
+            val rng = StreamSeeds.rng(state.seed, c.id, tick, "decisao")
+            // 3. Percepção & competição atencional
+            val signals = perceive(c)
+            val broadcast = workspace.broadcastWinningSignals(signals)
+            // 4. Memória & atualização epistêmica (ACT-R + MemRL + A-MEM)
+            val tags = broadcast.mapNotNull { it.entityId }.toSet() + broadcast.map { it.sourceModule }.toSet()
+            memoryEngine.clearWorkingMemory()
+            val recalled = memoryEngine.retrieveHybrid(c.memories, tick, tags, emptySet(), topK = 4)
+            // 5. Appraisal emocional
+            appraise(c)
+            // 6. Utilidade & energia livre esperada G(π)
+            val candidates = buildCandidates(c, actionCounts, tier)
+            if (candidates.isEmpty()) continue
+            val sorted = candidates.sortedWith(compareBy<Candidate> { it.efe }.thenBy { it.intention.action.ordinal })
+            // 7. Planejamento com histerese (softmax de precisão γ sobre −G)
+            var idx = ActiveInferencePianoOrchestrator.selectPolicyWithHysteresis(
+                sorted.map { it.intention.action.name },
+                sorted.map { it.efe },
+                c.lastAction?.name,
+                state.policy.intentionSwitchHysteresis,
+                6.0,
+                rng.nextDouble()
+            )
+            // 8. Gate cognitivo: reflexo Tsetlin → deliberação PIANO quando necessário
+            val features = reflexFeatures(c, sorted[idx].intention.action)
+            val reflexConf = c.reflex.confidence(features).toDouble()
+            val reflexPositive = c.reflex.predictVote(features) > 0
+            val u1 = -sorted[0].efe
+            val u2 = if (sorted.size > 1) -sorted[1].efe else u1 - 1.0
+            val urgency = 1.0 - (c.needs.values.minOrNull() ?: 1.0)
+            val invoke = AllostaticThermalCoupling.shouldInvokeLocalLlm(
+                topActionUtility = urgency.coerceIn(0.0, 1.0),
+                secondActionUtility = urgency - (u1 - u2),
+                tieThreshold = state.policy.cognitiveGateTieThreshold,
+                minUrgency = state.policy.cognitiveGateMinUrgency,
+                consecutiveHtnFailures = c.consecutiveFailures,
+                socialNegotiationActive = false,
+                tier = tier,
+                tsetlinReflexConfidence = if (reflexPositive) reflexConf else 0.0
+            )
+            var viaDelib = false
+            var viaReflex = false
+            if (invoke) {
+                val bus = buildBus(c, broadcast, recalled)
+                val ctx = DeliberationContext(bus, sorted.map { cand ->
+                    DeliberationOption(cand.intention.action.name, cand.efe, cand.projected, cand.travel)
+                }, Need.entries.map { decayFor(c, it) }.toDoubleArray())
+                val res = deliberator.deliberate(ctx)
+                if (res.chosenIndex in sorted.indices) idx = res.chosenIndex
+                c.lastThought = res.rationale
+                val cost = AllostaticThermalCoupling.computeNeuralDeliberationCost(tier, state.policy.thermalThrottleSensitivity, c.needs.getValue(Need.ENERGIA))
+                c.needs[Need.ENERGIA] = (c.needs.getValue(Need.ENERGIA) - cost * 0.05).coerceIn(0.0, 1.0)
+                state.deliberationTicks += tick
+                viaDelib = true
+            } else if (reflexPositive && reflexConf >= REFLEX_CONFIDENCE) {
+                state.reflexTicks += tick
+                viaReflex = true
+                c.lastThought = "Reflexo Tsetlin (confiança ${"%.2f".fmt(reflexConf)}) → ${sorted[idx].intention.action.label}"
+            } else {
+                c.lastThought = "Inferência ativa: G=${"%.3f".fmt(sorted[idx].efe)} → ${sorted[idx].intention.action.label}"
+            }
+            val chosen = sorted[idx]
+            // 9. Submissão simultânea de propostas
+            proposals += Proposal(c, chosen.intention.copy(viaDeliberation = viaDelib, viaReflex = viaReflex), urgency)
+        }
+
+        // 10. Arbitragem & reservas (ordem determinística: urgência desc, id asc)
+        for (p in proposals.sortedWith(compareByDescending<Proposal> { it.priority }.thenBy { it.citizen.id })) {
+            val objId = p.intention.targetObjectId
+            if (objId != null && !state.board.tryReserve(objId, p.citizen.id, tick, ttlTicks = 400L)) {
+                p.citizen.consecutiveFailures++
+                continue
+            }
+            val path = Pathfinding.findPath(state, p.citizen.x, p.citizen.z, p.intention.targetX, p.intention.targetZ, trail, danger)
+            if (path.isEmpty() && (p.citizen.x != p.intention.targetX || p.citizen.z != p.intention.targetZ)) {
+                objId?.let { state.board.releaseReservation(it, p.citizen.id) }
+                p.citizen.consecutiveFailures++
+                continue
+            }
+            p.citizen.intention = p.intention
+            p.citizen.path = path
+            p.citizen.actionTicksRemaining = -1
+            noteClaimUsage(p.citizen, p.intention)
+        }
+
+        // 11. Execução canônica & contabilidade
+        for (c in alive) executeIntention(c)
+
+        // 12. Sociedade, aprendizagem, evolução & snapshot
+        stageSociety(alive)
+        stageLifeCycle()
+        if (tick % TICKS_PER_DAY == 0L) stageDaily()
+        updateMetrics()
+        checkInvariants()
+
+        val entries = state.ledger.drainPendingEntries()
+        return TickReport(tick, tickEvents.toList(), if (shadow) emptyList() else entries, violations.toList())
+    }
+
+    // ===================================================================== estágio 2
+
+    private fun stageEnvironment() {
+        state.board.stepDiffusionAndEvaporation(evap = 0.02f, diff = 0.10f)
+        if (state.tick % TICKS_PER_DAY == 1L) {
+            val r = StreamSeeds.rng(state.seed, "WORLD", state.tick, "clima")
+            if (!state.inDrought() && r.nextDouble() < 0.10) {
+                state.droughtUntilTick = state.tick + TICKS_PER_DAY * 2
+                emit("CLIMA", null, "seca_ate=${state.droughtUntilTick}")
+            }
+        }
+        val night = state.isNight()
+        for (c in state.aliveCitizens()) {
+            for (n in Need.entries) {
+                var d = decayFor(c, n)
+                if (n == Need.ENERGIA && night && c.intention?.action != ActionType.DESCANSAR) d *= 1.4
+                c.needs[n] = (c.needs.getValue(n) - d).coerceIn(0.0, 1.0)
+            }
+            if (c.needs.getValue(Need.FOME) <= 0.0) {
+                c.starvationTicks++
+                state.board.depositPheromone(CH_DANGER, c.x.toFloat(), c.z.toFloat(), 0.4f)
+            } else c.starvationTicks = 0
+        }
+        // energia urbana: consumo pelos edifícios; laboratórios e escolas dependem dela
+        state.cityEnergy = (state.cityEnergy - 0.0015 * state.objects.size).coerceAtLeast(0.0)
+        for (o in state.objects) if (o.contaminatedUntilTick in 0 until state.tick) o.contaminatedUntilTick = -1L
+    }
+
+    private fun decayFor(c: Citizen, n: Need): Double {
+        val base = BASE_DECAY.getValue(n)
+        return when (n) {
+            Need.FOME -> base * (0.7 + 0.6 * c.trait("metabolismo"))
+            Need.SOCIAL -> base * (0.5 + c.trait("sociabilidade"))
+            Need.PROPOSITO -> base * (0.6 + 0.8 * c.trait("conscienciosidade"))
+            Need.DIVERSAO -> base * (0.6 + 0.8 * c.trait("curiosidade"))
+            else -> base
+        }
+    }
+
+    // ===================================================================== estágios 3–6
+
+    private fun perceive(c: Citizen): List<PerceptualSignal> {
+        val out = mutableListOf<PerceptualSignal>()
+        for ((n, v) in c.needs) out += PerceptualSignal(n.name, "${n.label}=${"%.2f".fmt(v)}", n.name, (1.0 - v) * 1.1)
+        val food = state.board.readPheromone(CH_FOOD, c.x.toFloat(), c.z.toFloat())
+        if (food > 0.5f) out += PerceptualSignal("ESTIGMERGIA", "cheiro de comida", "FOOD_SCENT", (food / 10f).toDouble().coerceAtMost(0.9))
+        val danger = state.board.readPheromone(CH_DANGER, c.x.toFloat(), c.z.toFloat())
+        if (danger > 0.5f) out += PerceptualSignal("ESTIGMERGIA", "rastro de perigo", "DANGER", (danger / 5f).toDouble().coerceAtMost(1.0))
+        if (state.inDrought()) out += PerceptualSignal("CLIMA", "seca", "SECA", 0.5)
+        return out
+    }
+
+    private fun appraise(c: Citizen) {
+        val e = c.emotion
+        val deficit = 1.0 - c.meanNeed()
+        val r = c.lastReward
+        // OCC/EMA simplificado: desejabilidade do último resultado → valência; déficit → excitação
+        e.valence = (0.8 * e.valence + 0.2 * (r * 2.0 - deficit)).coerceIn(-1.0, 1.0)
+        e.arousal = (0.85 * e.arousal + 0.15 * (deficit * 1.5 + abs(r))).coerceIn(0.0, 1.0)
+        e.mood = (0.97 * e.mood + 0.03 * e.valence).coerceIn(-1.0, 1.0)
+        e.rumination = if (c.consecutiveFailures >= 2) (e.rumination + 0.1).coerceAtMost(1.0) else (e.rumination * 0.95)
+        e.lastAppraisal = when {
+            r > 0.15 -> "alegria"
+            r < -0.1 && c.consecutiveFailures > 1 -> "frustração"
+            deficit > 0.55 -> "angústia"
+            e.mood > 0.3 -> "contentamento"
+            else -> "neutro"
+        }
+    }
+
+    private data class Candidate(val intention: Intention, val efe: Double, val projected: DoubleArray, val travel: Int)
+
+    private fun buildCandidates(c: Citizen, popCounts: Map<String, Int>, tier: AllostaticThermalCoupling.ThermalTier): List<Candidate> {
+        val out = mutableListOf<Candidate>()
+        val foodWallet = state.ledger.getBalance(c.id, FOOD)
+        val commonsFood = state.ledger.getBalance(COMMUNAL_COMMONS, FOOD)
+        val material = state.ledger.getBalance(c.id, MATERIAL) + state.ledger.getBalance(COMMUNAL_COMMONS, MATERIAL)
+        val ads = state.board.queryReachable(c.id, c.x.toFloat(), c.z.toFloat(), 10_000f, state.tick)
+        val neural = AllostaticThermalCoupling.computeNeuralDeliberationCost(tier, state.policy.thermalThrottleSensitivity, c.needs.getValue(Need.ENERGIA))
+        val home = state.obj(c.homeObjectId)
+        for (action in ActionType.entries) {
+            if (action == ActionType.OCIOSO) continue
+            val profile = ACTION_PROFILES[action] ?: continue
+            // hard gates
+            when (action) {
+                ActionType.COMER -> if (foodWallet < 1.0 && commonsFood < 1.0) continue
+                ActionType.CONSTRUIR -> if (material < 3.0) continue
+                ActionType.CONTRIBUIR -> if (foodWallet < 5.0) continue
+                ActionType.PESQUISAR -> if (state.cityEnergy < 2.0) continue
+                else -> {}
+            }
+            val targets: List<Pair<SmartObject?, Float>> = when {
+                profile.objectType == null -> listOf(null to 0f)
+                profile.objectType == SmartObjectType.CASA && home != null &&
+                    ads.any { it.first.sourceEntityId == home.id } -> listOf(home to manhattan(c, home).toFloat())
+                else -> ads.asSequence().filter { it.first.actionType == profile.objectType.name }
+                    .take(3).mapNotNull { (ad, d) -> state.obj(ad.sourceEntityId)?.let { it to d } }.toList()
+            }
+            for ((obj, dist) in targets) {
+                val cand = evaluate(c, action, profile, obj, dist.toInt(), popCounts, neural)
+                if (cand != null) out += cand
+            }
+        }
+        return out
+    }
+
+    private fun manhattan(c: Citizen, o: SmartObject) = abs(c.x - o.tileX) + abs(c.z - o.tileZ)
+
+    private fun evaluate(
+        c: Citizen, action: ActionType, profile: ActionProfile, obj: SmartObject?, dist: Int,
+        popCounts: Map<String, Int>, neural: Double
+    ): Candidate? {
+        val needsNow = Need.entries.map { c.needs.getValue(it) }.toDoubleArray()
+        val skillEff = action.skill?.let { 0.6 + 0.6 * (c.skills[it]?.masteryProb ?: 0.1) } ?: 1.0
+        // crença sobre o rendimento do alvo (ignora crenças em quarentena)
+        val claim = obj?.let { "rendimento:${it.id}" }
+        val belief = claim?.let { c.beliefs[it] }?.takeIf { !it.quarantined }
+        val yieldP = belief?.opinion?.projectedProbability() ?: 0.6
+        val uncertainty = belief?.opinion?.uncertainty ?: 1.0
+        val travel = dist
+        val projected = DoubleArray(needsNow.size) { k ->
+            val n = Need.entries[k]
+            val gain = (profile.needGains[n] ?: 0.0) * (if ((profile.needGains[n] ?: 0.0) > 0) skillEff * (0.4 + 0.6 * yieldP / 0.6).coerceAtMost(1.4) else 1.0)
+            (needsNow[k] - decayFor(c, n) * (travel + profile.durationTicks) + gain).coerceIn(0.0, 1.0)
+        }
+        // produção econômica também tem valor pragmático (alimento futuro)
+        val foodWallet = state.ledger.getBalance(c.id, FOOD)
+        val economicBonus = when (action) {
+            ActionType.COLHER -> 0.25 * (1.0 - (foodWallet / 8.0).coerceAtMost(1.0)) * yieldP / 0.6
+            ActionType.MANTER_USINA -> 0.10 * (1.0 - (state.cityEnergy / 60.0).coerceAtMost(1.0))
+            ActionType.RECICLAR -> 0.05
+            ActionType.CONSTRUIR -> 0.06
+            ActionType.CONTRIBUIR -> 0.06 * (1.0 + c.trait("amabilidade")) * (if (state.ledger.getBalance(COMMUNAL_COMMONS, FOOD) < 10) 2.0 else 1.0)
+            ActionType.ESTUDAR -> 0.04 * (1.0 + c.trait("aptidao"))
+            else -> 0.0
+        }
+        // risco pragmático: déficit quadrático ponderado pela urgência (homeostase assimétrica)
+        var risk = 0.0
+        for (k in projected.indices) {
+            val deficit = 1.0 - projected[k]
+            val w = if (Need.entries[k] == Need.FOME || Need.entries[k] == Need.ENERGIA) 1.6 else 1.0
+            risk += w * deficit * deficit * (if (deficit > 0.7) 2.5 else 1.0)
+        }
+        risk -= economicBonus
+        // ganho epistêmico: redução esperada de incerteza sobre o alvo
+        val priorEntropy = entropyOf(uncertainty)
+        val posteriorEntropy = entropyOf(uncertainty * 0.5)
+        var epistemicWeight = state.policy.epistemicExplorationWeight * (0.5 + c.trait("curiosidade"))
+        if (action == ActionType.EXPLORAR) epistemicWeight *= 1.2
+        val memQ = memoryUtility(c, action)
+        val novelty = SemanticCollapseGuard.noveltyEpistemicBonus(action.name, popCounts)
+        var efe = ActiveInferencePianoOrchestrator.computeExpectedFreeEnergy(
+            predictedPragmaticRisk = risk,
+            priorEntropy = priorEntropy,
+            posteriorExpectedEntropy = posteriorEntropy,
+            epistemicWeight = epistemicWeight * 0.15,
+            neuralMetabolicCost = neural * 0.05
+        ) - 0.12 * memQ - novelty + 0.002 * travel
+        if (obj != null && state.board.readPheromone(CH_DANGER, obj.tileX.toFloat(), obj.tileZ.toFloat()) > 2f) efe += 0.05
+        if (action == ActionType.SOCIALIZAR && obj != null) efe -= 0.02 * state.board.readPheromone(CH_SOCIAL, obj.tileX.toFloat(), obj.tileZ.toFloat()).coerceAtMost(5f)
+
+        val (tx, tz, objId) = if (obj != null) Triple(obj.tileX, obj.tileZ, obj.id) else {
+            // EXPLORAR: vai verificar o alvo com crença mais incerta/não verificada
+            val target = explorationTarget(c) ?: return null
+            Triple(target.tileX, target.tileZ, null)
+        }
+        val forecast = action.skill?.let { c.skills[it]?.executionSuccessProbability(0.35, geneticAptitude = c.trait("aptidao")) } ?: 0.9
+        return Candidate(
+            Intention(action, objId, tx, tz, state.tick, -efe, forecast, false, false, claim,
+                belief?.verifiedByExperience ?: true),
+            efe, projected, travel
+        )
+    }
+
+    private fun entropyOf(u: Double): Double {
+        val p = (0.5 * u).coerceIn(1e-6, 0.5)
+        return -(p * ln(p) + (1 - p) * ln(1 - p))
+    }
+
+    private fun memoryUtility(c: Citizen, action: ActionType): Double {
+        var sum = 0.0
+        var n = 0
+        for (i in c.memories.indices.reversed()) {
+            val m = c.memories[i]
+            if (action.name in m.tags) { sum += m.qUtility; n++ }
+            if (n >= 12) break
+        }
+        return if (n == 0) 0.0 else sum / n
+    }
+
+    private fun explorationTarget(c: Citizen): SmartObject? {
+        // prioridade: crenças não verificadas (boatos) → objetos nunca visitados
+        val unverified = c.beliefs.values.filter { !it.verifiedByExperience }
+            .sortedWith(compareByDescending<HeldBelief> { it.opinion.uncertainty + if (it.quarantined) 0.5 else 0.0 }.thenBy { it.claimKey })
+        for (b in unverified) {
+            val o = state.obj(b.claimKey.removePrefix("rendimento:"))
+            if (o != null) return o
+        }
+        val known = c.beliefs.keys
+        val rng = StreamSeeds.rng(state.seed, c.id, state.tick, "explorar")
+        val unknown = state.objects.filter { "rendimento:${it.id}" !in known }
+        if (unknown.isNotEmpty()) return unknown[rng.nextInt(unknown.size)]
+        return state.objects[rng.nextInt(state.objects.size)]
+    }
+
+    private fun populationActionCounts(alive: List<Citizen>): Map<String, Int> {
+        val m = ActionType.entries.filter { it != ActionType.OCIOSO }.associate { it.name to 0 }.toMutableMap()
+        for (c in alive) c.intention?.let { m[it.action.name] = (m[it.action.name] ?: 0) + 1 }
+        return m
+    }
+
+    private fun reflexFeatures(c: Citizen, action: ActionType): ByteArray {
+        val f = ByteArray(TSETLIN_FEATURES)
+        var i = 0
+        for (n in Need.entries) f[i++] = if (c.needs.getValue(n) < 0.35) 1 else 0
+        f[i++] = if (state.ledger.getBalance(c.id, FOOD) >= 1.0) 1 else 0
+        f[i++] = if (state.isNight()) 1 else 0
+        f[i++] = if (state.inDrought()) 1 else 0
+        f[i++] = if (c.consecutiveFailures > 0) 1 else 0
+        // codificação binária de 6 bits da ação proposta
+        val code = action.ordinal
+        for (b in 0 until 6) f[i++] = ((code shr b) and 1).toByte()
+        return f
+    }
+
+    private fun buildBus(c: Citizen, broadcast: List<PerceptualSignal>, recalled: List<AssociativeMemoryNode>): PianoCognitiveBusSnapshot {
+        val needsArr = Need.entries.map { c.needs.getValue(it) }.toDoubleArray()
+        val prior = DoubleArray(6) { 1.0 / 6 }
+        val deficits = needsArr.map { (1.0 - it) + 1e-3 }
+        val sum = deficits.sum()
+        val posterior = deficits.map { it / sum }.toDoubleArray()
+        val lik = needsArr.map { it.coerceAtLeast(0.02) }.toDoubleArray()
+        return PianoCognitiveBusSnapshot(
+            agentId = c.id, tick = state.tick,
+            coreSelf = CoreSelfAnchor(c.id, c.name, c.birthTick, listOf(
+                if (c.trait("amabilidade") > 0.5) "cooperação" else "autonomia",
+                if (c.trait("curiosidade") > 0.5) "descoberta" else "estabilidade")),
+            activeNeedsSummary = Need.entries.joinToString(",") { "${it.name}=${"%.2f".fmt(c.needs.getValue(it))}" },
+            perceptionSummary = broadcast.joinToString(";") { it.summary },
+            memorySummary = recalled.joinToString(";") { it.content.take(40) },
+            socialSummary = "laços=${c.social.allTies().size}",
+            workspaceBroadcast = broadcast,
+            currentIntentionKey = c.intention?.action?.name,
+            variationalFreeEnergy = ActiveInferencePianoOrchestrator.computeVariationalFreeEnergy(posterior, prior, lik),
+            needsArray = needsArr
+        )
+    }
+
+    private fun noteClaimUsage(c: Citizen, intention: Intention) {
+        // Avalia se a decisão evitou algum alvo por boato não verificado (ação antes de verificar)
+        for (b in c.beliefs.values) {
+            if (b.verifiedByExperience || b.quarantined) continue
+            if (b.opinion.projectedProbability() < 0.3 && b.opinion.uncertainty < 0.5 && intention.targetObjectId != b.claimKey.removePrefix("rendimento:")) {
+                val objType = state.obj(b.claimKey.removePrefix("rendimento:"))?.type
+                if (objType != null && ACTION_PROFILES[intention.action]?.objectType == objType) {
+                    c.actedOnUnverifiedClaims++
+                    state.stressEvents.lastOrNull { it.targetId == b.claimKey && it.resolvedTick < 0 }?.let { it.actedBeforeVerification++ }
+                }
+            }
+        }
+        if (intention.action == ActionType.EXPLORAR) {
+            val target = state.objects.firstOrNull { it.tileX == intention.targetX && it.tileZ == intention.targetZ }
+            val b = target?.let { c.beliefs["rendimento:${it.id}"] }
+            if (b != null && !b.verifiedByExperience) {
+                c.verifiedBeforeActing++
+                state.stressEvents.lastOrNull { it.targetId == b.claimKey && it.resolvedTick < 0 }?.let { it.verifiedBeforeAction++ }
+            }
+        }
+    }
+
+    // ===================================================================== estágio 11
+
+    private fun executeIntention(c: Citizen) {
+        val it = c.intention ?: return
+        if (c.path.isNotEmpty()) {
+            val next = c.path.removeAt(0)
+            val w = state.widthTiles
+            val nx = next % w
+            val nz = next / w
+            if (state.tileAt(nx, nz).walkable || c.path.isEmpty()) {
+                c.x = nx; c.z = nz
+                state.board.depositPheromone(CH_TRAIL, nx.toFloat(), nz.toFloat(), 0.25f)
+            } else {
+                failIntention(c, "caminho bloqueado")
+            }
+            return
+        }
+        val profile = ACTION_PROFILES.getValue(it.action)
+        if (c.actionTicksRemaining < 0) c.actionTicksRemaining = profile.durationTicks
+        // aplica ganhos de forma contínua ao longo da duração
+        val skillEff = it.action.skill?.let { s -> 0.6 + 0.6 * (c.skills[s]?.masteryProb ?: 0.1) } ?: 1.0
+        for ((n, g) in profile.needGains) {
+            if (it.action == ActionType.COMER) continue // aplicado na conclusão, depende do alimento
+            val per = g / profile.durationTicks * (if (g > 0) skillEff.coerceAtMost(1.2) else 1.0) *
+                (if (it.action == ActionType.DESCANSAR && state.isNight()) 1.3 else 1.0)
+            c.needs[n] = (c.needs.getValue(n) + per).coerceIn(0.0, 1.0)
+        }
+        if (it.action == ActionType.SOCIALIZAR) state.board.depositPheromone(CH_SOCIAL, c.x.toFloat(), c.z.toFloat(), 0.15f)
+        c.actionTicksRemaining--
+        if (c.actionTicksRemaining > 0) return
+        completeIntention(c, it)
+    }
+
+    private fun failIntention(c: Citizen, reason: String) {
+        c.intention?.targetObjectId?.let { state.board.releaseReservation(it, c.id) }
+        c.intention = null
+        c.path.clear()
+        c.consecutiveFailures++
+        c.lastThought = "Falha: $reason"
+    }
+
+    private fun completeIntention(c: Citizen, it: Intention) {
+        val obj = it.targetObjectId?.let { id -> state.obj(id) }
+        val before = c.meanNeed()
+        val rng = StreamSeeds.rng(state.seed, c.id, state.tick, "execucao")
+        var success = true
+        var detail = ""
+        val roles = buildSet { add("MORADOR"); if (c.ageDays(state.tick) >= ADULT_DAYS) add("ADULTO") }
+        val contaminated = obj != null && obj.contaminatedUntilTick > state.tick
+        val skill = it.action.skill
+        if (skill != null) {
+            val st = c.skills.getValue(skill)
+            val p = st.executionSuccessProbability(0.35, geneticAptitude = c.trait("aptidao"))
+            success = rng.nextDouble() < p && !contaminated
+            c.skills[skill] = st.updateFromPractice(success, state.tick, c.trait("aptidao"))
+            state.forecastWindow += p
+            state.outcomeWindow += success
+            if (state.forecastWindow.size > 600) { state.forecastWindow.removeAt(0); state.outcomeWindow.removeAt(0) }
+        }
+        when (it.action) {
+            ActionType.COMER -> {
+                val h = emit("REFEICAO", c.id, "obj=${obj?.id}")
+                var ate = state.ledger.transfer(c.id, METABOLIC_SINK, FOOD, 1.0, state.tick, h)
+                if (!ate) {
+                    val usage = c.windowUsage["RETIRAR_COMUNS"] ?: 0
+                    val rule = state.institutions.firstOrNull { r -> r.aimAction == "RETIRAR_COMUNS" }
+                    val (ok, sanction) = rule?.evaluateActionCompliance(roles, "RETIRAR_COMUNS", activeCondition(), usage + 1) ?: (true to 0)
+                    if (state.ledger.withdrawFromCommunalPool(c.id, FOOD, 1.0, state.tick, h)) {
+                        c.windowUsage["RETIRAR_COMUNS"] = usage + 1
+                        ate = state.ledger.transfer(c.id, METABOLIC_SINK, FOOD, 1.0, state.tick, h)
+                        if (!ok) applySanction(c, rule!!, sanction + c.sanctionsReceived.coerceAtMost(4))
+                    }
+                }
+                if (ate) {
+                    c.needs[Need.FOME] = (c.needs.getValue(Need.FOME) + 0.60).coerceAtMost(1.0)
+                    state.dayFoodConsumed += 1.0
+                    state.metrics.foodConsumed += 1.0
+                } else { success = false; detail = "sem alimento" }
+            }
+            ActionType.COLHER -> {
+                if (state.inDrought()) {
+                    val usage = (c.windowUsage["COLHER"] ?: 0) + 1
+                    c.windowUsage["COLHER"] = usage
+                    val rule = state.institutions.firstOrNull { r -> r.aimAction == "COLHER" }
+                    val (ok, sanction) = rule?.evaluateActionCompliance(roles, "COLHER", "SECA", usage) ?: (true to 0)
+                    if (!ok) applySanction(c, rule!!, sanction)
+                }
+                if (success) {
+                    val niche = state.board.totalDistrictNicheBonus()
+                    val amount = 2.6 * (if (state.inDrought()) 0.45 else 1.0) * (1.0 + niche) * (0.8 + 0.4 * c.skills.getValue("cultivo").masteryProb)
+                    val h = emit("COLHEITA", c.id, "obj=${obj?.id};qtd=${"%.3f".fmt(amount)}")
+                    state.ledger.transfer(NATURE_RESERVOIR, c.id, FOOD, amount, state.tick, h, allowNegativeSource = true)
+                    state.dayFoodProduced += amount
+                    state.metrics.foodProduced += amount
+                    obj?.let { o -> state.board.depositPheromone(CH_FOOD, o.tileX.toFloat(), o.tileZ.toFloat(), 3f) }
+                    detail = "+${"%.1f".fmt(amount)} alimento"
+                } else detail = if (contaminated) "colheita contaminada" else "colheita falhou"
+            }
+            ActionType.RECICLAR -> if (success) {
+                val h = emit("RECICLAGEM", c.id, "obj=${obj?.id}")
+                state.ledger.transfer(NATURE_RESERVOIR, c.id, MATERIAL, 1.5, state.tick, h, allowNegativeSource = true)
+                state.metrics.materialProduced += 1.5
+                detail = "+1.5 material"
+            }
+            ActionType.MANTER_USINA -> if (success) {
+                val h = emit("ENERGIA", c.id, "obj=${obj?.id}")
+                state.cityEnergy += 20.0
+                state.metrics.energyProduced += 20.0
+                state.ledger.transfer(CENTRAL_BANK, c.id, CREDIT, 2.0, state.tick, h, allowNegativeSource = true)
+                detail = "+20 energia urbana, +2 créditos"
+            }
+            ActionType.PESQUISAR -> {
+                state.cityEnergy = (state.cityEnergy - 3.0).coerceAtLeast(0.0)
+                if (success) {
+                    // pesquisa registra a habilidade mais dominada como procedimento Voyager verificável
+                    val best = c.skills.values.maxWith(compareBy<SkillMasteryState> { s -> s.masteryProb }.thenBy { s -> s.skillId })
+                    if (best.isVoyagerShareableSkill()) {
+                        val reg = state.skillLibrary.registerVerifiedSkill(VoyagerProceduralSkill(
+                            skillId = best.skillId, authorAgentId = c.id,
+                            preconditions = listOf("energia_urbana>2", "objeto=${ACTION_PROFILES.values.first { p -> p.action.skill == best.skillId }.objectType}"),
+                            actionSequence = listOf("reservar", "deslocar", "executar:${best.skillId}", "verificar"),
+                            verifiedSuccessRate = best.masteryProb, createdAtTick = state.tick
+                        ))
+                        if (reg) emit("VOYAGER", c.id, "skill=${best.skillId};taxa=${"%.3f".fmt(best.masteryProb)}")
+                    }
+                    detail = "pesquisa concluída"
+                }
+            }
+            ActionType.ESTUDAR -> {
+                val weakest = c.skills.values.minWith(compareBy<SkillMasteryState> { s -> s.masteryProb }.thenBy { s -> s.skillId })
+                val mentor = state.aliveCitizens().filter { m -> m.id != c.id && m.intention?.action == ActionType.ESTUDAR && m.intention?.targetObjectId == obj?.id }
+                    .maxByOrNull { m -> m.skills[weakest.skillId]?.masteryProb ?: 0.0 }
+                val lib = state.skillLibrary.findSkill(weakest.skillId)
+                c.skills[weakest.skillId] = if (lib != null) {
+                    val trust = mentor?.let { m -> c.social.getOrCreateTie(m.id).domainTrust("ensino") } ?: 0.5
+                    state.skillLibrary.teachApprentice(weakest.skillId, weakest, trust, state.tick)
+                } else weakest.updateFromPractice(rng.nextDouble() < 0.5 + 0.3 * c.trait("aptidao"), state.tick, c.trait("aptidao"))
+                mentor?.let { m -> c.social.getOrCreateTie(m.id).recordTrustOutcome("ensino", true) }
+                detail = "estudou ${weakest.skillId}"
+            }
+            ActionType.CONTRIBUIR -> {
+                val h = emit("CONTRIBUICAO", c.id, "qtd=2")
+                if (state.ledger.contributeToCommunalPool(c.id, FOOD, 2.0, state.tick, h)) {
+                    c.windowUsage["CONTRIBUIR"] = (c.windowUsage["CONTRIBUIR"] ?: 0) + 1
+                    detail = "doou 2 alimento"
+                } else success = false
+            }
+            ActionType.CONSTRUIR -> {
+                val h = emit("CONSTRUCAO", c.id, "obj=${obj?.id}")
+                val own = state.ledger.getBalance(c.id, MATERIAL)
+                val ok = if (own >= 3.0) state.ledger.transfer(c.id, METABOLIC_SINK, MATERIAL, 3.0, state.tick, h)
+                else state.ledger.withdrawFromCommunalPool(c.id, MATERIAL, 3.0, state.tick, h) &&
+                    state.ledger.transfer(c.id, METABOLIC_SINK, MATERIAL, 3.0, state.tick, h)
+                if (ok && success && obj != null) {
+                    val sid = "NICHO-${obj.districtId}"
+                    val existing = state.board.nicheStructures().firstOrNull { s -> s.structureId == sid }
+                    state.board.registerNicheStructure(EcologicalNicheStructure(
+                        sid, "estufa_comunitaria", obj.tileX, obj.tileZ, (existing?.level ?: 0) + 1,
+                        1.0, c.id, state.tick
+                    ))
+                    detail = "construiu nicho nível ${(existing?.level ?: 0) + 1}"
+                } else if (!ok) { success = false; detail = "sem material" }
+            }
+            ActionType.EXPLORAR -> detail = "explorou"
+            else -> {}
+        }
+        obj?.let { o -> o.uses++; state.board.releaseReservation(o.id, c.id) }
+
+        // verificação direta de crenças sobre o alvo (WorldCore como fonte de verdade)
+        val verifyTarget = obj ?: state.objects.firstOrNull { o -> o.tileX == it.targetX && o.tileZ == it.targetZ }
+        if (verifyTarget != null) {
+            val key = "rendimento:${verifyTarget.id}"
+            val truth = verifyTarget.contaminatedUntilTick <= state.tick && (it.action == ActionType.EXPLORAR || success)
+            val b = c.beliefs.getOrPut(key) { HeldBelief(key, "recurso", SubjectiveOpinion(0.0, 0.0, 1.0)) }
+            val wasHearsay = !b.verifiedByExperience
+            val consistent = EpistemicImmunity.observeDirectly(b, truth, state.tick)
+            if (wasHearsay && b.sourceAgentId != null) {
+                state.citizen(b.sourceAgentId!!)?.let { src -> c.social.getOrCreateTie(src.id).recordTrustOutcome("informacao", consistent) }
+                state.stressEvents.lastOrNull { s -> s.targetId == key && s.resolvedTick < 0 }?.let { s ->
+                    if (!consistent) s.verifiedBeforeAction++
+                }
+            }
+        }
+
+        val reward = (c.meanNeed() - before) * 6.0 + (if (success) 0.1 else -0.2)
+        c.lastReward = reward.coerceIn(-1.0, 1.0)
+        if (success) { c.consecutiveFailures = 0; c.successes++ } else { c.consecutiveFailures++; c.failures++ }
+        c.actionCounts[it.action] = (c.actionCounts[it.action] ?: 0) + 1
+        c.lastAction = it.action
+        // memória episódica + MemRL
+        val node = AssociativeMemoryNode(
+            id = c.nextMemoryId++, ownerAgentId = c.id, layer = MemoryLayer.EPISODIC,
+            content = "${it.action.label}${obj?.let { o -> " em ${o.type.label} ${o.id}" } ?: ""}: ${if (success) "sucesso" else "falha"} $detail".trim(),
+            tags = linkedSetOf(it.action.name, obj?.type?.name ?: "LIVRE", if (success) "sucesso" else "falha"),
+            entityIds = obj?.let { o -> linkedSetOf(o.id) } ?: linkedSetOf(),
+            salience = abs(c.lastReward).coerceIn(0.1, 1.0), confidence = 1.0,
+            sourceEventId = state.eventSeq, sourceAgentId = null, createdTick = state.tick,
+            verifiedByWorldCore = true
+        )
+        c.memories.lastOrNull { m -> it.action.name in m.tags }?.let { prev -> node.linkedMemoryIds += prev.id; prev.linkedMemoryIds += node.id }
+        node.updateMemRlUtility(c.lastReward, state.policy.memRlLearningRate)
+        c.memories += node
+        // reflexo Tsetlin aprende se a ação proposta trouxe recompensa positiva
+        c.reflex.trainStep(reflexFeatures(c, it.action), c.lastReward > 0.0)
+        // consolidação hipocampal durante o sono
+        if (it.action == ActionType.DESCANSAR && state.isNight() && c.lastSleepConsolidationDay != state.day()) {
+            sleepConsolidate(c)
+        }
+        if (c.memories.size > MAX_MEMORIES) {
+            val excess = c.memories.size - MAX_MEMORIES
+            val drop = c.memories.sortedWith(compareBy<AssociativeMemoryNode> { m -> m.baseLevelActivation(state.tick, state.policy.actRDecayExponent) + 1.5 * abs(m.qUtility) }.thenBy { m -> m.id })
+                .filter { m -> m.layer == MemoryLayer.EPISODIC }.take(excess).map { m -> m.id }.toSet()
+            c.memories.removeAll { m -> m.id in drop }
+        }
+        c.intention = null
+        c.path.clear()
+        c.actionTicksRemaining = 0
+    }
+
+    private fun sleepConsolidate(c: Citizen) {
+        c.lastSleepConsolidationDay = state.day()
+        val report = memoryEngine.runHippocampalSleepConsolidation(c.memories, state.tick, state.policy.actRDecayExponent)
+        // replay priorizado por erro de predição reforça as memórias reativadas
+        for (id in report.replayedNodeIds) c.memories.firstOrNull { it.id == id }?.let { m ->
+            if (m.recentAccessTicks.size >= 16) m.recentAccessTicks.removeAt(0)
+            m.recentAccessTicks += state.tick
+            m.tdPredictionError *= 0.5
+        }
+        for (summary in report.promotedSemanticSummaries) {
+            if (c.memories.none { it.layer == MemoryLayer.SEMANTIC && it.content == summary }) {
+                c.memories += AssociativeMemoryNode(c.nextMemoryId++, c.id, MemoryLayer.SEMANTIC, summary,
+                    linkedSetOf("SCHEMA"), linkedSetOf(), salience = 0.7, confidence = 0.9, sourceEventId = null,
+                    sourceAgentId = null, createdTick = state.tick, verifiedByWorldCore = true, qUtility = 0.4)
+            }
+        }
+        for (macro in report.distilledProceduralMacros) {
+            if (c.memories.none { it.layer == MemoryLayer.PROCEDURAL && it.content == macro }) {
+                c.memories += AssociativeMemoryNode(c.nextMemoryId++, c.id, MemoryLayer.PROCEDURAL, macro,
+                    linkedSetOf("MACRO"), linkedSetOf(), salience = 0.8, confidence = 0.95, sourceEventId = null,
+                    sourceAgentId = null, createdTick = state.tick, verifiedByWorldCore = true, qUtility = 0.6)
+            }
+        }
+        val pruned = report.prunedNodeIds.toSet()
+        if (pruned.isNotEmpty()) c.memories.removeAll { it.id in pruned }
+    }
+
+    private fun activeCondition(): String = when {
+        state.inDrought() -> "SECA"
+        state.ledger.getBalance(COMMUNAL_COMMONS, FOOD) < 10.0 -> "ESCASSEZ"
+        else -> ""
+    }
+
+    private fun applySanction(c: Citizen, rule: AdicoInstitutionRule, units: Int) {
+        val h = emit("SANCAO", c.id, "regra=${rule.ruleId};unidades=$units")
+        val amount = units.toDouble().coerceAtMost(state.ledger.getBalance(c.id, CREDIT))
+        if (amount > 0) state.ledger.transfer(c.id, COMMUNAL_COMMONS, CREDIT, amount, state.tick, h)
+        c.sanctionsReceived++
+        c.emotion.valence = (c.emotion.valence - 0.2).coerceAtLeast(-1.0)
+    }
+
+    // ===================================================================== estágio 12
+
+    private fun stageSociety(alive: List<Citizen>) {
+        if (state.tick % 9L != 0L) return
+        val groups = alive.filter { it.intention?.action == ActionType.SOCIALIZAR && it.path.isEmpty() && it.actionTicksRemaining > 0 }
+            .groupBy { it.intention!!.targetObjectId }
+        for ((_, members) in groups.entries.sortedBy { it.key }) {
+            if (members.size < 2) continue
+            val sorted = members.sortedBy { it.id }
+            for (a in sorted) {
+                val rng = StreamSeeds.rng(state.seed, a.id, state.tick, "social")
+                val b = sorted.filter { it.id != a.id }.let { it[rng.nextInt(it.size)] }
+                interact(a, b, rng)
+            }
+        }
+    }
+
+    private fun interact(a: Citizen, b: Citizen, rng: SplitMix64) {
+        val tie = a.social.getOrCreateTie(b.id, a.intrinsicOpinionCommons)
+        val similarity = 1.0 - TRAITS.sumOf { abs(a.trait(it) - b.trait(it)) } / TRAITS.size
+        tie.familiarity = (tie.familiarity + 0.06).coerceAtMost(1.0)
+        tie.affinity = (tie.affinity + 0.05 * (similarity - 0.45) + 0.03 * b.emotion.mood + 0.02 * a.trait("amabilidade")).coerceIn(-1.0, 1.0)
+        tie.recordTrustOutcome("general", b.emotion.valence > -0.3)
+        // dinâmica de opinião híbrida Deffuant–Weisbuch + Friedkin–Johnsen
+        tie.currentOpinion = a.opinionCommons
+        a.opinionCommons = SocialDynamicsAndCliodynamics.stepHybridOpinion(tie, b.opinionCommons)
+        // troca de boatos/crenças sobre rendimento de recursos (A-MEM social + imunidade)
+        val shareable = b.beliefs.values.filter { !it.quarantined }
+            .sortedWith(compareBy<HeldBelief> { it.opinion.uncertainty }.thenBy { it.claimKey })
+        if (shareable.isNotEmpty()) {
+            val claim = shareable[rng.nextInt(minOf(3, shareable.size))]
+            val trust = tie.domainTrust("informacao")
+            val (belief, outcome) = EpistemicImmunity.assimilate(a.beliefs[claim.claimKey], claim.claimKey, claim.domain,
+                claim.opinion, trust, b.id, state.eventSeq, state.tick)
+            a.beliefs[claim.claimKey] = belief
+            if (outcome == AssimilationOutcome.QUARANTINED_LOW_TRUST || outcome == AssimilationOutcome.QUARANTINED_CONFLICT) {
+                belief.quarantined = belief.quarantined || !belief.verifiedByExperience
+                state.stressEvents.lastOrNull { it.targetId == claim.claimKey && it.resolvedTick < 0 }?.let { it.quarantinedBy++ }
+            }
+        }
+        // comércio de alimento por crédito (partidas dobradas)
+        val aFood = state.ledger.getBalance(a.id, FOOD)
+        val bFood = state.ledger.getBalance(b.id, FOOD)
+        if (a.needs.getValue(Need.FOME) < 0.45 && aFood < 1.0 && bFood > 4.0 && state.ledger.getBalance(a.id, CREDIT) >= 3.0) {
+            val h = emit("COMERCIO", a.id, "vendedor=${b.id};alimento=2;credito=3")
+            if (state.ledger.transfer(b.id, a.id, FOOD, 2.0, state.tick, h)) state.ledger.transfer(a.id, b.id, CREDIT, 3.0, state.tick, h)
+            tie.recordTrustOutcome("comercio", true)
+        }
+    }
+
+    private fun stageLifeCycle() {
+        for (c in state.aliveCitizens().sortedBy { it.id }) {
+            val lifespanDays = 40.0 + 30.0 * c.trait("longevidade")
+            val cause = when {
+                c.starvationTicks > TICKS_PER_DAY -> "inanição"
+                c.ageDays(state.tick) > lifespanDays -> "velhice"
+                else -> null
+            } ?: continue
+            c.alive = false
+            c.deathTick = state.tick
+            c.deathCause = cause
+            c.intention?.targetObjectId?.let { state.board.releaseReservation(it, c.id) }
+            state.board.releaseAllFor(c.id)
+            c.intention = null
+            c.path.clear()
+            val h = emit("MORTE", c.id, "causa=$cause;idade=${"%.1f".fmt(c.ageDays(state.tick))}")
+            // herança: filhos vivos recebem, senão os comuns
+            val heir = state.aliveCitizens().filter { c.id in it.parents }.minByOrNull { it.id }
+            state.ledger.transferAll(c.id, heir?.id ?: COMMUNAL_COMMONS, state.tick, h)
+            state.metrics.deaths++
+            // libera memória pesada do falecido (genealogia permanece)
+            c.memories.clear()
+            c.beliefs.clear()
+        }
+    }
+
+    private fun stageDaily() {
+        val alive = state.aliveCitizens().sortedBy { it.id }
+        val day = state.day()
+        resolveStaleStressEvents()
+        // Reprodução determinística com genética diploide, Baldwin e simbiogênese
+        reproduction(alive)
+        // Heider: equilíbrio estrutural em tríades dos laços mais fortes
+        for (a in alive) {
+            val top = a.social.sortedTies().sortedByDescending { it.tieStrength() }.take(4)
+            for (i in top.indices) for (j in i + 1 until top.size) {
+                val b = state.citizen(top[i].toAgentId) ?: continue
+                val tieBK = b.social.tieOrNull(top[j].toAgentId) ?: continue
+                SocialDynamicsAndCliodynamics.applyHeiderTriadBalance(top[i], tieBK, top[j])
+            }
+            for (t in a.social.sortedTies()) t.decayFamiliarity(TICKS_PER_DAY, 0.0004)
+            a.windowUsage.clear()
+        }
+        // Assembleia (Ostrom): a cota dos comuns acompanha a opinião média
+        if (alive.isNotEmpty()) {
+            val meanOp = alive.map { it.opinionCommons }.average()
+            val newQuota = (2 + Math.round(2.0 * (meanOp + 1.0))).toInt().coerceIn(2, 6)
+            val idx = state.institutions.indexOfFirst { it.ruleId == "cota-comuns" }
+            if (idx >= 0 && state.institutions[idx].maxQuotaPerWindow != newQuota) {
+                state.institutions[idx] = state.institutions[idx].copy(maxQuotaPerWindow = newQuota)
+                emit("ASSEMBLEIA", null, "regra=cota-comuns;nova_cota=$newQuota;opiniao_media=${"%.3f".fmt(meanOp)}")
+            }
+        }
+        // Cliodinâmica (Turchin)
+        val wealth = alive.map { state.ledger.getBalance(it.id, CREDIT) + state.ledger.getBalance(it.id, FOOD) * 1.5 }
+        val mean = wealth.average().takeIf { !it.isNaN() } ?: 0.0
+        val aspiring = alive.indices.count { wealth[it] > 1.5 * mean && alive[it].trait("sociabilidade") > 0.5 }
+        val slots = 2 * state.districts.count { it.type == DistrictType.AGORA }
+        val perCapitaNeed = 2.0
+        val carrying = (state.dayFoodProduced / perCapitaNeed).coerceAtLeast(1.0)
+        state.cliodynamics = SocialDynamicsAndCliodynamics.computeCliodynamics(
+            alive.size, carrying, wealth, aspiring, slots,
+            state.ledger.getBalance(COMMUNAL_COMMONS, FOOD) + state.ledger.getBalance(COMMUNAL_COMMONS, CREDIT)
+        )
+        // MAP-Elites / AURORA
+        for (c in alive) {
+            val total = c.actionCounts.values.sum().coerceAtLeast(1).toFloat()
+            val stats = FloatArray(8) { k ->
+                val a = listOf(ActionType.COLHER, ActionType.SOCIALIZAR, ActionType.PESQUISAR, ActionType.ESTUDAR,
+                    ActionType.MANTER_USINA, ActionType.EXPLORAR, ActionType.CONTRIBUIR, ActionType.CONSTRUIR)[k]
+                (c.actionCounts[a] ?: 0) / total
+            }
+            val (u, v) = state.aurora.projectAndAdapt(stats)
+            state.mapElites.submit(EliteNicheCell(c.id, c.generation, c.meanNeed().toFloat(),
+                listOf(c.trait("sociabilidade").toFloat(), u, v), TRAITS.map { c.trait(it).toFloat() }))
+        }
+        state.metrics.mapElitesCoverage = state.mapElites.coverageRatio().toDouble()
+        state.metrics.mapElitesNiches = state.mapElites.occupiedNiches()
+        // Expansão urbana dirigida por demanda
+        maybeExpand(alive)
+        emit("DIA", null, "dia=$day;pop=${alive.size};alimento_produzido=${"%.2f".fmt(state.dayFoodProduced)};consumido=${"%.2f".fmt(state.dayFoodConsumed)}")
+        state.dayFoodProduced = 0.0
+        state.dayFoodConsumed = 0.0
+    }
+
+    private fun reproduction(alive: List<Citizen>) {
+        val housing = state.objects.count { it.type == SmartObjectType.CASA } * SmartObjectType.CASA.capacity
+        var population = alive.size
+        for (a in alive) {
+            if (population >= state.admissionCap || population >= housing) break
+            if (a.ageDays(state.tick) < ADULT_DAYS || a.children >= 4) continue
+            if (state.tick - a.lastReproductionTick < TICKS_PER_DAY * 6) continue
+            if (a.needs.getValue(Need.FOME) < 0.45 || a.needs.getValue(Need.ENERGIA) < 0.35) continue
+            val partnerTie = a.social.sortedTies()
+                .filter { it.affinity > 0.30 && it.familiarity > 0.25 }
+                .sortedByDescending { it.tieStrength() }
+                .firstOrNull { t ->
+                    val p = state.citizen(t.toAgentId)
+                    p != null && p.alive && p.ageDays(state.tick) >= ADULT_DAYS && p.children < 4 &&
+                        state.tick - p.lastReproductionTick >= TICKS_PER_DAY * 6 && p.needs.getValue(Need.FOME) >= 0.45
+                } ?: continue
+            val b = state.citizen(partnerTie.toAgentId)!!
+            val rng = StreamSeeds.rng(state.seed, a.id + "+" + b.id, state.tick, "reproducao")
+            if (rng.nextDouble() > 0.35) continue
+            var genome = a.genome.recombineWith(b.genome, Random(rng.nextLong()), mutationSigma = 0.03)
+            // Efeito Baldwin: aptidão aprendida dos pais é lentamente assimilada no genoma
+            val acquired = (a.skills.values.map { it.masteryProb } + b.skills.values.map { it.masteryProb }).average()
+            genome.loci["aptidao"]?.let { genome = genome.copy(loci = genome.loci + ("aptidao" to it.applyBaldwinAssimilation(acquired, 0.04))) }
+            // Simbiogênese rara com doador elite do arquivo MAP-Elites
+            if (rng.nextDouble() < 0.03) {
+                state.mapElites.selectCuriosityDonor(rng.nextLong())?.let { cell ->
+                    state.citizen(cell.citizenId)?.let { donor -> genome = genome.symbiogeneticMerge(donor.genome, "curiosidade") }
+                }
+            }
+            val child = spawnCitizen(genome, listOf(a.id, b.id), max(a.generation, b.generation) + 1, rng, nearHome = a.homeObjectId)
+            val h = state.lastEventHash
+            state.ledger.transfer(a.id, child.id, FOOD, min(3.0, state.ledger.getBalance(a.id, FOOD)), state.tick, h)
+            state.ledger.transfer(b.id, child.id, FOOD, min(3.0, state.ledger.getBalance(b.id, FOOD)), state.tick, h)
+            // transmissão cultural: herda fração das habilidades dos pais
+            for (s in SKILLS) {
+                val parentBest = max(a.skills[s]?.masteryProb ?: 0.0, b.skills[s]?.masteryProb ?: 0.0)
+                child.skills[s] = child.skills.getValue(s).copy(masteryProb = (child.skills.getValue(s).masteryProb + 0.25 * parentBest).coerceAtMost(0.6))
+            }
+            child.social.getOrCreateTie(a.id).apply { affinity = 0.6; familiarity = 0.6 }
+            child.social.getOrCreateTie(b.id).apply { affinity = 0.6; familiarity = 0.6 }
+            a.children++; b.children++
+            a.lastReproductionTick = state.tick; b.lastReproductionTick = state.tick
+            state.metrics.births++
+            population++
+        }
+    }
+
+    private fun maybeExpand(alive: List<Citizen>) {
+        val housing = state.objects.count { it.type == SmartObjectType.CASA } * SmartObjectType.CASA.capacity
+        val housingPressure = alive.size.toDouble() / housing.coerceAtLeast(1)
+        val commonsFood = state.ledger.getBalance(COMMUNAL_COMMONS, FOOD)
+        // a pressão alimentar só conta quando o estoque comunal não cobre ~3 dias da população
+        val foodPressure = if (commonsFood >= alive.size * 3.0) 0.0
+            else if (state.dayFoodProduced <= 0.0) 1.5 else state.dayFoodConsumed / state.dayFoodProduced
+        val crowd = alive.size.toDouble() / state.objects.size.coerceAtLeast(1)
+        if (state.districtsPerSide >= MAX_DISTRICTS_PER_SIDE) return
+        if (state.tick - state.lastExpansionTick < TICKS_PER_DAY * 2) return
+        if (housingPressure < 0.85 && foodPressure < 1.15 && crowd < 0.9) return
+        state.lastExpansionTick = state.tick
+        val demand = mapOf(
+            DistrictType.MORADIA to housingPressure,
+            DistrictType.AGRICULTURA to foodPressure,
+            DistrictType.ENERGIA to (1.0 - state.cityEnergy / 60.0).coerceIn(0.1, 1.0),
+            DistrictType.RECICLAGEM to 0.3,
+            DistrictType.PESQUISA to 0.35,
+            DistrictType.AGORA to 0.25
+        )
+        val rng = StreamSeeds.rng(state.seed, "WORLD", state.tick, "expansao")
+        val ring = CityGenerator.expansionRing(state, demand, rng)
+        state.districtsPerSide++
+        state.districts += ring
+        CityGenerator.rebuildTiles(state)
+        state.board.resize(state.widthTiles, state.widthTiles)
+        for (d in ring) CityGenerator.spawnObjectsFor(state, d)
+        // índices de caminho dependem da largura: replaneja quem estava andando
+        for (c in alive) if (c.path.isNotEmpty()) failIntention(c, "replanejamento após expansão")
+        emit("EXPANSAO", null, "lado=${state.districtsPerSide};novos=${ring.joinToString(",") { it.type.name }}")
+    }
+
+    // ===================================================================== métricas e invariantes
+
+    private fun updateMetrics() {
+        val alive = state.aliveCitizens()
+        val m = state.metrics
+        val window = 100L
+        while (state.deliberationTicks.isNotEmpty() && state.deliberationTicks.first() <= state.tick - window) state.deliberationTicks.removeAt(0)
+        while (state.reflexTicks.isNotEmpty() && state.reflexTicks.first() <= state.tick - window) state.reflexTicks.removeAt(0)
+        m.deliberationsPer100Ticks = state.deliberationTicks.size.toDouble()
+        m.reflexBypassesPer100Ticks = state.reflexTicks.size.toDouble()
+        if (alive.isEmpty()) { m.survivalEfficiency = 0.0; return }
+        val counts = HashMap<String, Int>()
+        for (c in alive) { val k = c.intention?.action?.name ?: "OCIOSO"; counts[k] = (counts[k] ?: 0) + 1 }
+        m.semanticEntropy = SemanticCollapseGuard.normalizedPopulationEntropy(
+            ActionType.entries.associate { it.name to (counts[it.name] ?: 0) })
+        m.survivalEfficiency = alive.map { it.meanNeed() }.average()
+        m.meanFreeEnergy = alive.map { c -> c.needs.values.sumOf { -ln(it.coerceIn(0.02, 1.0)) } / Need.entries.size }.average()
+        m.brierScore = if (state.forecastWindow.isEmpty()) 0.25 else
+            state.forecastWindow.indices.sumOf { i -> val o = if (state.outcomeWindow[i]) 1.0 else 0.0; (state.forecastWindow[i] - o).let { it * it } } / state.forecastWindow.size
+    }
+
+    private fun checkInvariants() {
+        for (res in state.ledger.resourceTypes()) if (!state.ledger.verifyZeroSumConservation(res)) violations += "conservação:$res"
+        for (c in state.aliveCitizens()) {
+            if (c.needs.values.any { it < 0.0 || it > 1.0 || it.isNaN() }) violations += "necessidade_fora_do_intervalo:${c.id}"
+            if (!state.inBounds(c.x, c.z)) violations += "fora_do_mapa:${c.id}"
+        }
+        if (state.board.reservationViolations(state.tick) > 0) violations += "reserva_excedida"
+        for (res in listOf(FOOD, MATERIAL, CREDIT)) for (c in state.aliveCitizens()) {
+            if (state.ledger.getBalance(c.id, res) < -1e-9) violations += "saldo_negativo:${c.id}:$res"
+        }
+        if (violations.isNotEmpty()) state.metrics.invariantsViolated += violations.size
+    }
+
+    // ===================================================================== eventos de estresse (Emergence World)
+
+    /** Injeta desinformação: um agente bem conectado passa a acreditar que uma horta saudável está contaminada. */
+    fun injectMisinformation(): StressEventRecord? {
+        val alive = state.aliveCitizens()
+        val target = alive.maxWithOrNull(compareBy<Citizen> { it.social.allTies().size }.thenBy { it.id }) ?: return null
+        val horta = state.objects.filter { it.type == SmartObjectType.HORTA }.maxWithOrNull(compareBy<SmartObject> { it.uses }.thenBy { it.id }) ?: return null
+        val key = "rendimento:${horta.id}"
+        target.beliefs[key] = HeldBelief(key, "recurso", SubjectiveOpinion(0.02, 0.93, 0.05), verifiedByExperience = false,
+            quarantined = false, sourceAgentId = "EXTERNO", updatedTick = state.tick)
+        val rec = StressEventRecord(state.tick, "DESINFORMACAO", "Boato: '${horta.type.label} ${horta.id} está contaminada' plantado em ${target.name}", key)
+        state.stressEvents += rec
+        emit("ESTRESSE", target.id, "tipo=desinformacao;alvo=$key")
+        return rec
+    }
+
+    /** Contaminação real (verdadeira) de uma horta durante um dia, para contraste com o boato. */
+    fun injectRealContamination(): StressEventRecord? {
+        val horta = state.objects.filter { it.type == SmartObjectType.HORTA && it.contaminatedUntilTick < state.tick }
+            .minByOrNull { it.id } ?: return null
+        horta.contaminatedUntilTick = state.tick + TICKS_PER_DAY
+        val rec = StressEventRecord(state.tick, "CONTAMINACAO_REAL", "${horta.type.label} ${horta.id} realmente contaminada por 1 dia", "rendimento:${horta.id}")
+        state.stressEvents += rec
+        emit("ESTRESSE", null, "tipo=contaminacao_real;alvo=${horta.id}")
+        return rec
+    }
+
+    fun resolveStaleStressEvents() {
+        for (s in state.stressEvents) if (s.resolvedTick < 0 && state.tick - s.tick > TICKS_PER_DAY * 2) s.resolvedTick = state.tick
+    }
+}
+
+const val ADULT_DAYS = 8.0

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Girassol</string>
+    <string name="notification_title">Girassol · mundo em execução</string>
+    <string name="channel_name">Mundo Girassol</string>
+    <string name="channel_description">Estado do relógio do mundo em execução contínua</string>
+    <string name="action_pause">Pausar</string>
+</resources>

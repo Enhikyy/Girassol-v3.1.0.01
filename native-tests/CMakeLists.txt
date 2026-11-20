@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.18)
+project(girassol_native_tests CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(SRC ${CMAKE_CURRENT_SOURCE_DIR}/../app/src/main/cpp)
+add_executable(girassol_native_tests native_tests.cpp ${SRC}/hardware/soc_hardware_probe.cpp)
+target_include_directories(girassol_native_tests PRIVATE ${SRC})
+target_compile_options(girassol_native_tests PRIVATE -Wall -Wextra -O1 -g -fno-omit-frame-pointer
+    -fsanitize=address,undefined -fno-sanitize-recover=undefined)
+target_link_options(girassol_native_tests PRIVATE -fsanitize=address,undefined)
+target_link_libraries(girassol_native_tests PRIVATE dl)
+enable_testing()
+add_test(NAME girassol_native_tests COMMAND girassol_native_tests)

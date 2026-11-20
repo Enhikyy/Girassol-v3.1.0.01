@@ -1,0 +1,297 @@
+package com.enhikyy.girassol.core.world
+
+import com.enhikyy.girassol.core.biology.DiploidGenome
+import com.enhikyy.girassol.core.biology.SkillMasteryState
+import com.enhikyy.girassol.core.biology.VoyagerSkillLibrary
+import com.enhikyy.girassol.core.memory.AssociativeMemoryNode
+import com.enhikyy.girassol.core.memory.SubjectiveOpinion
+import com.enhikyy.girassol.core.qd.AuroraBehavioralEncoder
+import com.enhikyy.girassol.core.qd.MapElitesArchive
+import com.enhikyy.girassol.core.reflex.KotlinTsetlinMachine
+import com.enhikyy.girassol.core.rsi.CognitivePolicyGenome
+import com.enhikyy.girassol.core.rsi.RsiPromotionDecision
+import com.enhikyy.girassol.core.social.AdicoInstitutionRule
+import com.enhikyy.girassol.core.social.CliodynamicsSnapshot
+import com.enhikyy.girassol.core.social.DunbarSocialNetwork
+import kotlinx.serialization.Serializable
+
+/** Versão das regras do mundo. Eventos de versões anteriores mantêm suas regras históricas. */
+const val CURRENT_RULES_VERSION = 9
+
+@Serializable
+enum class DistrictType(val label: String) {
+    MORADIA("Moradia"),
+    AGRICULTURA("Agricultura"),
+    RECICLAGEM("Reciclagem"),
+    ENERGIA("Energia"),
+    PESQUISA("Pesquisa"),
+    AGORA("Ágora")
+}
+
+@Serializable
+enum class TileType(val walkable: Boolean) {
+    GRAMA(true), RUA(true), CALCADA(true), EDIFICIO(false), CAMPO(true), PRACA(true), AGUA(false)
+}
+
+@Serializable
+enum class SmartObjectType(val label: String, val capacity: Int) {
+    CASA("Casa", 4),
+    HORTA("Horta", 3),
+    COMPOSTEIRA("Composteira", 2),
+    USINA_SOLAR("Usina solar", 3),
+    LABORATORIO("Laboratório", 3),
+    ESCOLA("Escola", 6),
+    PRACA("Praça", 10),
+    OFICINA("Oficina", 2)
+}
+
+/** Seis motivos homeostáticos (1.0 = pleno, 0.0 = crítico). */
+@Serializable
+enum class Need(val label: String) {
+    FOME("Saciedade"), ENERGIA("Energia"), SOCIAL("Social"), DIVERSAO("Diversão"), HIGIENE("Higiene"), PROPOSITO("Propósito")
+}
+
+@Serializable
+enum class ActionType(val label: String, val skill: String?) {
+    COMER("Comer", null),
+    DESCANSAR("Descansar", null),
+    BANHO("Banho", null),
+    COLHER("Colher", "cultivo"),
+    RECICLAR("Reciclar", "reciclagem"),
+    MANTER_USINA("Manter usina", "manutencao"),
+    PESQUISAR("Pesquisar", "pesquisa"),
+    ESTUDAR("Estudar", null),
+    SOCIALIZAR("Socializar", null),
+    CONTRIBUIR("Contribuir aos comuns", null),
+    CONSTRUIR("Construir", "construcao"),
+    EXPLORAR("Explorar", null),
+    OCIOSO("Ocioso", null)
+}
+
+val SKILLS = listOf("cultivo", "reciclagem", "manutencao", "pesquisa", "construcao")
+
+@Serializable
+data class District(
+    val id: String,
+    val dx: Int,
+    val dz: Int,
+    val type: DistrictType,
+    val createdTick: Long
+)
+
+@Serializable
+data class SmartObject(
+    val id: String,
+    val type: SmartObjectType,
+    val districtId: String,
+    val tileX: Int,
+    val tileZ: Int,
+    var condition: Double = 1.0,
+    var uses: Long = 0L,
+    /** Envenenado/defeituoso: usado por eventos de estresse epistêmico. */
+    var contaminatedUntilTick: Long = -1L
+)
+
+@Serializable
+data class EmotionState(
+    var valence: Double = 0.2,
+    var arousal: Double = 0.3,
+    var mood: Double = 0.1,
+    var lastAppraisal: String = "neutro",
+    var rumination: Double = 0.0
+)
+
+@Serializable
+data class Intention(
+    val action: ActionType,
+    val targetObjectId: String?,
+    val targetX: Int,
+    val targetZ: Int,
+    val startedTick: Long,
+    val expectedUtility: Double,
+    val forecastSuccess: Double,
+    val viaDeliberation: Boolean,
+    val viaReflex: Boolean,
+    val claimUsed: String? = null,
+    val claimVerified: Boolean = true
+)
+
+@Serializable
+data class HeldBelief(
+    val claimKey: String,
+    val domain: String,
+    var opinion: SubjectiveOpinion,
+    var alphaEvidence: Double = 1.0,
+    var betaEvidence: Double = 1.0,
+    var verifiedByExperience: Boolean = false,
+    var quarantined: Boolean = false,
+    var sourceAgentId: String? = null,
+    var provenanceEventId: Long? = null,
+    var updatedTick: Long = 0L
+)
+
+@Serializable
+data class Citizen(
+    val id: String,
+    val name: String,
+    val generation: Int,
+    val birthTick: Long,
+    val parents: List<String>,
+    val genome: DiploidGenome,
+    var x: Int,
+    var z: Int,
+    val homeObjectId: String,
+    val needs: MutableMap<Need, Double>,
+    val emotion: EmotionState = EmotionState(),
+    val skills: MutableMap<String, SkillMasteryState> = mutableMapOf(),
+    val memories: MutableList<AssociativeMemoryNode> = mutableListOf(),
+    val beliefs: MutableMap<String, HeldBelief> = mutableMapOf(),
+    val social: DunbarSocialNetwork,
+    var intention: Intention? = null,
+    var path: MutableList<Int> = mutableListOf(),
+    var actionTicksRemaining: Int = 0,
+    var consecutiveFailures: Int = 0,
+    var starvationTicks: Int = 0,
+    var alive: Boolean = true,
+    var deathTick: Long = -1L,
+    var deathCause: String? = null,
+    val actionCounts: MutableMap<ActionType, Int> = mutableMapOf(),
+    val reflex: KotlinTsetlinMachine,
+    var opinionCommons: Double = 0.0,
+    val intrinsicOpinionCommons: Double = 0.0,
+    var lastReward: Double = 0.0,
+    var children: Int = 0,
+    var lastReproductionTick: Long = -100000L,
+    var sanctionsReceived: Int = 0,
+    var windowUsage: MutableMap<String, Int> = mutableMapOf(),
+    var nextMemoryId: Long = 1L,
+    var actedOnUnverifiedClaims: Int = 0,
+    var verifiedBeforeActing: Int = 0,
+    var lastThought: String = "",
+    var lastSleepConsolidationDay: Long = -1L,
+    var successes: Int = 0,
+    var failures: Int = 0,
+    var lastAction: ActionType? = null
+) {
+    fun ageDays(tick: Long): Double = (tick - birthTick).toDouble() / TICKS_PER_DAY
+    fun trait(name: String): Double = genome.expressTrait(name)
+    fun meanNeed(): Double = needs.values.average()
+}
+
+@Serializable
+data class CanonicalEvent(
+    val seq: Long,
+    val tick: Long,
+    val rulesVersion: Int,
+    val type: String,
+    val actorId: String?,
+    val payload: String,
+    val prevHash: String,
+    val hash: String
+)
+
+@Serializable
+data class TelemetryInput(
+    val thermalTier: Int = 0,
+    val availableMemoryMb: Long = 4096,
+    val batteryPct: Int = 100,
+    val charging: Boolean = true
+)
+
+@Serializable
+data class RsiLedgerRecord(
+    val tick: Long,
+    val proposerAgentId: String,
+    val rationale: String,
+    val decision: RsiPromotionDecision,
+    val brierBefore: Double,
+    val brierAfter: Double,
+    val diversityBefore: Double,
+    val diversityAfter: Double
+)
+
+@Serializable
+data class StressEventRecord(
+    val tick: Long,
+    val kind: String,
+    val description: String,
+    val targetId: String?,
+    var resolvedTick: Long = -1L,
+    var actedBeforeVerification: Int = 0,
+    var verifiedBeforeAction: Int = 0,
+    var quarantinedBy: Int = 0
+)
+
+@Serializable
+data class WorldMetrics(
+    var semanticEntropy: Double = 1.0,
+    var brierScore: Double = 0.25,
+    var meanFreeEnergy: Double = 1.0,
+    var survivalEfficiency: Double = 1.0,
+    var deliberationsPer100Ticks: Double = 0.0,
+    var reflexBypassesPer100Ticks: Double = 0.0,
+    var invariantsViolated: Int = 0,
+    var births: Int = 0,
+    var deaths: Int = 0,
+    var foodProduced: Double = 0.0,
+    var foodConsumed: Double = 0.0,
+    var energyProduced: Double = 0.0,
+    var materialProduced: Double = 0.0,
+    var mapElitesCoverage: Double = 0.0,
+    var mapElitesNiches: Int = 0
+)
+
+@Serializable
+data class WorldState(
+    val seed: Long,
+    val rulesVersion: Int = CURRENT_RULES_VERSION,
+    var tick: Long = 0L,
+    var wallClockUtcAtLastTick: Long = 0L,
+    val districtSize: Int = DISTRICT_SIZE,
+    var districtsPerSide: Int = 3,
+    var tiles: IntArray = IntArray(0),
+    val districts: MutableList<District> = mutableListOf(),
+    val objects: MutableList<SmartObject> = mutableListOf(),
+    val citizens: MutableList<Citizen> = mutableListOf(),
+    val ledger: StockFlowDoubleEntryLedger = StockFlowDoubleEntryLedger(),
+    var board: SpatialStigmergyAndReservationBoard,
+    var policy: CognitivePolicyGenome = CognitivePolicyGenome(version = 1),
+    val institutions: MutableList<AdicoInstitutionRule> = mutableListOf(),
+    val skillLibrary: VoyagerSkillLibrary = VoyagerSkillLibrary(),
+    val mapElites: MapElitesArchive = MapElitesArchive(8),
+    val aurora: AuroraBehavioralEncoder = AuroraBehavioralEncoder(8),
+    var cliodynamics: CliodynamicsSnapshot? = null,
+    val metrics: WorldMetrics = WorldMetrics(),
+    val rsiLedger: MutableList<RsiLedgerRecord> = mutableListOf(),
+    val stressEvents: MutableList<StressEventRecord> = mutableListOf(),
+    val recentEvents: MutableList<CanonicalEvent> = mutableListOf(),
+    var lastEventHash: String = GENESIS_HASH,
+    var eventSeq: Long = 0L,
+    var nextCitizenSerial: Long = 1L,
+    var nextObjectSerial: Long = 1L,
+    var telemetry: TelemetryInput = TelemetryInput(),
+    val forecastWindow: MutableList<Double> = mutableListOf(),
+    val outcomeWindow: MutableList<Boolean> = mutableListOf(),
+    val deliberationTicks: MutableList<Long> = mutableListOf(),
+    val reflexTicks: MutableList<Long> = mutableListOf(),
+    var droughtUntilTick: Long = -1L,
+    var cityEnergy: Double = 50.0,
+    var admissionCap: Int = 150,
+    var dayFoodProduced: Double = 0.0,
+    var dayFoodConsumed: Double = 0.0,
+    var lastExpansionTick: Long = -100000L
+) {
+    val widthTiles: Int get() = districtsPerSide * districtSize
+    fun tileAt(x: Int, z: Int): TileType = TileType.entries[tiles[z * widthTiles + x]]
+    fun inBounds(x: Int, z: Int) = x in 0 until widthTiles && z in 0 until widthTiles
+    fun aliveCitizens(): List<Citizen> = citizens.filter { it.alive }
+    fun citizen(id: String): Citizen? = citizens.firstOrNull { it.id == id }
+    fun obj(id: String): SmartObject? = objects.firstOrNull { it.id == id }
+    fun isNight(): Boolean = (tick % TICKS_PER_DAY) >= TICKS_PER_DAY * 3 / 4
+    fun day(): Long = tick / TICKS_PER_DAY
+    fun inDrought(): Boolean = tick < droughtUntilTick
+}
+
+const val DISTRICT_SIZE = 12
+const val TICKS_PER_DAY = 480L
+const val GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000"
