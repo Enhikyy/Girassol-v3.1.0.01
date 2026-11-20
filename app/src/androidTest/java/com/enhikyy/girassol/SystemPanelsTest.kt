@@ -116,6 +116,9 @@ class SystemPanelsTest {
         val r = GpuCalibration.runProbe(ctx, EffectLevel.NONE, 30_000)
         assertNotNull(r)
         assertFalse("sonda expirou: ${r.message}", r.message == "timeout")
+        assertFalse("sonda caiu", r.crashed)
+        // nível sem pós deve renderizar fora da tela até no SwiftShader do emulador
+        assertTrue("sonda falhou: ${r.message}", r.ok)
         assertEquals("o processo principal não pode morrer com a sonda", pid, Process.myPid())
         assertTrue(GeaNativeBridge.isNativeLoaded)
     }

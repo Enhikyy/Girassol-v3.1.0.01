@@ -456,13 +456,15 @@ class FilamentCityRenderer(
     }
 
     fun resume() {
-        if (!initialized || running) return
+        if (!initialized || running || headless) return
         running = true; lastFrameNs = 0L
         Choreographer.getInstance().postFrameCallback(frameCallback)
     }
 
     fun pause() {
         running = false
+        // Modo headless (sonda de GPU) roda numa thread sem Looper: não há Choreographer nem telemetria.
+        if (headless) return
         Choreographer.getInstance().removeFrameCallback(frameCallback)
         Render3dTelemetry.update { it.copy(fps = 0.0) }
     }
