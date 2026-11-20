@@ -134,10 +134,15 @@ jobs:
           force-avd-creation: false
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          script: ./gradlew --no-daemon :app:connectedDebugAndroidTest -Pgirassol.abis=x86_64
+          script: |
+            adb logcat -c || true
+            adb logcat -v threadtime > logcat-emulador.txt 2>&1 & ./gradlew --no-daemon :app:connectedDebugAndroidTest -Pgirassol.abis=x86_64; rc=$?; sleep 2; kill %1 2>/dev/null; exit $rc
       - name: Relatórios de instrumentação
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: relatorios-instrumentacao
-          path: app/build/reports/androidTests
+          path: |
+            app/build/reports/androidTests
+            app/build/outputs/androidTest-results
+            logcat-emulador.txt
