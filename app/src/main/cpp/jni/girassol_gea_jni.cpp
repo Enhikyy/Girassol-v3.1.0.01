@@ -8,6 +8,7 @@
 #include "../cognitive/tsetlin_machine.hpp"
 #include "../evolution/map_elites_aurora.hpp"
 #include "../navigation/grid_astar.hpp"
+#include "../memory/binary_episodic_index.hpp"
 #include "../audio/aaudio_engine.hpp"
 #include "../hardware/cpu_features.hpp"
 #include "../hardware/proc_memory.hpp"
@@ -234,6 +235,13 @@ Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeNavFindPathGrid(
     return out;
 }
 
+// ==================== 3b. MEMÓRIA EPISÓDICA BINÁRIA (SimHash bit[256] + popcount) ==========
+
+JNIEXPORT jlong JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeBinaryMemorySignature(JNIEnv*, jobject) {
+    return static_cast<jlong>(girassol::memory::paritySignature());
+}
+
 // ==================== 4. ÁUDIO BINAURAL (AAudio) ====================
 
 JNIEXPORT jboolean JNICALL
@@ -280,6 +288,18 @@ Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeAudioStatus(JNIEnv*
 }
 
 // Renderização offline (diagnóstico/benchmark): [rms, pico, quadros].
+JNIEXPORT void JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeAudioSetExternalSpeech(JNIEnv*, jobject, jboolean speaking) {
+    std::lock_guard<std::mutex> lock(gAudioMutex);
+    if (gAudio && gAudio->running()) gAudio->synth().setExternalSpeech(speaking == JNI_TRUE);
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeAudioDuckGain(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lock(gAudioMutex);
+    return (gAudio && gAudio->running()) ? gAudio->synth().duckGain() : 1.0f;
+}
+
 JNIEXPORT jfloatArray JNICALL
 Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeAudioOfflineProbe(JNIEnv* env, jobject, jfloat stability, jint frames) {
     girassol::audio::AmbientBinauralSynth synth(48000);

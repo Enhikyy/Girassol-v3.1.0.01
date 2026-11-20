@@ -121,7 +121,12 @@ val compileFilamentMaterials by tasks.registering(CompileFilamentMaterials::clas
     outputDir.set(layout.buildDirectory.dir("generated/filamat"))
 }
 
-// ABIs: release = arm64-v8a (alvo real); debug inclui x86_64 para o emulador do CI.
+// Backends ggml-cpu dinâmicos (dlopen): o CMake os copia para cá após o build e cada build
+// type os empacota como jniLibs (uma cópia por ABI; nunca duplicados estaticamente).
+fun ggmlBackendsDir(buildType: String): String =
+    layout.buildDirectory.dir("generated/ggmlBackends/$buildType").get().asFile.absolutePath
+
+// ABIs (splits): padrão arm64-v8a; o CI acrescenta x86_64 no debug para o emulador.
 val abiOverride = providers.gradleProperty("girassol.abis").orNull?.split(",")?.map { it.trim() }
 
 android {
@@ -133,8 +138,8 @@ android {
         applicationId = "com.enhikyy.girassol"
         minSdk = 33
         targetSdk = 35
-        versionCode = 3300000
-        versionName = "3.3.0.00"
+        versionCode = 3400000
+        versionName = "3.4.0.00"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "FILAMENT_VERSION", "\"$filamentVersion\"")
         externalNativeBuild {
@@ -145,10 +150,9 @@ android {
                     arguments += "-DGIRASSOL_LLAMA_DIR=${llamaDir.absolutePath}"
                     arguments += "-DGIRASSOL_KLEIDIAI_DIR=${kleidiaiDir.absolutePath}"
                 }
-                // Núcleo determinístico + 3 variantes do motor LLM (escolhidas em runtime).
-                // Fora do arm64 (ou sem llama.cpp) dotprod/i8mm viram stubs sem motor e nunca são
-                // escolhidos pelo seletor de runtime.
-                targets += listOf("girassol_core", "girassol_llm_base", "girassol_llm_dotprod", "girassol_llm_i8mm")
+                // Núcleo determinístico + motor LLM único. As dependências (libllama.so,
+                // libggml*.so e os backends de CPU dinâmicos) são geradas pelo CMake junto.
+                targets += listOf("girassol_core", "girassol_llm")
             }
         }
     }
@@ -169,16 +173,16 @@ android {
 
     buildTypes {
         release {
+            externalNativeBuild { cmake { arguments += "-DGIRASSOL_BACKEND_OUT=${ggmlBackendsDir("release")}" } }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
-            ndk { abiFilters += abiOverride ?: listOf("arm64-v8a") }
         }
         debug {
+            externalNativeBuild { cmake { arguments += "-DGIRASSOL_BACKEND_OUT=${ggmlBackendsDir("debug")}" } }
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
-            ndk { abiFilters += abiOverride ?: listOf("arm64-v8a", "x86_64") }
         }
     }
 
@@ -187,6 +191,22 @@ android {
             path = file("src/main/cpp/CMakeLists.txt")
             version = "3.22.1"
         }
+    }
+
+    // Um APK por ABI (sem APK universal). Padrão: só arm64-v8a (alvo real). O CI passa
+    // -Pgirassol.abis=arm64-v8a,x86_64 nas tarefas debug para gerar também o APK do emulador.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include(*((abiOverride ?: listOf("arm64-v8a")).toTypedArray()))
+            isUniversalApk = false
+        }
+    }
+
+    sourceSets {
+        getByName("debug").jniLibs.srcDir(ggmlBackendsDir("debug"))
+        getByName("release").jniLibs.srcDir(ggmlBackendsDir("release"))
     }
 
     compileOptions {
@@ -240,4 +260,9 @@ dependencies {
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.rules)
+}
+
+// Os jniLibs gerados pelo CMake precisam existir antes da fusão das pastas de bibliotecas.
+listOf("Debug", "Release").forEach { bt ->
+    tasks.matching { it.name == "merge${bt}JniLibFolders" }.configureEach { dependsOn("externalNativeBuild$bt") }
 }

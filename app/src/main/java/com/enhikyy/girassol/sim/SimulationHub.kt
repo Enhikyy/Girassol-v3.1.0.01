@@ -95,6 +95,7 @@ object SimulationHub {
             NativeModules.load(app)
             val parity = NativeModules.verifyParity()
             Log.i(TAG, "paridade nativa: ${parity.message}")
+            com.enhikyy.girassol.perf.AdpfHints.init(app)
             LocalLlmManager.init(app)
             LocalLlmManager.setEnabled(NativeModules.toggles.value.localLlm)
             ports = buildPorts(NativeModules.toggles.value)
@@ -110,6 +111,7 @@ object SimulationHub {
             if (restored == null) persistSnapshot()
             publish(force = true)
             if (NativeModules.toggles.value.binauralAudio) AmbientAudioController.start()
+            if (NativeModules.toggles.value.voiceTts) com.enhikyy.girassol.audio.CitizenVoice.setEnabled(app, true)
         }
     }
 
@@ -127,6 +129,7 @@ object SimulationHub {
         LocalLlmManager.setEnabled(t.localLlm)
         if (t.binauralAudio && !AmbientAudioController.running) AmbientAudioController.start()
         if (!t.binauralAudio && AmbientAudioController.running) AmbientAudioController.stop()
+        com.enhikyy.girassol.audio.CitizenVoice.setEnabled(context, t.voiceTts)
         scope.launch {
             if (!_status.value.loaded) return@launch
             ports = buildPorts(t)
@@ -162,14 +165,16 @@ object SimulationHub {
     }
 
     /** Status térmico do PowerManager (0..6) e memória disponível, quantizados. */
-    fun updateTelemetry(thermalStatus: Int, availableMemMb: Long, batteryPct: Int, charging: Boolean) {
+    fun updateTelemetry(thermalStatus: Int, availableMemMb: Long, batteryPct: Int, charging: Boolean, socTempC: Double = Double.NaN) {
         val tier = when {
             thermalStatus >= 4 -> 3 // CRITICAL, EMERGENCY, SHUTDOWN
             thermalStatus == 3 -> 2 // SEVERE
             thermalStatus == 2 -> 1 // MODERATE
             else -> 0
         }
-        telemetry = TelemetryInput(tier, (availableMemMb / 512) * 512, (batteryPct / 10) * 10, charging)
+        // Temperatura quantizada a 1 °C para manter o replay determinístico por evento.
+        telemetry = TelemetryInput(tier, (availableMemMb / 512) * 512, (batteryPct / 10) * 10, charging,
+            socTempC = if (socTempC.isNaN()) 32.0 else Math.round(socTempC).toDouble())
         LocalLlmManager.setThermalTier(tier)
         _status.update { it.copy(thermalStatus = thermalStatus) }
     }
@@ -178,6 +183,7 @@ object SimulationHub {
         var windowStart = System.nanoTime()
         var windowTicks = 0
         var lastPublish = 0L
+        com.enhikyy.girassol.perf.AdpfHints.registerCurrentThread("girassol-sim")
         while (currentCoroutineContext().isActive) {
             val t0 = System.nanoTime()
             val s = _status.value
@@ -185,6 +191,8 @@ object SimulationHub {
             val thermalCap = when (telemetry.thermalTier) { 3 -> 2; 2 -> 8; else -> Int.MAX_VALUE }
             val tps = minOf(s.targetTps, thermalCap)
             val report = core.step(telemetry, System.currentTimeMillis())
+            com.enhikyy.girassol.perf.AdpfHints.updateTarget((1_000_000_000L / tps.coerceAtLeast(1)))
+            com.enhikyy.girassol.perf.AdpfHints.reportWork(System.nanoTime() - t0)
             writer.submitTickBatch(report.events, report.ledgerEntries)
             if (report.invariantViolations.isNotEmpty()) Log.w(TAG, "invariantes: ${report.invariantViolations}")
             if (rsi.isDue(core.state)) {
@@ -302,6 +310,12 @@ object SimulationHub {
         if (wasRunning) start()
         "Importado: tick ${state.tick} · ${bytes.size / 1024} KB"
     }
+
+    /** Busca FTS (bm25) nas memórias persistidas no SQLite WAL. */
+    fun searchMemories(text: String, owner: String? = null): List<com.enhikyy.girassol.data.FtsHit> =
+        if (::writer.isInitialized) writer.searchMemories(text, owner) else emptyList()
+
+    fun ftsModule(): String = if (::writer.isInitialized) writer.ftsModule() else "-"
 
     fun persistedEventCount(): Long = if (::writer.isInitialized) writer.countRows("canonical_events") else 0L
 

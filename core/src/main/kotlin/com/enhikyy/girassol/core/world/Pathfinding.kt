@@ -5,7 +5,9 @@ import kotlin.math.abs
 
 /**
  * A* em grade 4-conexa com custo estigmérgico: trilhas (TRAIL_WEAR) barateiam o
- * deslocamento, fazendo caminhos emergirem organicamente; DANGER_TRACE encarece.
+ * deslocamento, fazendo caminhos emergirem organicamente; DANGER_TRACE encarece; o campo de
+ * folga do [DistrictNavMesh] (clearance) penaliza tiles colados a edifícios/água, preferindo
+ * corredores largos para a locomoção contínua ORCA.
  *
  * Esta é a implementação de referência. O espelho nativo (cpp/navigation/grid_astar.hpp)
  * replica a mesma aritmética float, a mesma chave de prioridade (bits do float << 32 | índice)
@@ -29,6 +31,7 @@ object Pathfinding {
         val start = sz * w + sx
         val goal = gz * w + gx
         if (start == goal) return mutableListOf()
+        val clearance = DistrictNavMesh.clearance(w, tiles)
         val g = FloatArray(w * w) { Float.MAX_VALUE }
         val parent = IntArray(w * w) { -1 }
         val closed = BooleanArray(w * w)
@@ -58,6 +61,7 @@ object Pathfinding {
                 var cost = stepCost(tile)
                 if (trail != null) cost *= (1f - 0.35f * (trail[ni] / 10f).coerceAtMost(1f))
                 if (danger != null) cost *= (1f + (danger[ni] / 5f).coerceAtMost(2f))
+                cost *= DistrictNavMesh.clearanceCostFactor(clearance[ni].toInt())
                 val ng = g[cur] + cost
                 if (ng < g[ni]) {
                     g[ni] = ng

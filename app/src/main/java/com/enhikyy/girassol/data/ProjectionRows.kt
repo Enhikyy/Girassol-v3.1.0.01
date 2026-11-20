@@ -9,13 +9,17 @@ import com.enhikyy.girassol.core.world.WorldState
  * simulação junto com o snapshot. São derivadas — a fonte da verdade é o snapshot
  * + a cadeia de eventos canônicos.
  */
-class ProjectionRows private constructor(private val tables: Map<String, List<ContentValues>>) {
+class ProjectionRows private constructor(
+    private val tables: Map<String, List<ContentValues>>,
+    private val memoryFts: List<ContentValues> = emptyList()
+) {
 
     fun writeTo(db: SQLiteDatabase) {
         for ((table, rows) in tables) {
             db.delete(table, null, null)
             for (r in rows) db.insertWithOnConflict(table, null, r, SQLiteDatabase.CONFLICT_REPLACE)
         }
+        EpisodicFts.replaceAll(db, memoryFts)
     }
 
     companion object {
@@ -72,7 +76,7 @@ class ProjectionRows private constructor(private val tables: Map<String, List<Co
             return ProjectionRows(mapOf(
                 "subjective_beliefs" to beliefs, "tsetlin_automata_blobs" to automata, "bkt_fsrs_mastery" to mastery,
                 "voyager_skill_library" to voyager, "adico_institutions" to adico, "ecological_niche_structures" to structures
-            ))
+            ), EpisodicFts.rows(state))
         }
     }
 }

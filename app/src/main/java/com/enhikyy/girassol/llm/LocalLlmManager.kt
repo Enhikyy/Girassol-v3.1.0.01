@@ -48,8 +48,45 @@ data class LlmStats(
     val genTokensPerSecond: Double = 0.0,
     val benchPromptTps: Double = 0.0,
     val benchGenTps: Double = 0.0,
-    val memoryUnloads: Int = 0
+    val memoryUnloads: Int = 0,
+    val kvCache: String = "",
+    val lazyMode: Boolean = false,
+    val reusedTokens: Long = 0,
+    val forcedTokens: Long = 0,
+    val slotRestores: Int = 0,
+    val lastTemperature: Float = 0f,
+    val quantAdvice: String = "",
+    val idleUnloads: Int = 0
 )
+
+/**
+ * Política de quantização para aparelhos ARM64 (Regra de Ouro KleidiAI): pesos Q4_0/Q8_0
+ * usam os micro-kernels KleidiAI/i8mm do ggml-cpu; KV-cache Q4_0 em ≤ 4 GB e Q8_0 acima.
+ * O "lazy mode" é aplicado no app: em ≤ 4 GB o modelo só carrega na primeira requisição
+ * e é descarregado após [LAZY_IDLE_MS] ociosos (llama.cpp não possui flag --lazy-mode).
+ */
+object LlmQuantPolicy {
+    const val KV_F16 = 0
+    const val KV_Q8_0 = 1
+    const val KV_Q4_0 = 2
+    const val LOW_RAM_BYTES = 4L * 1024 * 1024 * 1024 + 512L * 1024 * 1024
+    const val LAZY_IDLE_MS = 90_000L
+
+    fun kvTypeFor(totalMemBytes: Long): Int = if (totalMemBytes <= LOW_RAM_BYTES) KV_Q4_0 else KV_Q8_0
+    fun lazyFor(totalMemBytes: Long): Boolean = totalMemBytes <= LOW_RAM_BYTES
+    fun kvName(t: Int): String = when (t) { KV_Q8_0 -> "q8_0"; KV_Q4_0 -> "q4_0"; else -> "f16" }
+
+    /** Classifica o tipo de pesos pelo nome/descrição do GGUF. */
+    fun weightAdvice(description: String): String {
+        val d = description.uppercase()
+        return when {
+            Regex("Q4_0|Q8_0").containsMatchIn(d) -> "pesos Q4_0/Q8_0: compatível KleidiAI"
+            Regex("Q4_K|Q5_K|Q6_K|Q3_K|Q2_K|IQ").containsMatchIn(d) -> "pesos K-quant: prefira Q4_0/Q8_0 para KleidiAI"
+            Regex("F16|F32|BF16").containsMatchIn(d) -> "pesos float: prefira Q4_0/Q8_0"
+            else -> "tipo de pesos não identificado"
+        }
+    }
+}
 
 /**
  * Gerencia o modelo GGUF local (importado pelo Storage Access Framework) e implementa a
@@ -66,6 +103,8 @@ object LocalLlmManager : NeuralDeliberationPort {
     private const val MAX_INFLIGHT = 2
     private const val MIN_FREE_AFTER_LOAD = 600L * 1024 * 1024
     private const val HARD_CAP = 1_600L * 1024 * 1024
+    private const val MAX_SLOTS = 24
+    private const val T_BASE = 0.7f
 
     private val worker = Executors.newSingleThreadExecutor { r ->
         Thread(r, "girassol-llm").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
@@ -80,7 +119,13 @@ object LocalLlmManager : NeuralDeliberationPort {
     @Volatile private var enabled = true
     @Volatile private var thermalPaused = false
     @Volatile private var ready = false
+    @Volatile private var lazyMode = false
+    @Volatile private var lastUse = 0L
+    private var kvType = LlmQuantPolicy.KV_Q8_0
     private var appContext: Context? = null
+    private val idleChecker = Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "girassol-llm-idle").apply { isDaemon = true }
+    }
 
     val engineCompiled: Boolean
         get() = LlmNativeBridge.isLoaded && runCatching { LlmNativeBridge.nativeLlmAvailable() }.getOrDefault(false)
@@ -88,11 +133,33 @@ object LocalLlmManager : NeuralDeliberationPort {
     fun init(context: Context) {
         appContext = context.applicationContext
         val budget = memoryBudget(context)
-        _stats.update { it.copy(budgetMb = budget / (1024 * 1024)) }
+        val total = context.getSystemService(ActivityManager::class.java).let { am ->
+            ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }.totalMem
+        }
+        kvType = LlmQuantPolicy.kvTypeFor(total)
+        lazyMode = LlmQuantPolicy.lazyFor(total)
+        _stats.update { it.copy(budgetMb = budget / (1024 * 1024), kvCache = LlmQuantPolicy.kvName(kvType), lazyMode = lazyMode) }
         if (!engineCompiled) { _stats.update { it.copy(status = LlmStatus.UNAVAILABLE) }; return }
         val path = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("model", null)
         val f = path?.let { File(it) }
-        if (f != null && f.exists()) loadAsync(f) else _stats.update { it.copy(status = LlmStatus.NO_MODEL) }
+        when {
+            f == null || !f.exists() -> _stats.update { it.copy(status = LlmStatus.NO_MODEL) }
+            lazyMode -> _stats.update { it.copy(status = LlmStatus.PAUSED_MEMORY, modelName = f.name, lastError = "modo lazy: carrega na 1ª requisição") }
+            else -> loadAsync(f)
+        }
+        idleChecker.scheduleWithFixedDelay({ unloadIfIdle() }, 30, 30, java.util.concurrent.TimeUnit.SECONDS)
+    }
+
+    /** Modo lazy (≤ 4 GB): libera modelo + KV após [LlmQuantPolicy.LAZY_IDLE_MS] sem uso. */
+    private fun unloadIfIdle() {
+        if (!lazyMode || !ready || inflight.get() > 0) return
+        if (System.currentTimeMillis() - lastUse < LlmQuantPolicy.LAZY_IDLE_MS) return
+        worker.execute {
+            if (!ready || inflight.get() > 0) return@execute
+            ready = false
+            runCatching { LlmNativeBridge.nativeLlmUnload() }
+            _stats.update { it.copy(status = LlmStatus.PAUSED_MEMORY, lastError = "modo lazy: descarregado por ociosidade", idleUnloads = it.idleUnloads + 1) }
+        }
     }
 
     /** min(1,6 GB, 40 % da RAM física): garante folga para o mundo e o Filament em aparelhos de 4 GB. */
@@ -138,6 +205,7 @@ object LocalLlmManager : NeuralDeliberationPort {
         ready = false
         runCatching { LlmNativeBridge.nativeLlmAbort() }
         worker.execute {
+            runCatching { LlmNativeBridge.nativeLlmClearSlots() }
             runCatching { LlmNativeBridge.nativeLlmUnload() }
             ready = false
             _stats.update { it.copy(status = LlmStatus.PAUSED_MEMORY, lastError = "disjuntor: $reason", memoryUnloads = it.memoryUnloads + 1) }
@@ -168,7 +236,7 @@ object LocalLlmManager : NeuralDeliberationPort {
     /** Recarrega um modelo descarregado por memória, se houver folga. */
     fun maybeReload() {
         val ctx = appContext ?: return
-        if (memoryBreakerOpen) return
+        if (memoryBreakerOpen || lazyMode) return // modo lazy recarrega sob demanda (lazyWake)
         if (ready || _stats.value.status != LlmStatus.PAUSED_MEMORY) return
         val path = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("model", null) ?: return
         loadAsync(File(path))
@@ -249,16 +317,23 @@ object LocalLlmManager : NeuralDeliberationPort {
                 return@execute
             }
             val threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 4)
-            val err = runCatching { LlmNativeBridge.nativeLlmLoad(file.absolutePath, threads, N_CTX) }.getOrElse { it.message ?: "erro" }
+            val slotDir = File(ctx.filesDir, "llm_slots").apply { mkdirs() }
+            val err = runCatching {
+                LlmNativeBridge.nativeLlmLoad(file.absolutePath, threads, N_CTX, true, kvType, slotDir.absolutePath, MAX_SLOTS)
+            }.getOrElse { it.message ?: "erro" }
             if (err.isNotEmpty()) {
                 _stats.update { it.copy(status = LlmStatus.ERROR, lastError = err) }
                 return@execute
             }
             val desc = runCatching { LlmNativeBridge.nativeLlmDescribe() }.getOrDefault("")
             ready = true
+            lastUse = System.currentTimeMillis()
+            val parts = desc.split('|')
             _stats.update {
-                it.copy(modelName = file.name, description = desc.substringBefore('|'),
-                    modelBytes = desc.substringAfter('|', "0").toLongOrNull() ?: file.length(),
+                it.copy(modelName = file.name, description = parts.getOrElse(0) { "" },
+                    modelBytes = parts.getOrNull(1)?.toLongOrNull() ?: file.length(),
+                    kvCache = parts.getOrNull(2)?.takeIf { c -> c.isNotBlank() } ?: LlmQuantPolicy.kvName(kvType),
+                    quantAdvice = LlmQuantPolicy.weightAdvice(file.name + " " + parts.getOrElse(0) { "" }),
                     nativeHeapMb = android.os.Debug.getNativeHeapAllocatedSize() / 1048576.0)
             }
             refreshStatus()
@@ -269,7 +344,17 @@ object LocalLlmManager : NeuralDeliberationPort {
 
     override fun isAvailable(): Boolean = ready && enabled && !thermalPaused
 
+    /** Modo lazy: dispara o carregamento sob demanda (a requisição atual cai no simbólico). */
+    private fun lazyWake() {
+        if (!lazyMode || ready || !enabled || thermalPaused || memoryBreakerOpen) return
+        if (_stats.value.status != LlmStatus.PAUSED_MEMORY) return
+        val ctx = appContext ?: return
+        val path = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("model", null) ?: return
+        loadAsync(File(path))
+    }
+
     override fun trySubmit(request: NeuralRequest): Boolean {
+        if (!ready) lazyWake()
         if (!isAvailable() || inflight.get() >= MAX_INFLIGHT) return false
         if (!pendingAgents.add(request.agentId)) return false
         inflight.incrementAndGet()
@@ -277,7 +362,17 @@ object LocalLlmManager : NeuralDeliberationPort {
         worker.execute {
             try {
                 if (!isAvailable()) return@execute
-                val r = LlmNativeBridge.nativeLlmGenerate(request.prompt.system, request.prompt.user, request.prompt.grammar, MAX_TOKENS)
+                com.enhikyy.girassol.perf.AdpfHints.registerCurrentThread("girassol-llm")
+                val tStart = System.nanoTime()
+                lastUse = System.currentTimeMillis()
+                val p = request.prompt
+                val temperature = runCatching {
+                    LlmNativeBridge.nativeSemanticTemperature(p.recentSpeeches.joinToString("\n"), T_BASE)
+                }.getOrDefault(T_BASE)
+                val r = LlmNativeBridge.nativeLlmGenerate(p.system, p.worldPrefix, p.user, p.grammar,
+                    p.jsonKeys.joinToString(","), request.agentId, temperature, (p.seed xor (p.seed ushr 32)).toInt(), MAX_TOKENS)
+                lastUse = System.currentTimeMillis()
+                com.enhikyy.girassol.perf.AdpfHints.reportWork(System.nanoTime() - tStart)
                 val text = r[0]; val err = r[1]
                 val genTokens = r[3].toIntOrNull() ?: 0
                 val ms = r[4].toDoubleOrNull() ?: 0.0
@@ -293,7 +388,10 @@ object LocalLlmManager : NeuralDeliberationPort {
                         genTokensPerSecond = if (genTps > 0) genTps else it.genTokensPerSecond,
                         decisions = it.decisions + if (parsed != null) 1 else 0,
                         rejected = it.rejected + if (parsed == null) 1 else 0,
-                        lastOutput = text.take(220), lastError = err,
+                        lastOutput = text.take(220), lastError = err, lastTemperature = temperature,
+                        reusedTokens = it.reusedTokens + (r.getOrNull(7)?.toLongOrNull() ?: 0),
+                        forcedTokens = it.forcedTokens + (r.getOrNull(8)?.toLongOrNull() ?: 0),
+                        slotRestores = it.slotRestores + if (r.getOrNull(9) == "1") 1 else 0,
                         nativeHeapMb = android.os.Debug.getNativeHeapAllocatedSize() / 1048576.0)
                 }
             } catch (t: Throwable) {

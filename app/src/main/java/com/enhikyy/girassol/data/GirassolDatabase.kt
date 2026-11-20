@@ -24,15 +24,17 @@ class GirassolDatabase(private val context: Context) :
             .filterNot { it.startsWith("PRAGMA", ignoreCase = true) }
             .forEach { db.execSQL(it) }
         EXTRA_TABLES.forEach { db.execSQL(it) }
+        EpisodicFts.ensure(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         EXTRA_TABLES.forEach { db.execSQL(it) }
+        EpisodicFts.ensure(db)
     }
 
     companion object {
         const val DB_NAME = "girassol.db"
-        const val DB_VERSION = 1
+        const val DB_VERSION = 2
 
         fun splitStatements(sql: String): List<String> = sql
             .lines().filterNot { it.trimStart().startsWith("--") }.joinToString("\n")

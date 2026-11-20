@@ -62,6 +62,17 @@ inline LlmVariant selectLlmVariant(const CpuFeatures& f, bool aarch64) {
     return LlmVariant::Base;
 }
 
+// Backend de CPU dinâmico do ggml (GGML_BACKEND_DL) correspondente à variante.
+// No x86_64 (emulador) há um único backend genérico.
+inline const char* cpuBackendLibrary(LlmVariant v, bool aarch64) {
+    if (!aarch64) return "libggml-cpu.so";
+    switch (v) {
+        case LlmVariant::I8mm: return "libggml-cpu-android_armv8.6_1.so";
+        case LlmVariant::DotProd: return "libggml-cpu-android_armv8.2_2.so";
+        default: return "libggml-cpu-android_armv8.0_1.so";
+    }
+}
+
 inline bool isAarch64Build() {
 #if defined(__aarch64__)
     return true;

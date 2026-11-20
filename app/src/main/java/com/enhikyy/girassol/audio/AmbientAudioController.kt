@@ -37,7 +37,7 @@ object AmbientAudioController {
     }
 
     fun update(dash: DashboardSnapshot?, render: WorldRenderSnapshot?) {
-        if (!running) return
+        if (!running) { speakNewest(render); return }
         if (dash != null) {
             val psi = (dash.society.cliodynamics?.politicalStressIndicator ?: 0.0).toFloat()
             val stability = (1f - psi.coerceIn(0f, 1f))
@@ -52,9 +52,22 @@ object AmbientAudioController {
                 if (lastSpoken[a.id] == render.tick - a.speechAgeTicks) continue
                 lastSpoken[a.id] = render.tick - a.speechAgeTicks
                 val pitch = ((a.id.hashCode() and 0xFF) / 255f)
-                runCatching { GeaNativeBridge.nativeAudioSpeech((a.x - half) / 4f, (a.z - half) / 4f, pitch) }
+                runCatching { GeaNativeBridge.nativeAudioSpeech((a.fx - half) / 4f, (a.fz - half) / 4f, pitch) }
             }
             if (lastSpoken.size > 400) lastSpoken.clear()
         }
+        speakNewest(render)
+    }
+
+    private var lastTtsTick = -1L
+
+    /** Voz TTS offline para a fala mais recente (independe do sintetizador AAudio). */
+    private fun speakNewest(render: WorldRenderSnapshot?) {
+        if (render == null || !CitizenVoice.status.value.enabled) return
+        val a = render.agents.filter { it.speech.isNotBlank() && it.speechAgeTicks <= 2 }.minByOrNull { it.speechAgeTicks } ?: return
+        val tick = render.tick - a.speechAgeTicks
+        if (tick == lastTtsTick) return
+        lastTtsTick = tick
+        CitizenVoice.speak(a.id, a.speech, CitizenVoice.panFor(a.fx, render.widthTiles / 2f))
     }
 }

@@ -59,6 +59,12 @@ object IsoRenderer {
     fun bitmapWidth(w: Int) = (w * TW).toInt() + 2
     fun bitmapHeight(w: Int) = (w * TH + TOP + 4).toInt()
 
+    /** Centro isométrico de uma posição contínua (fx, fz em tiles; centro do tile = n + 0.5). */
+    fun pointCenter(fx: Float, fz: Float, w: Int): Pair<Float, Float> = tileCenter(fx - 0.5f, fz - 0.5f, w)
+
+    fun tileCenter(x: Float, z: Float, w: Int): Pair<Float, Float> =
+        ((x - z) * TW / 2f + w * TW / 2f) to ((x + z) * TH / 2f + TH / 2f + TOP)
+
     fun tileCenter(x: Int, z: Int, w: Int): Pair<Float, Float> =
         ((x - z) * TW / 2f + w * TW / 2f) to ((x + z) * TH / 2f + TH / 2f + TOP)
 

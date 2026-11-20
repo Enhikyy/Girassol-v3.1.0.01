@@ -9,6 +9,7 @@
 #include "audio/binaural_hrtf_spatializer.hpp"
 #include "cognitive/tsetlin_machine.hpp"
 #include "common/splitmix64.hpp"
+#include "memory/binary_episodic_index.hpp"
 #include "evolution/map_elites_aurora.hpp"
 #include "audio/ambient_binaural_synth.hpp"
 #include "forge/lora_trainer_realtime.hpp"
@@ -17,6 +18,8 @@
 #include "hardware/soc_hardware_probe.hpp"
 #include "common/utf8.hpp"
 #include "llm/llm_engine.hpp"
+#include "llm/semantic_entropy.hpp"
+#include <filesystem>
 #include "navigation/grid_astar.hpp"
 #include <cstring>
 
@@ -138,6 +141,48 @@ static void llmTest() {
     eng.unload();
     CHECK(!eng.loaded(), "descarregamento do modelo");
 
+
+    // --- v3.4: prefixo imutável + slots por cidadão + fast-forward + temperatura semeada
+    {
+        const std::string slotDir = (std::filesystem::temp_directory_path() / "girassol_slots_test").string();
+        std::filesystem::remove_all(slotDir);
+        girassol::llm::LlmEngine e2;
+        girassol::llm::LlmLoadConfig cfg;
+        cfg.nThreads = 2; cfg.nCtx = 512; cfg.flashAttn = true; cfg.kvType = girassol::llm::KvCacheType::Q8_0;
+        cfg.slotDir = slotDir; cfg.maxSlots = 2;
+        CHECK(e2.load(path, cfg, &err), ("carrega com flash attention + KV Q8_0 " + err).c_str());
+        std::printf("config efetiva: %s\n", e2.runtimeConfig().c_str());
+        CHECK(!e2.runtimeConfig().empty(), "configuração de runtime reportada");
+        const std::string world = "Regras imutaveis da cidade de Girassol: responda em JSON curto com acao, pensamento e fala.";
+        girassol::llm::LlmRequest q;
+        q.system = world + " Voce e Ana."; q.worldPrefix = world; q.user = "Escolha uma acao."; q.grammar = kGrammar;
+        q.jsonKeys = {"acao", "pensamento", "fala"}; q.slotKey = "cidadao-1"; q.maxTokens = 320;
+        q.temperature = 0.9f; q.seed = 1234;
+        const auto a1 = e2.generate(q);
+        std::printf("ff saída: %s | forçados=%d reaproveitados=%d gen=%d\n", a1.text.c_str(), a1.forcedTokens, a1.reusedTokens, a1.genTokens);
+        CHECK(a1.ok && a1.text.rfind("{\"acao\":\"", 0) == 0 && a1.text.back() == '}', "fast-forward produz JSON válido");
+        CHECK(a1.forcedTokens > 0, "fast-forward injeta tokens fixos da gramática");
+        const auto a2 = e2.generate(q);
+        CHECK(a2.reusedTokens > 0, "prefixo do mundo reaproveitado do KV-cache");
+        CHECK(a1.text == a2.text, "temperatura + semente fixa → saída reprodutível");
+        girassol::llm::LlmRequest qb = q; qb.system = world + " Voce e Bento."; qb.slotKey = "cidadao-2";
+        const auto b1 = e2.generate(qb);
+        CHECK(b1.ok && b1.reusedTokens > 0, "outro cidadão reaproveita só o prefixo imutável");
+        girassol::llm::LlmRequest qc = q; qc.system = world + " Voce e Carla."; qc.slotKey = "cidadao-3";
+        e2.generate(qc);
+        CHECK(e2.slotCount() == 2, "LRU limita slots por cidadão");
+        girassol::llm::LlmRequest qa = q; qa.slotKey = "cidadao-2"; qa.system = world + " Voce e Bento.";
+        const auto r3 = e2.generate(qa);
+        CHECK(r3.slotRestored && r3.reusedTokens > 0, "slot do cidadão restaurado com llama_state_seq_load_file");
+        size_t files = 0;
+        for (const auto& f : std::filesystem::directory_iterator(slotDir)) files += f.path().extension() == ".slot";
+        CHECK(files == 2, "slots persistidos em disco (.slot)");
+        e2.clearSlots();
+        CHECK(e2.slotCount() == 0, "disjuntor limpa os slots");
+        e2.unload();
+        std::filesystem::remove_all(slotDir);
+    }
+
     // benchmark tokens/s (pp + tg), mesmo caminho usado pelo botão da aba Sistema
     girassol::llm::LlmEngine eb;
     CHECK(eb.load(path, 2, 512, &err), "recarrega para benchmark");
@@ -148,6 +193,25 @@ static void llmTest() {
     std::printf("llama system_info: %s\n", si.c_str());
     CHECK(!si.empty(), "llama_print_system_info disponível");
     eb.unload();
+}
+
+static void semanticEntropyTests() {
+    using girassol::llm::SemanticEntropyController;
+    SemanticEntropyController rep;
+    for (int i = 0; i < 6; ++i) rep.push("preciso comer alguma coisa agora");
+    SemanticEntropyController var;
+    var.push("preciso comer alguma coisa agora"); var.push("a horta da praca floresceu hoje cedo");
+    var.push("vou descansar perto do rio azul"); var.push("ouvi boatos sobre o conselho novo");
+    var.push("quero trocar sementes com a vizinha"); var.push("o mercado esta cheio de gente feliz");
+    std::printf("entropia: repetitiva=%.3f variada=%.3f T=%.3f/%.3f\n", rep.ngramEntropy(), var.ngramEntropy(), rep.temperature(), var.temperature());
+    CHECK(rep.ngramEntropy() < var.ngramEntropy(), "falas repetitivas têm menor entropia de 3-gramas");
+    CHECK(rep.temperature() > var.temperature(), "repetição eleva a temperatura");
+    CHECK(rep.temperature() <= SemanticEntropyController::kMaxT && var.temperature() >= SemanticEntropyController::kMinT, "T limitada a [0.45, 1.15]");
+    SemanticEntropyController w;
+    for (int i = 0; i < 10; ++i) w.push("x y z");
+    CHECK(w.size() == SemanticEntropyController::kWindow, "janela das últimas 6 falas");
+    CHECK(SemanticEntropyController::temperatureFor("a b c d\na b c d\na b c d") > 0.70f, "temperatureFor separa por linha");
+    CHECK(SemanticEntropyController::words("Olá, MUNDO!") == std::vector<std::string>({"olá", "mundo"}), "tokenização em palavras minúsculas");
 }
 
 static void cpuFeatureTests() {
@@ -165,6 +229,9 @@ static void cpuFeatureTests() {
     auto a53 = decodeAarch64Hwcaps(kHwcapAsimd, 0);
     CHECK(selectLlmVariant(a53, true) == LlmVariant::Base, "Cortex-A53 → base");
     CHECK(selectLlmVariant(g, false) == LlmVariant::Base, "build não-arm64 → base");
+    CHECK(std::string(cpuBackendLibrary(LlmVariant::I8mm, true)) == "libggml-cpu-android_armv8.6_1.so", "i8mm → backend armv8.6_1");
+    CHECK(std::string(cpuBackendLibrary(LlmVariant::DotProd, true)) == "libggml-cpu-android_armv8.2_2.so", "dotprod → backend armv8.2_2");
+    CHECK(std::string(cpuBackendLibrary(LlmVariant::Base, true)) == "libggml-cpu-android_armv8.0_1.so", "base → backend armv8.0_1");
     CHECK(describeCpuFeatures(f) == "NEON=1 DOTPROD=1 FP16=1 I8MM=0 SVE=0 SVE2=0", "descrição das flags SIMD");
 
     const std::string status = "Name:\tgirassol\nVmPeak:\t 9000 kB\nVmSize:\t 8000 kB\nVmHWM:\t  1900000 kB\nVmRSS:\t  1234567 kB\n"
@@ -209,8 +276,21 @@ int main() {
     int found = 0;
     const uint64_t nav = navSignature(&found);
     std::printf("assinatura_paridade_nav=0x%016llx (caminhos=%d)\n", static_cast<unsigned long long>(nav), found);
-    CHECK(nav == 0x4c5f15c838631491ULL, "navegação C++ idêntica ao Pathfinding Kotlin");
+    CHECK(nav == 0x30cd3f41edf40ac4ULL, "navegação C++ (A* + clearance DistrictNavMesh) idêntica ao Pathfinding Kotlin");
     CHECK(found > 32, "vetor de navegação exercita caminhos reais");
+
+    {
+        const uint64_t bin = girassol::memory::paritySignature();
+        std::printf("assinatura_paridade_memoria_binaria=0x%016llx\n", static_cast<unsigned long long>(bin));
+        CHECK(bin == 0x01ddb39b8e7c5fb9ULL, "SimHash bit[256] + Hamming popcount idênticos ao EpisodicIndex Kotlin");
+        const auto a = girassol::memory::simHash({"colher", "horta", "#sucesso"});
+        const auto b = girassol::memory::simHash({"colher", "horta", "#falha"});
+        const auto c = girassol::memory::simHash({"usina", "energia", "reparo", "#manter_usina"});
+        CHECK(sizeof(a) == 32, "embedding binário ocupa 32 bytes");
+        CHECK(girassol::memory::hamming(a, b) < girassol::memory::hamming(a, c), "Hamming aproxima textos parecidos");
+        const auto top = girassol::memory::topKHamming(a, {c, b, a}, 2);
+        CHECK(top.size() == 2 && top[0] == 2 && top[1] == 1, "estágio 1 top-k por Hamming");
+    }
 
     float m0 = 0, m1 = 0;
     const uint64_t lora = loraSignature(&m0, &m1);
@@ -231,8 +311,23 @@ int main() {
     float diffLR = 0;
     for (size_t i = 0; i + 1 < buf.size(); i += 2) diffLR += std::fabs(buf[i] - buf[i + 1]);
     CHECK(diffLR > 0.01f, "canais esquerdo/direito diferem (batimento binaural)");
+    {
+        girassol::audio::AmbientBinauralSynth duck(48000);
+        duck.setParams(ap);
+        std::vector<float> b2(480 * 2);
+        for (int i = 0; i < 10; ++i) duck.render(b2.data(), 480);
+        CHECK(duck.duckGain() > 0.99f, "sem fala a trilha Trautonium fica em ganho 1");
+        duck.setExternalSpeech(true);
+        for (int i = 0; i < 40; ++i) duck.render(b2.data(), 480);
+        std::printf("ducking durante fala=%.3f\n", duck.duckGain());
+        CHECK(duck.duckGain() < 0.30f, "audio ducking abaixa a trilha durante a fala (TTS)");
+        duck.setExternalSpeech(false);
+        for (int i = 0; i < 200; ++i) duck.render(b2.data(), 480);
+        CHECK(duck.duckGain() > 0.95f, "trilha volta após a fala");
+    }
 
     cpuFeatureTests();
+    semanticEntropyTests();
     llmTest();
 
     std::printf(gFailures == 0 ? "TODOS OS TESTES NATIVOS PASSARAM\n" : "%d FALHA(S)\n", gFailures);

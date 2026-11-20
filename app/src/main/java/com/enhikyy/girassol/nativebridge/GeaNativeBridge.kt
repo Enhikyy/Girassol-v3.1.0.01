@@ -77,6 +77,9 @@ object GeaNativeBridge {
         w: Int, tiles: IntArray, sx: Int, sz: Int, gx: Int, gz: Int, trail: FloatArray?, danger: FloatArray?
     ): IntArray
 
+    /** Assinatura dourada do SimHash bit[256] + Hamming (popcount) em C++. */
+    @JvmStatic external fun nativeBinaryMemorySignature(): Long
+
     // ==================== 4. ÁUDIO BINAURAL (AAudio) ====================
     @JvmStatic external fun nativeAudioStart(): Boolean
     @JvmStatic external fun nativeAudioStop()
@@ -85,6 +88,10 @@ object GeaNativeBridge {
     @JvmStatic external fun nativeAudioStatus(): String
     /** Renderização offline: [rms, pico, quadros]. */
     @JvmStatic external fun nativeAudioOfflineProbe(stability: Float, frames: Int): FloatArray
+    /** TTS do Android falando: ativa o audio ducking da trilha Trautonium. */
+    @JvmStatic external fun nativeAudioSetExternalSpeech(speaking: Boolean)
+    /** Ganho atual de ducking (1 = trilha cheia). */
+    @JvmStatic external fun nativeAudioDuckGain(): Float
 
     // ==================== 5. LORA (espelho exato do LoraMath Kotlin) ====================
     /** Estado empacotado' + [mseFirst, mseLast, bits(step)]; null em entrada inválida. */

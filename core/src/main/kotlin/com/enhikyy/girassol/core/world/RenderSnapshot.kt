@@ -4,7 +4,10 @@ package com.enhikyy.girassol.core.world
 data class AgentView(
     val id: String, val name: String, val x: Int, val z: Int, val action: ActionType?,
     val mood: Double, val meanNeed: Double, val generation: Int, val thought: String,
-    val speech: String = "", val speechAgeTicks: Long = Long.MAX_VALUE, val neural: Boolean = false
+    val speech: String = "", val speechAgeTicks: Long = Long.MAX_VALUE, val neural: Boolean = false,
+    /** Posição contínua (ORCA + resolveCircleAABB), em unidades de tile; centro do tile = x + 0.5. */
+    val fx: Float = x + 0.5f, val fz: Float = z + 0.5f,
+    val cortisol: Float = 0.3f, val dopamine: Float = 0.5f
 )
 
 data class ObjectView(val id: String, val type: SmartObjectType, val x: Int, val z: Int, val contaminated: Boolean, val occupancy: Int)
@@ -38,7 +41,9 @@ data class WorldRenderSnapshot(
                 widthTiles = state.widthTiles, tiles = state.tiles.copyOf(), districts = state.districts.toList(),
                 objects = state.objects.map { ObjectView(it.id, it.type, it.tileX, it.tileZ, it.contaminatedUntilTick > state.tick, state.board.activeReservations(it.id, state.tick)) },
                 agents = alive.map { AgentView(it.id, it.name, it.x, it.z, it.intention?.action, it.emotion.mood, it.meanNeed(), it.generation, it.lastThought,
-                    it.lastSpeech, if (it.lastSpeechTick < 0) Long.MAX_VALUE else state.tick - it.lastSpeechTick, it.intention?.viaNeural == true) },
+                    it.lastSpeech, if (it.lastSpeechTick < 0) Long.MAX_VALUE else state.tick - it.lastSpeechTick, it.intention?.viaNeural == true,
+                    if (it.px.isNaN()) it.x + 0.5f else it.px.toFloat(), if (it.pz.isNaN()) it.z + 0.5f else it.pz.toFloat(),
+                    it.cortisol.toFloat(), it.dopamine.toFloat()) },
                 trail = state.board.channelSnapshot(CH_TRAIL),
                 foodScent = state.board.channelSnapshot(CH_FOOD),
                 population = alive.size,

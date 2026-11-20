@@ -119,9 +119,16 @@ class PersistenceWriter(private val context: Context) {
             val w = db.writableDatabase
             listOf("canonical_events", "double_entry_ledger", "world_snapshots", "rsi_promotion_ledger", "stress_events",
                 "subjective_beliefs", "tsetlin_automata_blobs", "bkt_fsrs_mastery", "voyager_skill_library", "adico_institutions",
-                "ecological_niche_structures").forEach { w.delete(it, null, null) }
+                "ecological_niche_structures", EpisodicFts.TABLE).forEach { w.delete(it, null, null) }
         }
     }
+
+    /** Busca textual (FTS5 bm25 ou FTS4 + BM25 Kotlin) nas memórias projetadas. */
+    fun searchMemories(text: String, owner: String? = null, limit: Int = 10): List<FtsHit> = runCatching {
+        EpisodicFts.search(db.readableDatabase, text, owner, limit)
+    }.onFailure { Log.w(TAG, "busca FTS falhou", it) }.getOrDefault(emptyList())
+
+    fun ftsModule(): String = runCatching { EpisodicFts.module(db.writableDatabase) }.getOrDefault("-")
 
     fun countRows(table: String): Long = runCatching {
         db.readableDatabase.rawQuery("SELECT COUNT(*) FROM $table", null).use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }

@@ -13,7 +13,7 @@ import com.enhikyy.girassol.core.world.TileType
  * e são verificadas também no aparelho, na inicialização, antes de ativar o backend nativo.
  */
 object ParityVectors {
-    const val NAV_GOLDEN: Long = 0x4c5f15c838631491L
+    const val NAV_GOLDEN: Long = 0x30cd3f41edf40ac4L  // v3.4: A* + clearance do DistrictNavMesh
     const val LORA_GOLDEN: Long = -1349069367639751732L // 0xed47248ecc78c3cc
 
     const val NAV_W = 40

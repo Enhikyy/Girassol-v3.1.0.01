@@ -13,6 +13,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -89,6 +90,43 @@ fun MindScreen() {
                 if (importMsg.isNotEmpty()) Text(importMsg, style = MaterialTheme.typography.bodySmall, color = Lumon.Teal)
                 Text("Saída restrita por gramática GBNF a JSON {acao, pensamento, fala}; decisões entram no log de eventos e são aplicadas no estágio 1 do tick seguinte. Sem modelo, sob calor ou pressão de memória, o deliberador simbólico assume.",
                     style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
+            }
+        }
+        item {
+            val v = m.v34
+            SectionCard("Memória episódica em 2 estágios", Modifier.testTag("v34_memory")) {
+                MetricRow("Consultas" to v.retrievalQueries.toString(), "Estágio 1" to v.meanStage1.f(1), "Corpus" to v.meanCorpus.f(1))
+                KeyValue("Embeddings bit[256] (32 B cada)", "${v.binaryIndexBytes / 1024} KB · Hamming XOR+popcount")
+                KeyValue("Estágio 2", "RRF (cosseno + BM25) × Hawkes λ(t)")
+                KeyValue("Replay SWR no sono (atualizações Q)", v.swrReplayUpdates.toString())
+                var query by remember { mutableStateOf("") }
+                var hits by remember { mutableStateOf<List<com.enhikyy.girassol.data.FtsHit>>(emptyList()) }
+                var module by remember { mutableStateOf("") }
+                OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth().testTag("fts_query"), singleLine = true,
+                    label = { Text("Buscar nas memórias (SQLite FTS)") })
+                OutlinedButton(enabled = query.isNotBlank(), modifier = Modifier.testTag("fts_search"), onClick = {
+                    scope.launch {
+                        val (h, mod) = withContext(Dispatchers.IO) { SimulationHub.searchMemories(query) to SimulationHub.ftsModule() }
+                        hits = h; module = mod
+                    }
+                }) { Text("Buscar") }
+                if (module.isNotEmpty()) Text("${hits.size} resultados · ${module.uppercase()}${if (module == "fts5") " bm25()" else " + BM25 Kotlin"}",
+                    style = MonoStyle, color = Lumon.Teal, modifier = Modifier.testTag("fts_result"))
+                hits.take(6).forEach { h ->
+                    Text("${h.owner} · ${h.layer} · t${h.tick} · ${h.score.f(2)}", style = MonoStyle, color = Lumon.CreamDim)
+                    Text(h.content, style = MaterialTheme.typography.bodySmall, color = Lumon.Cream, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+        item {
+            val v = m.v34
+            SectionCard("Corpo, movimento e genética", Modifier.testTag("v34_body")) {
+                MetricRow("Cortisol" to v.meanCortisol.f(2), "Ocitocina" to v.meanOxytocin.f(2), "Dopamina" to v.meanDopamine.f(2))
+                KeyValue("Locomoção CfC (48 neurônios)", "× ${v.meanLocomotion.f(2)}")
+                KeyValue("ORCA: passos ajustados", v.orcaAdjustedSteps.toString())
+                KeyValue("Colisões resolvidas (círculo × AABB)", v.aabbCorrections.toString())
+                KeyValue("TIES-Merging de LoRA no nascimento", v.tiesMerges.toString())
+                KeyValue("Superações (≥ +15% sobre os pais)", v.superacoes.toString())
             }
         }
         item {

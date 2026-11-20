@@ -66,8 +66,11 @@ class SystemPanelsTest {
         assertTrue(flags, flags.contains("NEON=") && flags.contains("DOTPROD=") && flags.contains("FP16=") && flags.contains("I8MM="))
         val variant = scrollTo("llm_variant").text()
         assertTrue(variant, variant.isNotBlank())
-        // o emulador x86_64 deve sempre usar a variante base
-        if (!LlmNativeBridge.cpuFlags.aarch64) assertEquals("base", LlmNativeBridge.loadedVariant)
+        // o emulador x86_64 carrega dinamicamente libggml-cpu.so (GGML_BACKEND_DL) de dentro do APK
+        if (!LlmNativeBridge.cpuFlags.aarch64) {
+            assertEquals(LlmNativeBridge.loadLog, "x86_64", LlmNativeBridge.loadedVariant)
+            assertEquals("libggml-cpu.so", LlmNativeBridge.nativeLlmCpuBackend())
+        }
     }
 
     @Test

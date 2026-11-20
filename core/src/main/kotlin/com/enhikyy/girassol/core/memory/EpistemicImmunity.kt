@@ -11,8 +11,10 @@ enum class AssimilationOutcome { FUSED, QUARANTINED_LOW_TRUST, QUARANTINED_CONFL
  * 1. a opinião recebida é descontada pela confiança no domínio "informacao" (⊗ de Jøsang);
  * 2. fontes com confiança baixa ou opiniões que conflitam com evidência própria verificada
  *    vão para quarentena — não entram nas decisões até serem verificadas pelo WorldCore;
- * 3. caso contrário, a opinião é combinada por fusão por média (rumores correlacionados,
- *    sem dupla contagem).
+ * 3. caso contrário, a opinião é combinada: fusão por média (⊕ média) quando a afirmação
+ *    vem da mesma fonte ou da mesma proveniência (boato correlacionado — sem dupla contagem,
+ *    defesa contra memory poisoning); fusão cumulativa (⊕) só para evidências independentes
+ *    (fonte e evento de origem distintos).
  */
 object EpistemicImmunity {
     const val MIN_SOURCE_TRUST = 0.35
@@ -45,10 +47,24 @@ object EpistemicImmunity {
         ) {
             return existing to AssimilationOutcome.QUARANTINED_CONFLICT
         }
-        existing.opinion = SubjectiveOpinion.averagingFuse(existing.opinion, discounted)
+        val correlated = existing.sourceAgentId == sourceAgentId ||
+            (provenanceEventId != null && existing.provenanceEventId == provenanceEventId)
+        existing.opinion = if (correlated) SubjectiveOpinion.averagingFuse(existing.opinion, discounted)
+            else SubjectiveOpinion.cumulativeFuse(existing.opinion, discounted)
         if (!existing.verifiedByExperience) existing.sourceAgentId = sourceAgentId
         existing.updatedTick = tick
         return existing to AssimilationOutcome.FUSED
+    }
+
+    /**
+     * Funde relatos (fonte, opinião): média dentro de cada fonte (correlacionados) e
+     * cumulativa entre fontes distintas (independentes), em ordem determinística de fonte.
+     */
+    fun fuseReports(reports: List<Pair<String, SubjectiveOpinion>>): SubjectiveOpinion {
+        require(reports.isNotEmpty())
+        val perSource = reports.groupBy({ it.first }, { it.second }).toSortedMap()
+            .map { (_, ops) -> ops.reduce { a, b -> SubjectiveOpinion.averagingFuse(a, b) } }
+        return perSource.reduce { a, b -> SubjectiveOpinion.cumulativeFuse(a, b) }
     }
 
     /** Evidência direta (verificada pelo WorldCore): atualização Beta e liberação da quarentena. */

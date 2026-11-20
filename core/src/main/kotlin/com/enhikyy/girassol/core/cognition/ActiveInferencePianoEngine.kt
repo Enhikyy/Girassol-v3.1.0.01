@@ -108,6 +108,54 @@ object ActiveInferencePianoOrchestrator {
         return predictedPragmaticRisk - epistemicWeight * epistemicGain + neuralMetabolicCost
     }
 
+    /** KL(Bern(q) ‖ Bern(p)) com proteção numérica. */
+    fun bernoulliKl(q: Double, p: Double): Double {
+        val qq = q.coerceIn(1e-6, 1 - 1e-6)
+        val pp = p.coerceIn(1e-6, 1 - 1e-6)
+        return qq * ln(qq / pp) + (1 - qq) * ln((1 - qq) / (1 - pp))
+    }
+
+    fun bernoulliEntropy(p: Double): Double {
+        val q = p.coerceIn(1e-9, 1 - 1e-9)
+        return -(q * ln(q) + (1 - q) * ln(1 - q))
+    }
+
+    /** Custo metabólico neural dependente da temperatura do SoC: sigmoide centrada em 40 °C. */
+    fun neuralThermalCost(baseCost: Double, socTempC: Double): Double =
+        baseCost * (1.0 + 2.0 / (1.0 + exp(-(socTempC - 40.0) / 2.5)))
+
+    data class EfeTerms(val risk: Double, val ambiguity: Double, val epistemicGain: Double, val neuralCost: Double) {
+        val total: Double get() = risk + ambiguity - epistemicGain + neuralCost
+    }
+
+    /**
+     * Energia livre esperada na forma de risco + ambiguidade:
+     *   G(π) = Σ_k w_k·D_KL[Q(o_k|π) ‖ P_pref(o_k)] + E_Q[H(P(o|s))] − ganho epistêmico + C_neural(T_SoC)
+     * Cada necessidade projetada é tratada como resultado Bernoulli (satisfeita / não),
+     * com preferência P_pref = [preferred]. A ambiguidade é a entropia esperada do resultado
+     * dado o estado (incerteza sobre o alvo); o ganho epistêmico é a redução esperada de
+     * entropia (o termo −E[H] da especificação, com sinal de informação).
+     */
+    fun computeExpectedFreeEnergyKl(
+        projected: DoubleArray,
+        weights: DoubleArray,
+        preferred: Double,
+        outcomeUncertainty: Double,
+        priorEntropy: Double,
+        posteriorExpectedEntropy: Double,
+        epistemicWeight: Double,
+        neuralBaseCost: Double,
+        socTempC: Double,
+        riskScale: Double = 0.35,
+        ambiguityScale: Double = 0.04
+    ): EfeTerms {
+        var risk = 0.0
+        for (k in projected.indices) risk += weights[k] * bernoulliKl(projected[k], preferred)
+        val ambiguity = ambiguityScale * bernoulliEntropy(0.5 + 0.5 * (1.0 - outcomeUncertainty.coerceIn(0.0, 1.0)))
+        val gain = epistemicWeight * (priorEntropy - posteriorExpectedEntropy).coerceAtLeast(0.0)
+        return EfeTerms(riskScale * risk, ambiguity, gain, neuralThermalCost(neuralBaseCost, socTempC))
+    }
+
     fun selectPolicyWithHysteresis(
         policyKeys: List<String>,
         expectedFreeEnergies: List<Double>,

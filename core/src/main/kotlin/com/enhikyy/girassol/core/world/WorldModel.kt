@@ -19,7 +19,7 @@ import com.enhikyy.girassol.core.forge.LoraSample
 import kotlinx.serialization.Serializable
 
 /** Versão das regras do mundo. Eventos de versões anteriores mantêm suas regras históricas. */
-const val CURRENT_RULES_VERSION = 10
+const val CURRENT_RULES_VERSION = 11
 
 @Serializable
 enum class DistrictType(val label: String) {
@@ -180,11 +180,34 @@ data class Citizen(
     var lastSpeechTick: Long = -1L,
     var neuralSuggestion: String? = null,
     var neuralSuggestionTick: Long = -1L,
-    var neuralDecisions: Int = 0
+    var neuralDecisions: Int = 0,
+    /** Últimas 6 falas (entrada do SemanticEntropyController do motor neural). */
+    val recentSpeeches: MutableList<String> = mutableListOf(),
+    /** Estado da rede CfC de 48 neurônios e níveis hormonais (ODEs de 1ª ordem). */
+    var cfcState: DoubleArray = DoubleArray(48),
+    var cortisol: Double = 0.3,
+    var oxytocin: Double = 0.4,
+    var dopamine: Double = 0.5,
+    var locomotion: Double = 1.0,
+    /** Posição contínua (centro do agente em tiles) e velocidade ORCA; NaN = sincronizar com (x, z). */
+    var px: Double = Double.NaN,
+    var pz: Double = Double.NaN,
+    var vx: Double = 0.0,
+    var vz: Double = 0.0,
+    var stuckTicks: Int = 0,
+    /** Adaptador pessoal de viés de ação (herdado por TIES-Merging). */
+    var personalAdapter: FloatArray = FloatArray(18),
+    /** Fitness média dos pais no nascimento (−1 = fundador) e se a superação já foi avaliada. */
+    var parentsFitnessAtBirth: Double = -1.0,
+    var superacaoEvaluated: Boolean = false,
+    var superacao: Boolean = false
 ) {
     fun ageDays(tick: Long): Double = (tick - birthTick).toDouble() / TICKS_PER_DAY
     fun trait(name: String): Double = genome.expressTrait(name)
     fun meanNeed(): Double = needs.values.average()
+
+    /** Aptidão de vida: taxa de sucesso (Laplace) ponderada pelo bem-estar médio. */
+    fun lifeFitness(): Double = (successes + 1.0) / (successes + failures + 2.0) * (0.5 + 0.5 * meanNeed())
 }
 
 @Serializable
@@ -204,7 +227,9 @@ data class TelemetryInput(
     val thermalTier: Int = 0,
     val availableMemoryMb: Long = 4096,
     val batteryPct: Int = 100,
-    val charging: Boolean = true
+    val charging: Boolean = true,
+    /** Temperatura do SoC/bateria em °C (entra no custo C_neural(T_SoC) da EFE). */
+    val socTempC: Double = 32.0
 )
 
 @Serializable
@@ -293,7 +318,17 @@ data class WorldState(
     val loraPendingSamples: MutableList<LoraSample> = mutableListOf(),
     val loraLedger: MutableList<LoraCycleRecord> = mutableListOf(),
     var neuralDecisionsApplied: Long = 0L,
-    var speechesEmitted: Long = 0L
+    var speechesEmitted: Long = 0L,
+    /** Estatísticas da recuperação episódica em 2 estágios (Hamming → RRF). */
+    var retrievalQueries: Long = 0L,
+    var retrievalStage1Total: Long = 0L,
+    var retrievalCorpusTotal: Long = 0L,
+    var swrReplayUpdates: Long = 0L,
+    /** Navegação contínua: colisões resolvidas contra edifícios e correções ORCA. */
+    var aabbCorrections: Long = 0L,
+    var orcaAdjustedSteps: Long = 0L,
+    var superacoes: Int = 0,
+    var tiesMerges: Int = 0
 ) {
     val widthTiles: Int get() = districtsPerSide * districtSize
     fun tileAt(x: Int, z: Int): TileType = TileType.entries[tiles[z * widthTiles + x]]

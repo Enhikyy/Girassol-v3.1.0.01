@@ -46,7 +46,8 @@ data class ModuleToggles(
     val nativeNavigation: Boolean = true,
     val nativeLora: Boolean = true,
     val binauralAudio: Boolean = false,
-    val localLlm: Boolean = true
+    val localLlm: Boolean = true,
+    val voiceTts: Boolean = false
 )
 
 data class ParityStatus(
@@ -55,7 +56,9 @@ data class ParityStatus(
     val loraOk: Boolean = false,
     val navSignature: String = "-",
     val loraSignature: String = "-",
-    val message: String = "não verificado"
+    val message: String = "não verificado",
+    val memoryOk: Boolean = false,
+    val memorySignature: String = "-"
 )
 
 /**
@@ -73,7 +76,8 @@ object NativeModules {
     fun load(context: Context) {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         _toggles.value = ModuleToggles(
-            p.getBoolean("nav", true), p.getBoolean("lora", true), p.getBoolean("audio", false), p.getBoolean("llm", true)
+            p.getBoolean("nav", true), p.getBoolean("lora", true), p.getBoolean("audio", false), p.getBoolean("llm", true),
+            p.getBoolean("tts", false)
         )
     }
 
@@ -82,7 +86,7 @@ object NativeModules {
         val t = _toggles.value
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean("nav", t.nativeNavigation).putBoolean("lora", t.nativeLora)
-            .putBoolean("audio", t.binauralAudio).putBoolean("llm", t.localLlm).apply()
+            .putBoolean("audio", t.binauralAudio).putBoolean("llm", t.localLlm).putBoolean("tts", t.voiceTts).apply()
     }
 
     /** Executa os vetores de paridade (alguns ms). Seguro chamar mais de uma vez. */
@@ -104,11 +108,14 @@ object NativeModules {
             val lora = ParityVectors.loraSignature(trained.packed(), trained.step)
             val navOk = nav == ParityVectors.NAV_GOLDEN
             val loraOk = lora == ParityVectors.LORA_GOLDEN
+            val mem = GeaNativeBridge.nativeBinaryMemorySignature()
+            val memOk = mem == com.enhikyy.girassol.core.memory.EpisodicIndex.PARITY_GOLDEN &&
+                mem == com.enhikyy.girassol.core.memory.EpisodicIndex.paritySignature()
             ParityStatus(true, navOk, loraOk, "%016x".format(nav), "%016x".format(lora),
                 when {
-                    navOk && loraOk -> "OK: navegação e LoRA C++ idênticos ao Kotlin"
-                    else -> "DIVERGENTE (nav=$navOk, lora=$loraOk): usando Kotlin"
-                })
+                    navOk && loraOk && memOk -> "OK: navegação, LoRA e memória binária C++ idênticos ao Kotlin"
+                    else -> "DIVERGENTE (nav=$navOk, lora=$loraOk, memoria=$memOk): usando Kotlin"
+                }, memOk, "%016x".format(mem))
         }.getOrElse { ParityStatus(true, false, false, "-", "-", "erro: ${it.message}") }
         _parity.value = status
         return status

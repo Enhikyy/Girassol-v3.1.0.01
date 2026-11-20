@@ -4,6 +4,9 @@
 // estabilidade social (estável → ~4 Hz, crise → ~13 Hz); a emoção coletiva desloca o
 // timbre (humor alto → mais harmônicos claros) e a tensão adiciona um ruído de sala.
 // Falas dos cidadãos geram "blips" espacializados pelo BinauralHrtfMixer (ITD/ILD).
+// Audio ducking: enquanto houver fala (blip espacial ou TTS do Android), a trilha
+// Trautonium (drone + harmônicos) desce para ~0,22 com ataque rápido e liberação lenta
+// (BinauralHrtfMixer::computeTrautoniumDuckingGain).
 // Não participa da simulação — o determinismo do mundo não depende do áudio.
 #include <algorithm>
 #include <atomic>
@@ -33,6 +36,10 @@ public:
         target_ = p;
     }
 
+    // TTS externo (Android TextToSpeech) falando: também abaixa a trilha.
+    void setExternalSpeech(bool speaking) { externalSpeech_.store(speaking); }
+    float duckGain() const { return duckGainPublished_.load(); }
+
     // Enfileira um blip de fala em (x, z) relativo ao ouvinte; pitch 0..1.
     void pushSpeech(float x, float z, float pitch) {
         std::lock_guard<std::mutex> lock(mu_);
@@ -59,7 +66,12 @@ public:
             voices.swap(voices_);
         }
         const float twoPi = 6.28318530718f;
+        const bool speaking = !voices.empty() || externalSpeech_.load();
+        const float duckStart = duckGain_;
+        duckGain_ = BinauralHrtfMixer::computeTrautoniumDuckingGain(speaking, duckGain_, static_cast<float>(frames) / sr_);
+        duckGainPublished_.store(duckGain_);
         for (int32_t i = 0; i < frames; ++i) {
+            const float duck = duckStart + (duckGain_ - duckStart) * (static_cast<float>(i) / static_cast<float>(frames));
             // suavização exponencial dos parâmetros (~200 ms)
             cur_.stability += (tgt.stability - cur_.stability) * 0.0001f;
             cur_.mood += (tgt.mood - cur_.mood) * 0.0001f;
@@ -82,8 +94,8 @@ public:
             const float room = pink_ * (0.5f + 2.5f * cur_.tension);
             const float l = std::sin(phaseL_) + bright * std::sin(3.0f * phaseL_) * 0.3f;
             const float r = std::sin(phaseR_) + bright * std::sin(3.0f * phaseR_) * 0.3f;
-            out[i * 2] = cur_.masterGain * (0.18f * l + hum + room);
-            out[i * 2 + 1] = cur_.masterGain * (0.18f * r + hum + room);
+            out[i * 2] = cur_.masterGain * (duck * (0.18f * l + hum) + room);
+            out[i * 2 + 1] = cur_.masterGain * (duck * (0.18f * r + hum) + room);
         }
         // blips de fala espacializados
         if (!voices.empty()) {
@@ -133,6 +145,9 @@ private:
     float phaseL_ = 0, phaseR_ = 0, phaseH_ = 0, pink_ = 0;
     uint64_t noiseState_ = 0x9E3779B97F4A7C15ULL;
     std::vector<float> mono_, stereo_;
+    float duckGain_ = 1.0f;
+    std::atomic<float> duckGainPublished_{1.0f};
+    std::atomic<bool> externalSpeech_{false};
     std::atomic<uint64_t> framesRendered_{0};
 };
 

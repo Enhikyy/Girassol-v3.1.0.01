@@ -24,27 +24,39 @@ data class CpuSimdFlags(
 }
 
 /**
- * Escolha da variante do motor llama.cpp. i8mm só é usado quando o HWCAP2 o confirma
- * (Cortex-A510/A710/X2+); o Snapdragon 695 (Cortex-A78/A55) e o Helio G99 (A76/A55) têm
- * dotprod+fp16 mas NÃO i8mm, e recebem a variante dotprod — sem risco de SIGILL.
- * A lista é ordenada da mais rápida para a mais segura; "base" sempre fecha a lista.
+ * Escolha do backend de CPU dinâmico do ggml (GGML_BACKEND_DL). i8mm só é usado quando o
+ * HWCAP2 o confirma (Cortex-A510/A710/X2+); o Snapdragon 695 (Cortex-A78/A55) e o Helio G99
+ * (A76/A55) têm dotprod+fp16 mas NÃO i8mm e recebem armv8.2_2 — sem risco de SIGILL (e o
+ * próprio ggml recusa um backend cujo ggml_backend_score() seja 0).
+ * A lista vai do mais rápido ao mais seguro; armv8.0_1 sempre fecha a lista no arm64.
  */
 object LlmVariantSelector {
     const val BASE = "base"
     const val DOTPROD = "dotprod"
     const val I8MM = "i8mm"
+    const val X86 = "x86_64"
 
     fun candidates(f: CpuSimdFlags): List<String> = when {
-        !f.aarch64 || !f.neon -> listOf(BASE)
+        !f.aarch64 -> listOf(X86)
+        !f.neon -> listOf(BASE)
         f.dotprod && f.fp16 && f.i8mm -> listOf(I8MM, DOTPROD, BASE)
         f.dotprod && f.fp16 -> listOf(DOTPROD, BASE)
         else -> listOf(BASE)
     }
+
+    /** Biblioteca do backend de CPU (mesma tabela de cpuBackendLibrary() no C++). */
+    fun backendLibrary(variant: String): String = when (variant) {
+        I8MM -> "libggml-cpu-android_armv8.6_1.so"
+        DOTPROD -> "libggml-cpu-android_armv8.2_2.so"
+        BASE -> "libggml-cpu-android_armv8.0_1.so"
+        else -> "libggml-cpu.so"
+    }
 }
 
 /**
- * Ponte JNI do motor LLM. Carrega UMA das bibliotecas libgirassol_llm_{i8mm,dotprod,base}.so
- * conforme o HWCAP; se o carregamento falhar, desce para a próxima variante.
+ * Ponte JNI do motor LLM. Carrega a libgirassol_llm.so (que puxa a libllama.so e a
+ * libggml.so compartilhadas) e em seguida UM backend de CPU conforme o HWCAP; se o
+ * carregamento falhar, desce para o próximo candidato.
  */
 object LlmNativeBridge {
     private const val TAG = "GirassolLLM"
@@ -53,48 +65,72 @@ object LlmNativeBridge {
         if (GeaNativeBridge.isNativeLoaded) runCatching { CpuSimdFlags.fromNative(GeaNativeBridge.nativeCpuFeatures()) }.getOrDefault(CpuSimdFlags())
         else CpuSimdFlags()
 
-    /** Variante efetivamente carregada (null = nenhuma). */
+    /** Variante (backend de CPU) efetivamente carregada (null = nenhuma). */
     @Volatile var loadedVariant: String? = null
         private set
     @Volatile var loadLog: String = ""
         private set
+    @Volatile var libraryLoaded: Boolean = false
+        private set
 
     init {
         val log = StringBuilder()
-        for (v in LlmVariantSelector.candidates(cpuFlags)) {
-            try {
-                System.loadLibrary("girassol_llm_$v")
-                loadedVariant = v
-                log.append("$v: ok")
-                break
-            } catch (t: Throwable) {
-                log.append("$v: ${t.javaClass.simpleName}; ")
-                Log.w(TAG, "variante $v indisponível", t)
+        libraryLoaded = try {
+            System.loadLibrary("girassol_llm"); true
+        } catch (t: Throwable) {
+            log.append("libgirassol_llm: ${t.javaClass.simpleName}; "); Log.w(TAG, "motor LLM indisponível", t); false
+        }
+        if (libraryLoaded) {
+            val compiled = runCatching { nativeLlmAvailable() }.getOrDefault(false)
+            if (!compiled) {
+                log.append("sem llama.cpp")
+            } else {
+                for (v in LlmVariantSelector.candidates(cpuFlags)) {
+                    val lib = LlmVariantSelector.backendLibrary(v)
+                    val err = runCatching { nativeLlmLoadCpuBackend(lib) }.getOrElse { it.javaClass.simpleName }
+                    if (err.isEmpty()) { loadedVariant = v; log.append("$v ($lib): ok"); break }
+                    log.append("$v: $err; ")
+                }
             }
         }
         loadLog = log.toString()
-        Log.i(TAG, "SIMD ${cpuFlags.label()} → variante ${loadedVariant ?: "nenhuma"} ($loadLog)")
+        Log.i(TAG, "SIMD ${cpuFlags.label()} → backend ${loadedVariant ?: "nenhum"} ($loadLog)")
     }
 
-    val isLoaded: Boolean get() = loadedVariant != null
+    val isLoaded: Boolean get() = libraryLoaded && loadedVariant != null
 
-    /** "variante|march" compilado na biblioteca carregada (ex.: dotprod|armv8.2-a+dotprod+fp16+kleidiai). */
-    val buildVariant: String by lazy { if (isLoaded) runCatching { nativeLlmVariant() }.getOrDefault("?") else "-" }
+    /** "variante|biblioteca" do backend de CPU carregado. */
+    val buildVariant: String by lazy {
+        if (isLoaded) "${loadedVariant}|${runCatching { nativeLlmCpuBackend() }.getOrDefault("?")}" else "-"
+    }
 
     /** Recursos que o ggml-cpu realmente usa (llama_print_system_info). */
     val systemInfo: String by lazy { if (isLoaded) runCatching { nativeLlmSystemInfo() }.getOrDefault("") else "" }
 
     @JvmStatic external fun nativeLlmAvailable(): Boolean
-    /** Retorna "" em caso de sucesso ou a mensagem de erro. */
-    @JvmStatic external fun nativeLlmLoad(path: String, threads: Int, nCtx: Int): String
+    /** "" em caso de sucesso ou a mensagem de erro. */
+    @JvmStatic external fun nativeLlmLoadCpuBackend(library: String): String
+    @JvmStatic external fun nativeLlmCpuBackend(): String
+    /**
+     * Carrega o GGUF. kvType: 0=f16, 1=q8_0, 2=q4_0. slotDir = diretório dos slots por
+     * cidadão (llama_state_seq_save_file). Retorna "" em caso de sucesso.
+     */
+    @JvmStatic external fun nativeLlmLoad(path: String, threads: Int, nCtx: Int, flashAttn: Boolean, kvType: Int, slotDir: String, maxSlots: Int): String
     @JvmStatic external fun nativeLlmUnload()
     @JvmStatic external fun nativeLlmAbort()
-    /** "descrição|bytes" do modelo carregado, ou "". */
+    @JvmStatic external fun nativeLlmClearSlots()
+    /** "descrição|bytes|config" do modelo carregado, ou "". */
     @JvmStatic external fun nativeLlmDescribe(): String
-    /** [texto, erro, promptTokens, genTokens, millis, tokens/s total, tokens/s geração]. */
-    @JvmStatic external fun nativeLlmGenerate(system: String, user: String, grammar: String, maxTokens: Int): Array<String>
+    @JvmStatic external fun nativeSemanticTemperature(recentSpeeches: String, tBase: Float): Float
+    /**
+     * [texto, erro, promptTokens, genTokens, millis, tok/s total, tok/s geração,
+     *  tokens reaproveitados, tokens fast-forward, slot restaurado].
+     */
+    @JvmStatic external fun nativeLlmGenerate(
+        system: String, worldPrefix: String, user: String, grammar: String, jsonKeysCsv: String,
+        slotKey: String, temperature: Float, seed: Int, maxTokens: Int
+    ): Array<String>
     /** [pp tokens/s, tg tokens/s, nPrompt, nGen]; vazio se não houver modelo. */
     @JvmStatic external fun nativeLlmBench(nPrompt: Int, nGen: Int): DoubleArray
     @JvmStatic external fun nativeLlmSystemInfo(): String
-    @JvmStatic external fun nativeLlmVariant(): String
 }

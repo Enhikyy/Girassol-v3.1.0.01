@@ -228,3 +228,55 @@ object KotlinLoraTrainer : LoraTrainerPort {
         return LoraTrainResult(s, first, last, backend)
     }
 }
+
+/**
+ * TIES-Merging (Yadav et al., 2023) dos vetores-tarefa dos pais:
+ * 1) Trim — mantém só a fração [density] de maior magnitude de cada vetor;
+ * 2) Elect sign — sinal eleito por coordenada = sinal da soma dos valores aparados;
+ * 3) Disjoint mean — média apenas dos valores que concordam com o sinal eleito.
+ */
+object TiesMerging {
+    fun merge(vectors: List<FloatArray>, density: Double = 0.5): FloatArray {
+        require(vectors.isNotEmpty())
+        val dim = vectors[0].size
+        val trimmed = vectors.map { v ->
+            require(v.size == dim)
+            val keep = (dim * density).toInt().coerceIn(1, dim)
+            val order = v.indices.sortedWith(compareByDescending<Int> { kotlin.math.abs(v[it]) }.thenBy { it })
+            val out = FloatArray(dim)
+            for (i in order.take(keep)) out[i] = v[i]
+            out
+        }
+        val merged = FloatArray(dim)
+        for (i in 0 until dim) {
+            var sum = 0f
+            for (t in trimmed) sum += t[i]
+            if (sum == 0f) continue
+            var acc = 0f
+            var n = 0
+            for (t in trimmed) if (t[i] != 0f && (t[i] > 0f) == (sum > 0f)) { acc += t[i]; n++ }
+            if (n > 0) merged[i] = acc / n
+        }
+        return merged
+    }
+}
+
+/**
+ * Adaptador pessoal de viés de ação (ΔW 1×IN_DIM sobre as mesmas features do LoRA do mundo).
+ * Treinado online por LMS a cada ação concluída; herdado por TIES-Merging no nascimento.
+ */
+object PersonalAdapter {
+    const val LR = 0.05f
+    const val DECISION_WEIGHT = 0.05
+
+    fun predict(w: FloatArray, x: FloatArray): Float {
+        var s = 0f
+        for (i in w.indices) s += w[i] * x[i]
+        return s
+    }
+
+    fun train(w: FloatArray, x: FloatArray, target: Float) {
+        val err = target.coerceIn(-1f, 1f) - predict(w, x)
+        for (i in w.indices) w[i] = (w[i] + LR * err * x[i]).coerceIn(-2f, 2f)
+    }
+}

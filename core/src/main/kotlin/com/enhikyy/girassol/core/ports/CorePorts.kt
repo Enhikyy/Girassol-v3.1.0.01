@@ -31,7 +31,21 @@ data class NeuralRequest(
     val allowedActions: List<String>
 )
 
-data class NeuralPrompt(val system: String, val user: String, val grammar: String)
+/**
+ * Prompt neural. [worldPrefix] é o IMMUTABLE_WORLD_PREFIX (idêntico para todos os cidadãos,
+ * reaproveitado no KV-cache); [system] carrega o P_SELF do cidadão (slot persistido por
+ * cidadão); [jsonKeys] habilita o fast-forward de tokens estruturais; [recentSpeeches] alimenta
+ * o SemanticEntropyController; [seed] torna a amostragem reprodutível por semente.
+ */
+data class NeuralPrompt(
+    val system: String,
+    val user: String,
+    val grammar: String,
+    val worldPrefix: String = "",
+    val jsonKeys: List<String> = emptyList(),
+    val recentSpeeches: List<String> = emptyList(),
+    val seed: Long = 0L
+)
 
 /** Resultado validado pela gramática GBNF e pelo parser; vira evento canônico ao ser aplicado. */
 data class NeuralDecision(

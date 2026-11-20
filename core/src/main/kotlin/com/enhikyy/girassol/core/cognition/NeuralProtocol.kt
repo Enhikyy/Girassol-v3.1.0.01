@@ -12,6 +12,16 @@ import com.enhikyy.girassol.core.world.ActionType
  */
 object NeuralProtocol {
     const val MAX_TEXT = 72
+    val JSON_KEYS = listOf("acao", "pensamento", "fala")
+
+    /**
+     * Prefixo imutável do mundo: idêntico em todas as requisições, por isso é decodificado
+     * uma única vez e reaproveitado no KV-cache (reuso de prefixo) por todos os cidadãos.
+     */
+    const val IMMUTABLE_WORLD_PREFIX: String =
+        "Mundo: cidade de Girassol, simulação offline e determinística. O WorldCore é a fonte da verdade: " +
+            "ações inválidas são rejeitadas. Escolha UMA das opções listadas. Responda apenas com JSON " +
+            "{\"acao\":\"OPCAO\",\"pensamento\":\"...\",\"fala\":\"...\"} em português, frases curtas.\n"
     /** Caracteres permitidos nos textos livres (sem aspas, barras ou controle). */
     private const val TEXT_CLASS = "[a-zA-Z0-9 ,.!?;:()áàâãéêíóôõúüçÁÀÂÃÉÊÍÓÔÕÚÇ-]"
 
@@ -35,11 +45,11 @@ object NeuralProtocol {
         recentMemories: List<String>,
         options: List<Pair<ActionType, Double>>,
         night: Boolean,
-        drought: Boolean
+        drought: Boolean,
+        recentSpeeches: List<String> = emptyList(),
+        seed: Long = 0L
     ): NeuralPrompt {
-        val system = "Você é $name, cidadão da cidade de Girassol. $identity " +
-            "Decida a próxima ação escolhendo UMA das opções. Responda apenas com JSON: " +
-            "{\"acao\":\"OPCAO\",\"pensamento\":\"...\",\"fala\":\"...\"} em português, frases curtas."
+        val system = "Você é $name, cidadão da cidade de Girassol. $identity\n"
         val user = buildString {
             append("Agora é ").append(if (night) "noite" else "dia").append(if (drought) ", há seca" else "").append(". ")
             append("Humor ").append("%.2f".fmt(mood)).append(". Necessidades (0=crítico,1=pleno): ")
@@ -49,7 +59,8 @@ object NeuralProtocol {
             append(options.joinToString(", ") { "${it.first.name}(${it.first.label}, custo ${"%.2f".fmt(it.second)})" })
             append(".")
         }
-        return NeuralPrompt(system, user, grammar(options.map { it.first.name }))
+        return NeuralPrompt(system, user, grammar(options.map { it.first.name }), IMMUTABLE_WORLD_PREFIX, JSON_KEYS,
+            recentSpeeches.takeLast(6), seed)
     }
 
     data class Parsed(val action: String, val thought: String, val speech: String)

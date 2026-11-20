@@ -69,7 +69,25 @@ data class MindView(
     val loraPendingSamples: Int = 0,
     val neuralDecisionsApplied: Long = 0,
     val speechesEmitted: Long = 0,
-    val meanMood: Double = 0.0
+    val meanMood: Double = 0.0,
+    val v34: V34View = V34View()
+)
+
+/** Telemetria dos motores v3.4 (memória 2 estágios, ORCA, CfC hormonal, genética). */
+data class V34View(
+    val retrievalQueries: Long = 0,
+    val meanStage1: Double = 0.0,
+    val meanCorpus: Double = 0.0,
+    val swrReplayUpdates: Long = 0,
+    val aabbCorrections: Long = 0,
+    val orcaAdjustedSteps: Long = 0,
+    val superacoes: Int = 0,
+    val tiesMerges: Int = 0,
+    val meanCortisol: Double = 0.0,
+    val meanOxytocin: Double = 0.0,
+    val meanDopamine: Double = 0.0,
+    val meanLocomotion: Double = 1.0,
+    val binaryIndexBytes: Long = 0
 )
 
 data class DashboardSnapshot(
@@ -119,7 +137,22 @@ data class DashboardSnapshot(
                 loraPendingSamples = state.loraPendingSamples.size,
                 neuralDecisionsApplied = state.neuralDecisionsApplied,
                 speechesEmitted = state.speechesEmitted,
-                meanMood = if (alive.isEmpty()) 0.0 else alive.sumOf { it.emotion.mood } / alive.size
+                meanMood = if (alive.isEmpty()) 0.0 else alive.sumOf { it.emotion.mood } / alive.size,
+                v34 = V34View(
+                    retrievalQueries = state.retrievalQueries,
+                    meanStage1 = if (state.retrievalQueries == 0L) 0.0 else state.retrievalStage1Total.toDouble() / state.retrievalQueries,
+                    meanCorpus = if (state.retrievalQueries == 0L) 0.0 else state.retrievalCorpusTotal.toDouble() / state.retrievalQueries,
+                    swrReplayUpdates = state.swrReplayUpdates,
+                    aabbCorrections = state.aabbCorrections,
+                    orcaAdjustedSteps = state.orcaAdjustedSteps,
+                    superacoes = state.superacoes,
+                    tiesMerges = state.tiesMerges,
+                    meanCortisol = if (alive.isEmpty()) 0.0 else alive.sumOf { it.cortisol } / alive.size,
+                    meanOxytocin = if (alive.isEmpty()) 0.0 else alive.sumOf { it.oxytocin } / alive.size,
+                    meanDopamine = if (alive.isEmpty()) 0.0 else alive.sumOf { it.dopamine } / alive.size,
+                    meanLocomotion = if (alive.isEmpty()) 1.0 else alive.sumOf { it.locomotion } / alive.size,
+                    binaryIndexBytes = alive.sumOf { c -> c.memories.count { it.bits != null } * 32L }
+                )
             )
             return DashboardSnapshot(state.tick, citizens, society, mind)
         }

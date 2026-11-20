@@ -1,6 +1,7 @@
 package com.enhikyy.girassol.core.world
 
 import com.enhikyy.girassol.core.biology.Allele
+import com.enhikyy.girassol.core.biology.CfcNeuromodulator
 import com.enhikyy.girassol.core.biology.DiploidGenome
 import com.enhikyy.girassol.core.biology.DiploidLocus
 import com.enhikyy.girassol.core.biology.SemanticCollapseGuard
@@ -23,6 +24,9 @@ import com.enhikyy.girassol.core.forge.LoraCycleRecord
 import com.enhikyy.girassol.core.forge.LoraFeatures
 import com.enhikyy.girassol.core.forge.LoraMath
 import com.enhikyy.girassol.core.forge.LoraSample
+import com.enhikyy.girassol.core.forge.PersonalAdapter
+import com.enhikyy.girassol.core.forge.TiesMerging
+import com.enhikyy.girassol.core.memory.EpisodicIndex
 import com.enhikyy.girassol.core.ports.CorePorts
 import com.enhikyy.girassol.core.ports.NeuralDecision
 import com.enhikyy.girassol.core.ports.NeuralRequest
@@ -50,6 +54,9 @@ import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.floor
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
 import kotlin.random.Random
 
 const val FOOD = "ALIMENTO"
@@ -127,6 +134,8 @@ class WorldCore(
     private val memoryEngine = FourLayerMemoryAndSleepEngine(maxNodesPerAgent = MAX_MEMORIES)
     private val workspace = GlobalWorkspaceStage(3)
     private val tickEvents = mutableListOf<CanonicalEvent>()
+    /** Redes CfC derivadas de (semente, id) — pesos determinísticos, não persistidos. */
+    private val cfcNets = HashMap<String, CfcNeuromodulator>()
     private val violations = mutableListOf<String>()
 
     // ===================================================================== criação
@@ -143,6 +152,9 @@ class WorldCore(
         const val LORA_MIN_SAMPLES = 16
         const val NEURAL_SUGGESTION_TTL = 120L
         const val SPEECH_MIN_GAP = 40L
+        const val LLM_MIN_FREE_MB = 512L
+        const val SUPERACAO_RATIO = 1.15
+        const val MAX_RECENT_SPEECHES = 6
 
         fun create(seed: Long, initialPopulation: Int = 24, ports: CorePorts = CorePorts()): WorldCore {
             val state = WorldState(seed = seed, board = SpatialStigmergyAndReservationBoard(36, 36, cellSize = 1f))
@@ -271,7 +283,13 @@ class WorldCore(
             // 4. Memória & atualização epistêmica (ACT-R + MemRL + A-MEM)
             val tags = broadcast.mapNotNull { it.entityId }.toSet() + broadcast.map { it.sourceModule }.toSet()
             memoryEngine.clearWorkingMemory()
-            val recalled = memoryEngine.retrieveHybrid(c.memories, tick, tags, emptySet(), topK = 4)
+            val queryText = broadcast.joinToString(" ") { it.summary }
+            val retrieval = memoryEngine.retrieveTwoStage(c.memories, tick, queryText, tags, broadcast.mapNotNull { it.entityId }.toSet(),
+                topK = 4, workingCapacity = 5 + (4.0 * c.trait("conscienciosidade")).roundToInt())
+            val recalled = retrieval.memories
+            state.retrievalQueries++
+            state.retrievalStage1Total += retrieval.stage1Candidates
+            state.retrievalCorpusTotal += retrieval.corpusSize
             // 5. Appraisal emocional
             appraise(c)
             // 6. Utilidade & energia livre esperada G(π)
@@ -324,7 +342,8 @@ class WorldCore(
                     if (res.chosenIndex in sorted.indices) idx = res.chosenIndex
                     c.lastThought = res.rationale
                     // pedido assíncrono ao motor GGUF (só em temperatura nominal); não altera o estado
-                    if (!shadow && tier == AllostaticThermalCoupling.ThermalTier.NONE_OR_LIGHT) ports.neural?.let { port ->
+                    if (!shadow && tier == AllostaticThermalCoupling.ThermalTier.NONE_OR_LIGHT &&
+                        state.telemetry.availableMemoryMb >= LLM_MIN_FREE_MB) ports.neural?.let { port ->
                         if (port.isAvailable()) port.trySubmit(neuralRequest(c, sorted.take(6), recalled))
                     }
                     val worst = c.needs.minByOrNull { it.value }?.key?.name ?: "PROPOSITO"
@@ -365,7 +384,8 @@ class WorldCore(
             noteClaimUsage(p.citizen, p.intention)
         }
 
-        // 11. Execução canônica & contabilidade
+        // 11. Execução canônica & contabilidade (locomoção contínua ORCA + colisão círculo×AABB)
+        stageCrowd(alive)
         for (c in alive) executeIntention(c)
 
         // 12. Sociedade, aprendizagem, evolução & snapshot
@@ -397,6 +417,7 @@ class WorldCore(
                 if (n == Need.ENERGIA && night && c.intention?.action != ActionType.DESCANSAR) d *= 1.4
                 c.needs[n] = (c.needs.getValue(n) - d).coerceIn(0.0, 1.0)
             }
+            stepNeuromodulation(c)
             if (c.needs.getValue(Need.FOME) <= 0.0) {
                 c.starvationTicks++
                 state.board.depositPheromone(CH_DANGER, c.x.toFloat(), c.z.toFloat(), 0.4f)
@@ -405,6 +426,24 @@ class WorldCore(
         // energia urbana: consumo pelos edifícios; laboratórios e escolas dependem dela
         state.cityEnergy = (state.cityEnergy - 0.0015 * state.objects.size).coerceAtLeast(0.0)
         for (o in state.objects) if (o.contaminatedUntilTick in 0 until state.tick) o.contaminatedUntilTick = -1L
+    }
+
+    /** CfC de 48 neurônios → alvos hormonais → ODEs de 1ª ordem (Δt = 1 tick, forma fechada). */
+    private fun stepNeuromodulation(c: Citizen) {
+        val net = cfcNets.getOrPut(c.id) { CfcNeuromodulator(CfcNeuromodulator.seedFor(state.seed, c.id)) }
+        if (c.cfcState.size != CfcNeuromodulator.N) c.cfcState = DoubleArray(CfcNeuromodulator.N)
+        val input = DoubleArray(CfcNeuromodulator.IN)
+        Need.entries.forEachIndexed { k, n -> input[k] = 1.0 - c.needs.getValue(n) }
+        input[6] = c.emotion.mood
+        input[7] = c.lastReward
+        input[8] = (state.board.readPheromone(CH_DANGER, c.x.toFloat(), c.z.toFloat()) / 5f).coerceAtMost(1f).toDouble()
+        input[9] = if (c.intention?.action == ActionType.SOCIALIZAR && c.path.isEmpty()) 1.0 else 0.0
+        net.advance(c.cfcState, input, 1.0)
+        val r = net.readout(c.cfcState)
+        c.cortisol = CfcNeuromodulator.hormoneStep(c.cortisol, r.cortisolTarget, 1.0)
+        c.oxytocin = CfcNeuromodulator.hormoneStep(c.oxytocin, r.oxytocinTarget, 1.0)
+        c.dopamine = CfcNeuromodulator.hormoneStep(c.dopamine, r.dopamineTarget, 1.0)
+        c.locomotion = r.locomotion
     }
 
     private fun decayFor(c: Citizen, n: Need): Double {
@@ -515,14 +554,14 @@ class WorldCore(
             ActionType.ESTUDAR -> 0.04 * (1.0 + c.trait("aptidao"))
             else -> 0.0
         }
-        // risco pragmático: déficit quadrático ponderado pela urgência (homeostase assimétrica)
-        var risk = 0.0
-        for (k in projected.indices) {
+        // risco pragmático: D_KL[Q(o|π) ‖ P_pref(o)] por necessidade, ponderado pela urgência
+        // (homeostase assimétrica) e modulado pelo cortisol da rede CfC
+        val stress = 0.8 + 0.4 * c.cortisol
+        val weights = DoubleArray(projected.size) { k ->
             val deficit = 1.0 - projected[k]
             val w = if (Need.entries[k] == Need.FOME || Need.entries[k] == Need.ENERGIA) 1.6 else 1.0
-            risk += w * deficit * deficit * (if (deficit > 0.7) 2.5 else 1.0)
+            w * stress * (if (deficit > 0.7) 1.8 else 1.0)
         }
-        risk -= economicBonus
         // ganho epistêmico: redução esperada de incerteza sobre o alvo
         val priorEntropy = entropyOf(uncertainty)
         val posteriorEntropy = entropyOf(uncertainty * 0.5)
@@ -530,15 +569,19 @@ class WorldCore(
         if (action == ActionType.EXPLORAR) epistemicWeight *= 1.2
         val memQ = memoryUtility(c, action)
         val novelty = SemanticCollapseGuard.noveltyEpistemicBonus(action.name, popCounts)
-        var efe = ActiveInferencePianoOrchestrator.computeExpectedFreeEnergy(
-            predictedPragmaticRisk = risk,
-            priorEntropy = priorEntropy,
-            posteriorExpectedEntropy = posteriorEntropy,
-            epistemicWeight = epistemicWeight * 0.15,
-            neuralMetabolicCost = neural * 0.05
-        ) - 0.12 * memQ - novelty + 0.002 * travel
+        val terms = ActiveInferencePianoOrchestrator.computeExpectedFreeEnergyKl(
+            projected = projected, weights = weights, preferred = PREFERRED_NEED_LEVEL,
+            outcomeUncertainty = uncertainty,
+            priorEntropy = priorEntropy, posteriorExpectedEntropy = posteriorEntropy,
+            epistemicWeight = epistemicWeight * 0.15 * (0.8 + 0.4 * c.dopamine),
+            neuralBaseCost = neural * 0.05, socTempC = state.telemetry.socTempC
+        )
+        var efe = terms.total - economicBonus - 0.12 * memQ - novelty + 0.002 * travel
         if (obj != null && state.board.readPheromone(CH_DANGER, obj.tileX.toFloat(), obj.tileZ.toFloat()) > 2f) efe += 0.05
         if (action == ActionType.SOCIALIZAR && obj != null) efe -= 0.02 * state.board.readPheromone(CH_SOCIAL, obj.tileX.toFloat(), obj.tileZ.toFloat()).coerceAtMost(5f)
+        if (action == ActionType.SOCIALIZAR) efe -= 0.04 * c.oxytocin
+        // viés do adaptador pessoal (herdado por TIES-Merging, treinado por LMS)
+        efe -= PersonalAdapter.DECISION_WEIGHT * PersonalAdapter.predict(c.personalAdapter, LoraFeatures.of(action, state.tick)).toDouble().coerceIn(-1.0, 1.0)
         // viés aprendido pelo adaptador LoRA coletivo (zero até o primeiro ciclo aceito)
         if (state.lora.acceptedCycles > 0) {
             val pred = LoraMath.predict(state.lora, LoraFeatures.of(action, state.tick))[0].toDouble()
@@ -659,16 +702,7 @@ class WorldCore(
     private fun executeIntention(c: Citizen) {
         val it = c.intention ?: return
         if (c.path.isNotEmpty()) {
-            val next = c.path.removeAt(0)
-            val w = state.widthTiles
-            val nx = next % w
-            val nz = next / w
-            if (state.tileAt(nx, nz).walkable || c.path.isEmpty()) {
-                c.x = nx; c.z = nz
-                state.board.depositPheromone(CH_TRAIL, nx.toFloat(), nz.toFloat(), 0.25f)
-            } else {
-                failIntention(c, "caminho bloqueado")
-            }
+            moveContinuous(c)
             return
         }
         val profile = ACTION_PROFILES.getValue(it.action)
@@ -685,6 +719,70 @@ class WorldCore(
         c.actionTicksRemaining--
         if (c.actionTicksRemaining > 0) return
         completeIntention(c, it)
+    }
+
+    private fun syncContinuous(c: Citizen) {
+        if (c.px.isNaN() || c.pz.isNaN() || floor(c.px).toInt() != c.x || floor(c.pz).toInt() != c.z) {
+            c.px = c.x + 0.5; c.pz = c.z + 0.5; c.vx = 0.0; c.vz = 0.0
+        }
+    }
+
+    /** Velocidade preferida rumo ao centro do próximo waypoint, limitada pela locomoção CfC. */
+    private fun preferredVelocity(c: Citizen): Vec2 {
+        val next = c.path.firstOrNull() ?: return Vec2.ZERO
+        val w = state.widthTiles
+        val tx = next % w + 0.5
+        val tz = next / w + 0.5
+        val d = Vec2(tx - c.px, tz - c.pz)
+        val speed = c.locomotion.coerceIn(0.75, 1.0)
+        val len = d.length()
+        return if (len <= speed) d else d * (speed / len)
+    }
+
+    /** RVO2/ORCA entre os agentes em deslocamento (quem está parado executando ação não bloqueia). */
+    private fun stageCrowd(alive: List<Citizen>) {
+        for (c in alive) syncContinuous(c)
+        val moving = alive.filter { it.path.isNotEmpty() }
+        for (c in alive) if (c.path.isEmpty()) { c.vx = 0.0; c.vz = 0.0 }
+        if (moving.isEmpty()) return
+        val agents = moving.map { c ->
+            OrcaAgent(Vec2(c.px, c.pz), Vec2(c.vx, c.vz), preferredVelocity(c), CrowdNavigation.AGENT_RADIUS, c.locomotion.coerceIn(0.75, 1.0))
+        }
+        val v = CrowdNavigation.stepRvo2OrcaVelocities(agents)
+        moving.forEachIndexed { i, c ->
+            var nv = v[i]
+            // sem progresso rumo ao waypoint: segue a velocidade preferida (evita impasse simétrico)
+            if (c.stuckTicks >= 3) nv = agents[i].preferred
+            if (abs(nv.x - agents[i].preferred.x) + abs(nv.y - agents[i].preferred.y) > 1e-6) state.orcaAdjustedSteps++
+            c.vx = nv.x; c.vz = nv.y
+        }
+    }
+
+    private fun moveContinuous(c: Citizen) {
+        val w = state.widthTiles
+        val goal = c.path.last()
+        val next = c.path.first()
+        val leaving = c.z * w + c.x
+        val tx = next % w + 0.5
+        val tz = next / w + 0.5
+        val distBefore = sqrt((tx - c.px) * (tx - c.px) + (tz - c.pz) * (tz - c.pz))
+        val desired = Vec2(c.px + c.vx, c.pz + c.vz)
+        val resolved = CrowdNavigation.resolveAgainstGrid(w, state.tiles, desired.x, desired.y, CrowdNavigation.AGENT_RADIUS, setOf(goal, leaving, next))
+        if (abs(resolved.x - desired.x) + abs(resolved.y - desired.y) > 1e-9) state.aabbCorrections++
+        c.px = resolved.x; c.pz = resolved.y
+        val dist = sqrt((tx - c.px) * (tx - c.px) + (tz - c.pz) * (tz - c.pz))
+        if (dist <= 0.2) {
+            c.px = tx; c.pz = tz
+            c.path.removeAt(0)
+            c.stuckTicks = 0
+        } else if (distBefore - dist < 0.05) c.stuckTicks++ else c.stuckTicks = 0
+        val nx = floor(c.px).toInt().coerceIn(0, w - 1)
+        val nz = floor(c.pz).toInt().coerceIn(0, w - 1)
+        if (nx != c.x || nz != c.z) {
+            c.x = nx; c.z = nz
+            state.board.depositPheromone(CH_TRAIL, nx.toFloat(), nz.toFloat(), 0.25f)
+        }
+        if (c.stuckTicks > 24) failIntention(c, "caminho bloqueado")
     }
 
     private fun failIntention(c: Citizen, reason: String) {
@@ -854,8 +952,11 @@ class WorldCore(
             verifiedByWorldCore = true
         )
         c.memories.lastOrNull { m -> it.action.name in m.tags }?.let { prev -> node.linkedMemoryIds += prev.id; prev.linkedMemoryIds += node.id }
-        node.updateMemRlUtility(c.lastReward, state.policy.memRlLearningRate)
+        node.updateMemRlUtility(c.lastReward, state.policy.memRlLearningRate * (0.7 + 0.6 * c.dopamine))
+        node.bits = EpisodicIndex.simHash(node.features())
+        EpisodicIndex.hawkesExcite(node, state.tick, node.salience)
         c.memories += node
+        PersonalAdapter.train(c.personalAdapter, LoraFeatures.of(it.action, state.tick), c.lastReward.toFloat())
         // reflexo Tsetlin aprende se a ação proposta trouxe recompensa positiva
         c.reflex.trainStep(reflexFeatures(c, it.action), c.lastReward > 0.0)
         // consolidação hipocampal durante o sono
@@ -876,6 +977,8 @@ class WorldCore(
     private fun sleepConsolidate(c: Citizen) {
         c.lastSleepConsolidationDay = state.day()
         val report = memoryEngine.runHippocampalSleepConsolidation(c.memories, state.tick, state.policy.actRDecayExponent)
+        // Sharp-Wave Ripple: replay reverso das cadeias A-MEM propaga o valor TD para trás
+        state.swrReplayUpdates += memoryEngine.sharpWaveRippleReplay(c.memories)
         // replay priorizado por erro de predição reforça as memórias reativadas
         for (id in report.replayedNodeIds) c.memories.firstOrNull { it.id == id }?.let { m ->
             if (m.recentAccessTicks.size >= 16) m.recentAccessTicks.removeAt(0)
@@ -929,7 +1032,13 @@ class WorldCore(
         if (c.lastSpeechTick >= 0 && state.tick - c.lastSpeechTick < SPEECH_MIN_GAP) return
         c.lastSpeech = text
         c.lastSpeechTick = state.tick
+        rememberSpeech(c, text)
         state.speechesEmitted++
+    }
+
+    private fun rememberSpeech(c: Citizen, text: String) {
+        c.recentSpeeches += text
+        while (c.recentSpeeches.size > MAX_RECENT_SPEECHES) c.recentSpeeches.removeAt(0)
     }
 
     private fun neuralRequest(c: Citizen, options: List<Candidate>, recalled: List<AssociativeMemoryNode>): NeuralRequest {
@@ -941,7 +1050,9 @@ class WorldCore(
             recentMemories = recalled.take(3).map { it.content.take(60) },
             options = options.map { it.intention.action to it.efe },
             night = state.isNight(),
-            drought = state.inDrought()
+            drought = state.inDrought(),
+            recentSpeeches = c.recentSpeeches.toList(),
+            seed = StreamSeeds.derive(state.seed, c.id, state.tick, "llm")
         )
         return NeuralRequest(c.id, state.tick, prompt, options.map { it.intention.action.name }.distinct())
     }
@@ -960,6 +1071,7 @@ class WorldCore(
             c.lastThought = "Neural (GGUF): $thought"
             c.lastSpeech = speech
             c.lastSpeechTick = state.tick
+            rememberSpeech(c, speech)
             state.neuralDecisionsApplied++
             state.speechesEmitted++
         }
@@ -1038,7 +1150,7 @@ class WorldCore(
             val claim = shareable[rng.nextInt(minOf(3, shareable.size))]
             val trust = tie.domainTrust("informacao")
             val (belief, outcome) = EpistemicImmunity.assimilate(a.beliefs[claim.claimKey], claim.claimKey, claim.domain,
-                claim.opinion, trust, b.id, state.eventSeq, state.tick)
+                claim.opinion, trust, b.id, claim.provenanceEventId ?: state.eventSeq, state.tick)
             a.beliefs[claim.claimKey] = belief
             if (outcome == AssimilationOutcome.QUARANTINED_LOW_TRUST || outcome == AssimilationOutcome.QUARANTINED_CONFLICT) {
                 belief.quarantined = belief.quarantined || !belief.verifiedByExperience
@@ -1086,7 +1198,8 @@ class WorldCore(
         val day = state.day()
         resolveStaleStressEvents()
         if (!shadow) runLoraSleepCycle()
-        // Reprodução determinística com genética diploide, Baldwin e simbiogênese
+        evaluateSuperacao(alive)
+        // Reprodução determinística com genética diploide, Baldwin, TIES-Merging e simbiogênese
         reproduction(alive)
         // Heider: equilíbrio estrutural em tríades dos laços mais fortes
         for (a in alive) {
@@ -1147,7 +1260,7 @@ class WorldCore(
         for (a in alive) {
             if (population >= state.admissionCap || population >= housing) break
             if (a.ageDays(state.tick) < ADULT_DAYS || a.children >= 4) continue
-            if (state.tick - a.lastReproductionTick < TICKS_PER_DAY * 6) continue
+            if (state.tick - a.lastReproductionTick < reproductionCooldown(a)) continue
             if (a.needs.getValue(Need.FOME) < 0.45 || a.needs.getValue(Need.ENERGIA) < 0.35) continue
             val partnerTie = a.social.sortedTies()
                 .filter { it.affinity > 0.30 && it.familiarity > 0.25 }
@@ -1155,7 +1268,7 @@ class WorldCore(
                 .firstOrNull { t ->
                     val p = state.citizen(t.toAgentId)
                     p != null && p.alive && p.ageDays(state.tick) >= ADULT_DAYS && p.children < 4 &&
-                        state.tick - p.lastReproductionTick >= TICKS_PER_DAY * 6 && p.needs.getValue(Need.FOME) >= 0.45
+                        state.tick - p.lastReproductionTick >= reproductionCooldown(p) && p.needs.getValue(Need.FOME) >= 0.45
                 } ?: continue
             val b = state.citizen(partnerTie.toAgentId)!!
             val rng = StreamSeeds.rng(state.seed, a.id + "+" + b.id, state.tick, "reproducao")
@@ -1179,12 +1292,35 @@ class WorldCore(
                 val parentBest = max(a.skills[s]?.masteryProb ?: 0.0, b.skills[s]?.masteryProb ?: 0.0)
                 child.skills[s] = child.skills.getValue(s).copy(masteryProb = (child.skills.getValue(s).masteryProb + 0.25 * parentBest).coerceAtMost(0.6))
             }
+            // TIES-Merging dos adaptadores pessoais dos pais (bônus de superação amplia o vetor do pai que superou os seus)
+            child.personalAdapter = TiesMerging.merge(listOf(a, b).map { p ->
+                val scale = if (p.superacao) SUPERACAO_RATIO.toFloat() else 1f
+                FloatArray(p.personalAdapter.size) { k -> p.personalAdapter[k] * scale }
+            }, density = 0.5)
+            child.parentsFitnessAtBirth = (a.lifeFitness() + b.lifeFitness()) / 2.0
+            state.tiesMerges++
             child.social.getOrCreateTie(a.id).apply { affinity = 0.6; familiarity = 0.6 }
             child.social.getOrCreateTie(b.id).apply { affinity = 0.6; familiarity = 0.6 }
             a.children++; b.children++
             a.lastReproductionTick = state.tick; b.lastReproductionTick = state.tick
             state.metrics.births++
             population++
+        }
+    }
+
+    private fun reproductionCooldown(c: Citizen): Long = if (c.superacao) TICKS_PER_DAY * 4 else TICKS_PER_DAY * 6
+
+    /** Bônus de superação: filho adulto com aptidão ≥ 115% da média dos pais ao nascer. */
+    private fun evaluateSuperacao(alive: List<Citizen>) {
+        for (c in alive) {
+            if (c.superacaoEvaluated || c.parentsFitnessAtBirth < 0 || c.ageDays(state.tick) < ADULT_DAYS) continue
+            c.superacaoEvaluated = true
+            val f = c.lifeFitness()
+            if (f >= SUPERACAO_RATIO * c.parentsFitnessAtBirth) {
+                c.superacao = true
+                state.superacoes++
+                emit("SUPERACAO", c.id, "aptidao=${"%.3f".fmt(f)};pais=${"%.3f".fmt(c.parentsFitnessAtBirth)}")
+            }
         }
     }
 
@@ -1287,3 +1423,5 @@ class WorldCore(
 }
 
 const val ADULT_DAYS = 8.0
+/** Nível preferido P_pref de cada necessidade na EFE (forma KL). */
+const val PREFERRED_NEED_LEVEL = 0.95

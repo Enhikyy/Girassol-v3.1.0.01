@@ -109,6 +109,7 @@ fun SystemScreen() {
         }
         item { LlmCpuPanel() }
         item { MemoryPanel() }
+        item { PowerPanel() }
         item { GpuPanel() }
         item { SigningPanel() }
         item {
@@ -118,9 +119,13 @@ fun SystemScreen() {
                 ModuleSwitch("LoRA on-device no sono", "toggle_lora", toggles.nativeLora,
                     if (parity.loraOk) "paridade OK ${parity.loraSignature}" else "sem paridade: Kotlin") { v -> SimulationHub.updateModules(context) { it.copy(nativeLora = v) } }
                 ModuleSwitch("Áudio binaural (AAudio)", "toggle_audio", toggles.binauralAudio, audio) { v -> SimulationHub.updateModules(context) { it.copy(binauralAudio = v) } }
+                val voice by com.enhikyy.girassol.audio.CitizenVoice.status.collectAsStateWithLifecycle()
+                ModuleSwitch("Vozes TTS offline (pt-BR)", "toggle_tts", toggles.voiceTts,
+                    "${voice.message} · ${voice.spoken} falas") { v -> SimulationHub.updateModules(context) { it.copy(voiceTts = v) } }
                 ModuleSwitch("LLM local (llama.cpp + GBNF)", "toggle_llm", toggles.localLlm,
                     "${llm.status.label}${if (!LocalLlmManager.engineCompiled) "" else " · orçamento ${llm.budgetMb} MB"}") { v -> SimulationHub.updateModules(context) { it.copy(localLlm = v) } }
-                KeyValue("Paridade dourada", parity.message, if (parity.navOk && parity.loraOk) Lumon.Ok else Lumon.Sunflower)
+                KeyValue("Paridade dourada", parity.message, if (parity.navOk && parity.loraOk && parity.memoryOk) Lumon.Ok else Lumon.Sunflower)
+                KeyValue("Memória binária bit[256]", if (parity.memoryOk) "popcount C++ = Kotlin ${parity.memorySignature}" else "sem paridade: ${parity.memorySignature}")
                 KeyValue("Filament 3D", if (r3d.active) "${r3d.fps.f(0)} fps · ${r3d.vertices} vértices · ${r3d.citizens} cidadãos" else r3d.error.ifEmpty { "inativo (Modo Eco 2D)" })
                 Text("Backends C++ só substituem os Kotlin após reproduzirem as assinaturas douradas neste aparelho; trocar um módulo reconstrói o WorldCore sobre o mesmo estado.",
                     style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)

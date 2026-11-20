@@ -94,8 +94,17 @@ data class AssociativeMemoryNode(
     val recentAccessTicks: MutableList<Long> = mutableListOf(),
     var qUtility: Double = 0.0,
     var tdPredictionError: Double = 0.0,
-    var verifiedByWorldCore: Boolean = false
+    var verifiedByWorldCore: Boolean = false,
+    /** Embedding binário bit[256] (SimHash) — calculado na primeira indexação e persistido. */
+    var bits: LongArray? = null,
+    /** Estado recursivo do processo de Hawkes (excitação acumulada e tick do último evento). */
+    var hawkesExcitation: Double = 0.0,
+    var hawkesLastTick: Long = 0L
 ) {
+    fun features(): List<String> = EpisodicIndex.features(content, tags, entityIds)
+
+    fun binaryEmbedding(): LongArray = bits ?: EpisodicIndex.simHash(features()).also { bits = it }
+
     fun baseLevelActivation(currentTick: Long, decay: Double = 0.5): Double {
         val samples = if (recentAccessTicks.isEmpty()) listOf(createdTick) else recentAccessTicks
         var sum = 0.0
@@ -112,6 +121,8 @@ data class AssociativeMemoryNode(
         qUtility = (qUtility + alpha * tdPredictionError).coerceIn(-1.0, 1.0)
     }
 }
+
+data class RetrievalResult(val memories: List<AssociativeMemoryNode>, val stage1Candidates: Int, val corpusSize: Int)
 
 data class ConsolidationReport(
     val replayedNodeIds: List<Long>,
@@ -139,36 +150,89 @@ class FourLayerMemoryAndSleepEngine(
 
     fun activeWorkingIds(): Set<Long> = workingSlots.map { it.id }.toSet()
 
+    /**
+     * Recuperação em 2 estágios (ver [EpisodicIndex]): Hamming bit[256] seleciona os
+     * [EpisodicIndex.STAGE1_K] candidatos; RRF funde cosseno denso, BM25, ativação composta
+     * ACT-R/MemRL/A-MEM e intensidade de Hawkes. As memórias recuperadas entram na memória de
+     * trabalho (capacidade 7±2) e recebem um evento de excitação de Hawkes.
+     */
+    fun retrieveTwoStage(
+        nodes: List<AssociativeMemoryNode>,
+        currentTick: Long,
+        queryText: String,
+        queryTags: Set<String>,
+        queryEntities: Set<String>,
+        topK: Int = 6,
+        workingCapacity: Int = workingMemoryCapacity
+    ): RetrievalResult {
+        if (nodes.isEmpty()) return RetrievalResult(emptyList(), 0, 0)
+        val qFeatures = EpisodicIndex.features(queryText, queryTags, queryEntities)
+        val qBits = EpisodicIndex.simHash(qFeatures)
+        val stage1 = nodes.indices.sortedWith(compareBy<Int> { EpisodicIndex.hamming(qBits, nodes[it].binaryEmbedding()) }.thenByDescending { nodes[it].id })
+            .take(EpisodicIndex.STAGE1_K).map { nodes[it] }
+        val qDense = EpisodicIndex.dense(qFeatures)
+        val activeWm = activeWorkingIds()
+        val cos = DoubleArray(stage1.size) { EpisodicIndex.cosine(qDense, EpisodicIndex.dense(stage1[it].features())).toDouble() }
+        val corpus = nodes.map { EpisodicIndex.terms(it.content) + it.tags.map { t -> t.lowercase() } }
+        val bm25 = EpisodicIndex.bm25(EpisodicIndex.terms(queryText) + queryTags.map { it.lowercase() },
+            stage1.map { EpisodicIndex.terms(it.content) + it.tags.map { t -> t.lowercase() } }, corpus)
+        val composite = DoubleArray(stage1.size) { i ->
+            val node = stage1[i]
+            val normAct = 1.0 / (1.0 + exp(-node.baseLevelActivation(currentTick)))
+            val zettelkastenBoost = if (node.linkedMemoryIds.any { it in activeWm }) 0.25 else 0.0
+            val tagScore = if (queryTags.isEmpty()) 0.0 else node.tags.intersect(queryTags).size.toDouble() / queryTags.size
+            val entScore = if (queryEntities.isEmpty()) 0.0 else node.entityIds.intersect(queryEntities).size.toDouble() / queryEntities.size
+            0.30 * normAct + 0.25 * (node.salience * node.confidence) + 0.25 * (0.55 * tagScore + 0.45 * entScore).coerceIn(0.0, 1.0) +
+                0.20 * (node.qUtility + 1.0) * 0.5 + zettelkastenBoost
+        }
+        val hawkes = DoubleArray(stage1.size) { EpisodicIndex.hawkesIntensity(stage1[it].hawkesExcitation, stage1[it].hawkesLastTick, currentTick) }
+        val fused = EpisodicIndex.rrf(listOf(cos, bm25, composite, hawkes), stage1.size)
+        val chosen = stage1.indices.sortedWith(compareByDescending<Int> { fused[it] }.thenByDescending { stage1[it].id }).take(topK).map { stage1[it] }
+        val cap = workingCapacity.coerceIn(5, 9)
+        for (node in chosen) {
+            if (node.recentAccessTicks.size >= 16) node.recentAccessTicks.removeAt(0)
+            node.recentAccessTicks.add(currentTick)
+            EpisodicIndex.hawkesExcite(node, currentTick, node.salience)
+            workingSlots.removeAll { it.id == node.id }
+            while (workingSlots.size >= cap) workingSlots.removeFirst()
+            workingSlots.addLast(node)
+        }
+        return RetrievalResult(chosen, stage1.size, nodes.size)
+    }
+
     fun retrieveHybrid(
         nodes: List<AssociativeMemoryNode>,
         currentTick: Long,
         queryTags: Set<String>,
         queryEntities: Set<String>,
         topK: Int = 6
-    ): List<AssociativeMemoryNode> {
-        val activeWm = activeWorkingIds()
-        return nodes.map { node ->
-            val normAct = 1.0 / (1.0 + exp(-node.baseLevelActivation(currentTick)))
-            val zettelkastenBoost = if (node.linkedMemoryIds.any { it in activeWm }) 0.25 else 0.0
-            val tagScore = if (queryTags.isEmpty()) 0.0 else node.tags.intersect(queryTags).size.toDouble() / queryTags.size
-            val entScore = if (queryEntities.isEmpty()) 0.0 else node.entityIds.intersect(queryEntities).size.toDouble() / queryEntities.size
-            val contextRel = (0.55 * tagScore + 0.45 * entScore).coerceIn(0.0, 1.0)
-            val memRlTerm = (node.qUtility + 1.0) * 0.5
-            val score = 0.30 * normAct +
-                0.25 * (node.salience * node.confidence) +
-                0.25 * contextRel +
-                0.20 * memRlTerm +
-                zettelkastenBoost
-            node to score
-        }
-            .sortedByDescending { it.second }
-            .take(topK)
-            .map { (node, _) ->
-                if (node.recentAccessTicks.size >= 16) node.recentAccessTicks.removeAt(0)
-                node.recentAccessTicks.add(currentTick)
-                pushWorkingMemory(node)
-                node
+    ): List<AssociativeMemoryNode> = retrieveTwoStage(nodes, currentTick, queryTags.joinToString(" "), queryTags, queryEntities, topK).memories
+
+    fun workingMemorySize(): Int = workingSlots.size
+
+    /**
+     * Sharp-Wave Ripple Replay: reproduz as sequências encadeadas (A-MEM) em ordem reversa
+     * durante o sono, propagando o valor TD do episódio final para os anteriores
+     * (Q_prev ← Q_prev + α·(γ·Q_next − Q_prev)). Devolve o número de atualizações.
+     */
+    fun sharpWaveRippleReplay(memories: List<AssociativeMemoryNode>, alpha: Double = 0.15, gamma: Double = 0.9): Int {
+        val byId = memories.associateBy { it.id }
+        val episodic = memories.filter { it.layer == MemoryLayer.EPISODIC }.sortedByDescending { it.id }.take(replayBatchSize)
+        var updates = 0
+        for (end in episodic) {
+            var next = end
+            val visited = HashSet<Long>()
+            visited += next.id
+            while (true) {
+                val prev = next.linkedMemoryIds.filter { it < next.id && it !in visited }.maxOrNull()?.let { byId[it] } ?: break
+                prev.qUtility = (prev.qUtility + alpha * (gamma * next.qUtility - prev.qUtility)).coerceIn(-1.0, 1.0)
+                visited += prev.id
+                updates++
+                next = prev
+                if (visited.size > 8) break
             }
+        }
+        return updates
     }
 
     fun runHippocampalSleepConsolidation(

@@ -41,7 +41,7 @@
 | `qd` | MAP-Elites + AURORA |
 | `rsi` | Auto-aperfeiçoamento delimitado: proposta → Shadow-Replay em cópia profunda → promoção só com ganho líquido, sem queda de diversidade semântica abaixo de 0,35 |
 
-## Módulos nativos e portas (v3.3)
+## Módulos nativos e portas (v3.4)
 
 O `core` continua JVM puro. Os módulos nativos entram por interfaces em `core/ports` (`PathfinderPort`,
 `LoraPort`, `NeuralDeliberatorPort`), montadas pelo `SimulationHub`. Cada porta tem implementação Kotlin de
@@ -53,21 +53,34 @@ estado.
 
 - `llm/llm_engine.cpp` liga o llama.cpp `v1.0.0` (CMake/NDK) ao JNI (`llm/llm_jni.cpp`, classe `LlmNativeBridge`).
   Modelo carregado com `mmap` (sem `mlock`, sem GPU), `n_ctx = 1024`, lote 256, threads = metade dos núcleos (2 a 4).
-- Aceleração ARM64 sem risco de `SIGILL` (v3.3): o motor LLM é empacotado em três bibliotecas separadas, e só o
-  backend `ggml-cpu` muda entre elas (`GGML_NATIVE=OFF`, `GGML_CPU_ARM_ARCH`):
+- Aceleração ARM64 sem risco de `SIGILL` e sem duplicar o motor (v3.4): llama.cpp é compilado com
+  `BUILD_SHARED_LIBS=ON` e `GGML_BACKEND_DL=ON`. O APK leva **uma** `libllama.so`, **uma** `libggml.so` +
+  `libggml-base.so`, o wrapper `libgirassol_llm.so` e só três backends de CPU carregáveis (`GGML_CPU_ALL_VARIANTS`,
+  variantes não usadas são compiladas fora do diretório empacotado):
 
-  | Biblioteca | `-march` | Alvo |
+  | Backend dinâmico | Recursos | Alvo |
   |---|---|---|
-  | `libgirassol_llm_base.so` | armv8-a | qualquer arm64 (Cortex-A53) e o emulador x86_64 |
-  | `libgirassol_llm_dotprod.so` | armv8.2-a+dotprod+fp16 + KleidiAI | Snapdragon 695 (A78/A55), Helio G99 (A76/A55) |
-  | `libgirassol_llm_i8mm.so` | armv8.2-a+dotprod+fp16+i8mm + KleidiAI | Cortex-A510/A710/X2 em diante |
+  | `libggml-cpu-android_armv8.0_1.so` | NEON | qualquer arm64 (Cortex-A53) |
+  | `libggml-cpu-android_armv8.2_2.so` | dotprod + fp16 + KleidiAI | Snapdragon 695 (A78/A55), Helio G99 (A76/A55) |
+  | `libggml-cpu-android_armv8.6_1.so` | dotprod + fp16 + i8mm + KleidiAI | Cortex-A510/A710/X2 em diante |
 
-  `hardware/cpu_features.hpp` lê `getauxval(AT_HWCAP/AT_HWCAP2)` dentro de `libgirassol_core.so` (compilada
-  para armv8-a) **antes** de qualquer biblioteca LLM ser carregada; `LlmVariantSelector` só tenta `i8mm` quando o
-  HWCAP2 confirma FEAT_I8MM e cai para a próxima variante se o `System.loadLibrary` falhar. `i8mm` nunca é
-  exigido globalmente. Dentro da variante dotprod, os kernels KleidiAI com SMMLA existem, mas o próprio KleidiAI
-  só os seleciona em runtime quando a CPU anuncia i8mm. O repacking de pesos Q4_0/Q8_0 do ggml (`REPACK`) fica
-  ativo em todas as variantes.
+  `hardware/cpu_features.hpp` lê `getauxval(AT_HWCAP/AT_HWCAP2)` em `libgirassol_core.so` (armv8-a) e
+  `LlmVariantSelector` pede ao `ggml_backend_load` o backend mais rápido que o HWCAP confirma, caindo para o
+  próximo se a carga falhar. No emulador x86_64 há um único `libggml-cpu.so`. `splits.abi` gera um APK por ABI
+  (release só arm64) e `useLegacyPackaging = false` deixa as `.so` alinhadas e sem compressão (mmap direto do APK).
+- Regra de Ouro KleidiAI: `LlmQuantPolicy` recomenda pesos Q4_0/Q8_0, liga `flash_attn` e escolhe KV-cache
+  `Q4_0` em aparelhos ≤ 4 GB e `Q8_0` acima. Se o modelo não aceitar (head_dim não múltiplo de 32), o motor tenta
+  `flash_attn + F16` e depois `F16` sem flash-attn. `use_mmap = true` sempre. O "lazy mode" é implementado no app:
+  em ≤ 4 GB o modelo só carrega na primeira deliberação e é descarregado após 90 s ocioso.
+- Prefixo imutável e slots por cidadão: todo prompt começa por `NeuralProtocol.IMMUTABLE_WORLD_PREFIX`; o motor
+  mantém o KV do prefixo e grava/restaura o estado de cada cidadão com `llama_state_seq_save_file` /
+  `llama_state_seq_load_file` (até 24 slots LRU em `filesDir/llm_slots`, apagados pelo disjuntor de memória).
+- Gramática: GBNF estrita (o llama.cpp v1.0.0 empacotado não inclui llguidance) com fast-forward — quando a
+  gramática só admite uma continuação (chaves JSON fixas), os tokens são forçados sem amostragem, validados num
+  clone do sampler de gramática antes de entrar no lote.
+- `SemanticEntropyController` (C++20, `llm/semantic_entropy.hpp`): entropia de 3-gramas das últimas 6 falas do
+  cidadão; \(T_t = \text{clamp}(T_{base} + \gamma \max(0, \tau_{crit} - H_{ngram}), 0{,}45, 1{,}15)\), com semente
+  derivada do `StreamSeeds` do mundo.
 - Diagnóstico: aba Sistema mostra as flags (`NEON`, `DOTPROD`, `FP16`, `I8MM`, `SVE`, `SVE2`), a variante e o
   `-march` carregados, o `llama_print_system_info()` e um benchmark de tokens/s (prompt em lote e geração).
 - Toda geração usa gramática GBNF (`NeuralProtocol`) e decodificação gulosa; a saída é ainda validada por um
@@ -78,6 +91,42 @@ estado.
 - Fallback automático para `SymbolicLookaheadDeliberator`: sem `.gguf`, tier térmico ≥ 2, disjuntor de memória
   aberto, RAM livre baixa ou erro de carga. Shadow-Replay do RSI e sandbox LoRA usam sempre o simbólico.
 - Falas e pensamentos (LLM ou modelos simbólicos) aparecem como balões na aba Mundo.
+
+### Motores cognitivos e corporais da v3.4
+
+- Memória episódica em 2 estágios (`core/memory/EpisodicIndex.kt` + `cpp/memory/binary_episodic_index.hpp`):
+  embedding binário SimHash bit[256] (32 bytes) por memória; Estágio 1 seleciona 24 candidatos por distância de
+  Hamming (XOR + popcount; `__builtin_popcountll` no C++, paridade dourada verificada no aparelho); Estágio 2
+  funde por RRF (k = 60) cosseno float32 de um vetor denso 256 e BM25, ponderado pela intensidade de Hawkes
+  \(\lambda_m(t) = \mu_0 + \sum \alpha v_i e^{-\beta(t - t_i)}\) mantida de forma recursiva. A memória de trabalho
+  segue 7 ± 2 (5..9 conforme a carga); no sono, o replay de ondas agudas (SWR) reforça Q_m das memórias
+  recentes. As memórias projetadas também vão para uma tabela SQLite FTS5 (fallback FTS4 + BM25 Kotlin) para
+  busca na aba Mente.
+- Imunidade epistêmica: relatos da mesma fonte/proveniência são fundidos por média (não contam duas vezes um
+  boato repetido); fontes independentes usam a fusão cumulativa ⊕ após o desconto ⊗ pela confiança.
+- Inferência ativa: \(G(\pi) = D_{KL}[Q(o|\pi) \| P_{pref}(o)] - \mathbb{E}[H(P(o|s))] + C_{neural}(T_{SoC})\) com
+  KL/entropia de Bernoulli por necessidade e custo neural sigmoide em torno de 40 °C (temperatura da bateria
+  quantizada a 1 °C pela telemetria).
+- CfC (`core/biology/CfcNeuromodulator.kt`): rede Closed-form Continuous-time de 48 neurônios, invariante a Δt,
+  que produz cortisol, ocitocina, dopamina e um fator de locomoção (0,75–1,25) a cada tick; os hormônios entram
+  na EFE, na taxa de aprendizado MemRL e na velocidade preferida.
+- Multidão (`core/world/CrowdNavigation.kt`): `DistrictNavMesh` com clearance (custo maior perto de paredes no
+  A*), `stepRvo2OrcaVelocities` (porta do RVO2/ORCA, raio 0,2, horizonte 2) e `resolveCircleAABB` contra os tiles
+  sólidos — posições contínuas sem atravessar edifícios, usadas nas vistas 2D e 3D.
+- Genética: no nascimento os adaptadores LoRA pessoais dos pais são fundidos por TIES-Merging (trim, eleição de
+  sinal, média disjunta); aos 2 dias de vida o filho que supera em ≥ 15 % a aptidão média dos pais ganha o
+  evento `SUPERACAO` e cooldown reprodutivo menor.
+
+### Energia, ADPF e voz (v3.4)
+
+- `GirassolContinuousService` mantém `PARTIAL_WAKE_LOCK` com timeout renovado e um `WifiLock`
+  `WIFI_MODE_FULL_LOW_LATENCY`; lê a temperatura da bateria (`EXTRA_TEMPERATURE`) para a telemetria.
+- `perf/AdpfHints.kt`: sessão `PerformanceHintManager` com os tids das threads `girassol-sim` e `girassol-llm`;
+  a duração-alvo acompanha os ticks por segundo e cada tick/geração chama `reportActualWorkDuration`.
+- Áudio: o sintetizador AAudio aplica ducking na trilha Trautonium (`computeTrautoniumDuckingGain`) durante
+  blips de fala e durante a voz TTS. `audio/CitizenVoice.kt` usa o `TextToSpeech` do Android com voz pt-BR offline
+  e pan estéreo pela posição do cidadão. O pipeline Sherpa-ONNX (Pocket-TTS/Kokoro + SenseVoice) não é
+  empacotado: os modelos somam dezenas de MB e estourariam o limite de 14 MB do APK.
 
 ### Renderização 3D (Filament 1.75.1) e Modo Eco 2D
 
@@ -173,6 +222,10 @@ a importação depois.
 - Filament fixado em 1.75.1: versões ≥ 1.76 exigem compileSdk 37, e o AGP 8.7.3 suporta até o 35.
 - OpenMP desligado (threadpool do ggml). As variantes dotprod/i8mm não foram medidas em aparelho real; o ganho
   de tokens/s depende do modelo e da quantização (Q4_0 aproveita mais o repacking/KleidiAI que Q4_K_M).
-- O APK de release fica maior (três variantes do backend ggml-cpu).
+- Embeddings episódicos são SimHash/hashing de termos, não um modelo neural de embeddings.
+- llguidance não está no llama.cpp v1.0.0 empacotado: a gramática é GBNF estrita com fast-forward.
+- KV-cache quantizado exige head_dim múltiplo de 32 (com flash-attn); outros modelos caem para F16.
+- Sem Sherpa-ONNX (orçamento de 14 MB); a voz depende do motor TTS instalado no aparelho.
+- ADPF e WifiLock dependem do suporte do fabricante; não foram medidos em aparelho físico.
 - O LLM só atua no mundo ao vivo; RSI e sandbox LoRA usam o deliberador simbólico para manter replay fixo.
 - Iluminação do 3D é pré-calculada (sem sombras dinâmicas) para caber no orçamento térmico 24/7.

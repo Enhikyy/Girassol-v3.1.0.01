@@ -9,6 +9,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.IntentFilter
+import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.IBinder
 import android.os.PowerManager
@@ -29,11 +31,14 @@ import kotlinx.coroutines.launch
 /**
  * Serviço em primeiro plano (tipo specialUse) que mantém o mundo vivo 24/7.
  * Usa PARTIAL_WAKE_LOCK renovado periodicamente, escuta o status térmico do
- * PowerManager e alimenta a telemetria (térmico, RAM, bateria) do WorldCore.
+ * PowerManager e alimenta a telemetria (térmico, RAM, bateria, temperatura) do WorldCore.
+ * Mantém também um WifiLock WIFI_MODE_FULL_LOW_LATENCY (exportação/sincronização .grs
+ * por rede local sem latência de power-save) e a sessão ADPF das threads de IA.
  */
 class GirassolContinuousService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     private var monitorJob: Job? = null
     private val thermalListener = PowerManager.OnThermalStatusChangedListener { pushTelemetry(it) }
 
@@ -47,6 +52,12 @@ class GirassolContinuousService : Service() {
         val pm = getSystemService(PowerManager::class.java)
         pm.addThermalStatusListener(mainExecutor, thermalListener)
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Girassol:WorldCore").apply { setReferenceCounted(false) }
+        wifiLock = runCatching {
+            applicationContext.getSystemService(WifiManager::class.java)
+                ?.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "Girassol:LowLatency")
+                ?.apply { setReferenceCounted(false) }
+        }.getOrNull()
+        ServiceLocks.update(wakeLock = true, wifiLock = wifiLock != null)
         SimulationHub.ensureLoaded(this)
     }
 
@@ -70,6 +81,8 @@ class GirassolContinuousService : Service() {
         while (scope.isActive) {
             // wake lock com timeout explícito, renovado a cada ciclo (nunca indefinido)
             wakeLock?.acquire(WAKE_LOCK_TIMEOUT_MS)
+            wifiLock?.let { if (!it.isHeld) runCatching { it.acquire() } }
+            ServiceLocks.update(wakeLock = wakeLock?.isHeld == true, wifiLock = wifiLock?.isHeld == true)
             pushTelemetry(getSystemService(PowerManager::class.java).currentThermalStatus)
             val r = SimulationHub.render.value
             val st = SimulationHub.status.value
@@ -86,7 +99,12 @@ class GirassolContinuousService : Service() {
         val mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
         val bm = getSystemService(BatteryManager::class.java)
         val pct = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-        SimulationHub.updateTelemetry(thermalStatus, mi.availMem / (1024 * 1024), pct, bm.isCharging)
+        // EXTRA_TEMPERATURE em décimos de °C: proxy público da temperatura do SoC.
+        val tempTenths = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            ?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE) ?: Int.MIN_VALUE
+        val tempC = if (tempTenths == Int.MIN_VALUE) Double.NaN else tempTenths / 10.0
+        ServiceLocks.update(socTempC = tempC)
+        SimulationHub.updateTelemetry(thermalStatus, mi.availMem / (1024 * 1024), pct, bm.isCharging, tempC)
     }
 
     private fun buildNotification(text: String): Notification {
@@ -111,6 +129,8 @@ class GirassolContinuousService : Service() {
         runCatching { getSystemService(PowerManager::class.java).removeThermalStatusListener(thermalListener) }
         scope.cancel()
         wakeLock?.let { if (it.isHeld) it.release() }
+        wifiLock?.let { if (it.isHeld) runCatching { it.release() } }
+        ServiceLocks.update(wakeLock = false, wifiLock = false)
         SimulationHub.flush()
         super.onDestroy()
     }
@@ -140,5 +160,17 @@ class GirassolContinuousService : Service() {
 
         fun shouldAutoStart(context: Context): Boolean =
             context.getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_RUNNING, false)
+    }
+}
+
+/** Estado observável dos locks do serviço (painel Sistema). */
+object ServiceLocks {
+    data class State(val wakeLock: Boolean = false, val wifiLock: Boolean = false, val socTempC: Double = Double.NaN)
+    private val _state = kotlinx.coroutines.flow.MutableStateFlow(State())
+    val state: kotlinx.coroutines.flow.StateFlow<State> = _state
+
+    fun update(wakeLock: Boolean? = null, wifiLock: Boolean? = null, socTempC: Double? = null) {
+        val c = _state.value
+        _state.value = State(wakeLock ?: c.wakeLock, wifiLock ?: c.wifiLock, socTempC ?: c.socTempC)
     }
 }

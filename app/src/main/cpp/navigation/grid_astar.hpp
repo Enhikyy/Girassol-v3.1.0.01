@@ -22,6 +22,41 @@ inline float tileCost(int32_t t) {
     return 1.0f;
 }
 
+// Campo de folga — espelho de DistrictNavMesh.computeClearance (Kotlin): distância de
+// Chebyshev até o tile bloqueado (ou borda) mais próximo, limitada a 3; bloqueado = 0.
+inline void computeClearance(int32_t w, const int32_t* tiles, std::vector<uint8_t>& out) {
+    constexpr int32_t kMax = 3;
+    out.assign(static_cast<size_t>(w) * static_cast<size_t>(w), 0);
+    for (int32_t z = 0; z < w; ++z) {
+        for (int32_t x = 0; x < w; ++x) {
+            const int32_t i = z * w + x;
+            if (!tileWalkable(tiles[i])) { out[i] = 0; continue; }
+            int32_t best = kMax;
+            for (int32_t r = 1; r <= kMax; ++r) {
+                bool hit = false;
+                for (int32_t dz = -r; dz <= r && !hit; ++dz) {
+                    for (int32_t dx = -r; dx <= r; ++dx) {
+                        const int32_t ax = dx < 0 ? -dx : dx;
+                        const int32_t az = dz < 0 ? -dz : dz;
+                        if ((ax > az ? ax : az) != r) continue;
+                        const int32_t nx = x + dx;
+                        const int32_t nz = z + dz;
+                        if (nx < 0 || nx >= w || nz < 0 || nz >= w || !tileWalkable(tiles[nz * w + nx])) { hit = true; break; }
+                    }
+                }
+                if (hit) { best = r; break; }
+            }
+            out[i] = static_cast<uint8_t>(best);
+        }
+    }
+}
+
+inline float clearanceCostFactor(int32_t c) {
+    if (c == 1) return 1.25f;
+    if (c == 2) return 1.08f;
+    return 1.0f;
+}
+
 inline uint32_t floatBits(float f) {
     uint32_t u;
     std::memcpy(&u, &f, sizeof(u));
@@ -39,6 +74,12 @@ public:
         if (start == goal) return path;
         const size_t n = static_cast<size_t>(w) * static_cast<size_t>(w);
         if (start < 0 || static_cast<size_t>(start) >= n) return path;
+        // cache do campo de folga: recalcula só quando a grade muda
+        if (cachedW_ != w || cachedTiles_.size() != n || std::memcmp(cachedTiles_.data(), tiles, n * sizeof(int32_t)) != 0) {
+            cachedTiles_.assign(tiles, tiles + n);
+            cachedW_ = w;
+            computeClearance(w, tiles, clearance_);
+        }
         g_.assign(n, std::numeric_limits<float>::max());
         parent_.assign(n, -1);
         closed_.assign(n, 0);
@@ -72,6 +113,7 @@ public:
                 float cost = tileCost(tile);
                 if (trail) { float t = trail[ni] / 10.0f; if (t > 1.0f) t = 1.0f; cost *= (1.0f - 0.35f * t); }
                 if (danger) { float t = danger[ni] / 5.0f; if (t > 2.0f) t = 2.0f; cost *= (1.0f + t); }
+                cost *= clearanceCostFactor(clearance_[ni]);
                 const float ng = g_[cur] + cost;
                 if (ng < g_[ni]) {
                     g_[ni] = ng;
@@ -97,6 +139,9 @@ private:
     std::vector<float> g_;
     std::vector<int32_t> parent_;
     std::vector<uint8_t> closed_;
+    std::vector<uint8_t> clearance_;
+    std::vector<int32_t> cachedTiles_;
+    int32_t cachedW_ = -1;
 };
 
 }  // namespace girassol::nav

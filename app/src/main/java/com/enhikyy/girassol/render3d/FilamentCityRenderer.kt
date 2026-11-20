@@ -352,7 +352,7 @@ class FilamentCityRenderer(
         val newTargets = HashMap<String, FloatArray>(s.agents.size * 2)
         val rm = engine.renderableManager
         for (a in s.agents) {
-            newTargets[a.id] = floatArrayOf(a.x + 0.5f, 0f, a.z + 0.5f)
+            newTargets[a.id] = floatArrayOf(a.fx, 0f, a.fz)
             val e = agentEntities[a.id] ?: run {
                 val ent = EntityManager.get().create()
                 val mi = cityMat.createInstance()
@@ -364,7 +364,7 @@ class FilamentCityRenderer(
                     .material(0, mi).castShadows(false).receiveShadows(false)
                     .build(engine, ent)
                 scene.addEntity(ent)
-                visual[a.id] = floatArrayOf(a.x + 0.5f, 0f, a.z + 0.5f)
+                visual[a.id] = floatArrayOf(a.fx, 0f, a.fz)
                 Pair(ent, mi).also { agentEntities[a.id] = it }
             }
             val c = actionRgb(a.action)

@@ -26,7 +26,15 @@ class LlmVariantSelectorTest {
     @Test
     fun cortexA53AndX86GetBase() {
         assertEquals(listOf("base"), LlmVariantSelector.candidates(CpuSimdFlags(neon = true, aarch64 = true)))
-        assertEquals(listOf("base"), LlmVariantSelector.candidates(CpuSimdFlags(dotprod = true, fp16 = true, i8mm = true, aarch64 = false)))
+        assertEquals(listOf("x86_64"), LlmVariantSelector.candidates(CpuSimdFlags(dotprod = true, fp16 = true, i8mm = true, aarch64 = false)))
+    }
+
+    @Test
+    fun backendLibrariesMatchGgmlAndroidVariants() {
+        assertEquals("libggml-cpu-android_armv8.6_1.so", LlmVariantSelector.backendLibrary("i8mm"))
+        assertEquals("libggml-cpu-android_armv8.2_2.so", LlmVariantSelector.backendLibrary("dotprod"))
+        assertEquals("libggml-cpu-android_armv8.0_1.so", LlmVariantSelector.backendLibrary("base"))
+        assertEquals("libggml-cpu.so", LlmVariantSelector.backendLibrary("x86_64"))
     }
 
     @Test

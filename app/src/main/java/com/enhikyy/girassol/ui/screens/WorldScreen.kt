@@ -154,11 +154,11 @@ private fun Iso2DView(
                     val wx = (p.x - pan.x) / zoom
                     val wy = (p.y - pan.y) / zoom
                     val hit = SimulationHub.render.value?.agents?.minByOrNull { a ->
-                        val (cx, cy) = IsoRenderer.tileCenter(a.x, a.z, w)
+                        val (cx, cy) = IsoRenderer.pointCenter(a.fx, a.fz, w)
                         hypot(cx - wx, cy - 3f - wy)
                     }
                     onPick(hit?.takeIf { a ->
-                        val (cx, cy) = IsoRenderer.tileCenter(a.x, a.z, w)
+                        val (cx, cy) = IsoRenderer.pointCenter(a.fx, a.fz, w)
                         hypot(cx - wx, cy - 3f - wy) * zoom < 36f
                     }?.id)
                 }
@@ -180,7 +180,7 @@ private fun Iso2DView(
                 if (o.occupancy > 0) drawCircle(Color.White.copy(alpha = 0.5f), radius = 3.6f, center = Offset(cx, cy - 1f), style = Stroke(0.6f))
             }
             for (a in s.agents) {
-                val (cx, cy) = IsoRenderer.tileCenter(a.x, a.z, w)
+                val (cx, cy) = IsoRenderer.pointCenter(a.fx, a.fz, w)
                 val c = Offset(cx, cy - 3f)
                 drawCircle(Color(0x66000000), radius = 2.2f, center = Offset(cx, cy + 0.5f))
                 drawCircle(IsoRenderer.actionColor(a.action), radius = 2.4f, center = c)
@@ -190,7 +190,7 @@ private fun Iso2DView(
         }
         val out = HashMap<String, Offset>(s.agents.size * 2)
         for (a in s.agents) {
-            val (cx, cy) = IsoRenderer.tileCenter(a.x, a.z, w)
+            val (cx, cy) = IsoRenderer.pointCenter(a.fx, a.fz, w)
             val p = Offset(pan.x + cx * zoom, pan.y + (cy - 6f) * zoom)
             if (p.x in 0f..size.width && p.y in 0f..size.height) out[a.id] = p
         }

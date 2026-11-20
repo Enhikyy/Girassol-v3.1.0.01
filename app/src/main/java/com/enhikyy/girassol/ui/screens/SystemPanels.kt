@@ -54,6 +54,12 @@ fun LlmCpuPanel() {
         if (LlmNativeBridge.systemInfo.isNotEmpty()) Text("ggml: ${LlmNativeBridge.systemInfo}", style = MonoStyle, color = Lumon.CreamDim, maxLines = 4)
         KeyValue("tokens/s (última geração)", if (llm.genTokensPerSecond > 0) "${llm.genTokensPerSecond.f(1)} tg · ${llm.tokensPerSecond.f(1)} total" else "-")
         KeyValue("tokens/s (benchmark)", if (llm.benchGenTps > 0) "pp ${llm.benchPromptTps.f(1)} · tg ${llm.benchGenTps.f(1)}" else "-")
+        KeyValue("KV-cache · flash-attn", "${llm.kvCache.ifEmpty { "-" }} · ${llm.description.ifEmpty { "sem modelo" }}")
+        KeyValue("Modo lazy (≤ 4 GB)", if (llm.lazyMode) "ativo · ${llm.idleUnloads} descargas por ociosidade" else "desligado (RAM > 4 GB)")
+        KeyValue("Prefixo/slots reaproveitados", "${llm.reusedTokens} tokens · ${llm.slotRestores} slots restaurados")
+        KeyValue("Fast-forward GBNF", "${llm.forcedTokens} tokens forçados")
+        KeyValue("Temperatura semântica", if (llm.lastTemperature > 0f) llm.lastTemperature.toDouble().f(2) else "-")
+        if (llm.quantAdvice.isNotEmpty()) KeyValue("Quantização", llm.quantAdvice)
         OutlinedButton(enabled = !running, modifier = Modifier.testTag("llm_bench"), onClick = {
             running = true
             scope.launch { bench = withContext(Dispatchers.Default) { LocalLlmManager.benchmark() }; running = false }
@@ -87,6 +93,22 @@ fun MemoryPanel() {
         }
         Text("O disjuntor descarrega o contexto do llama.cpp e libera caches; o loop determinístico do mundo continua no deliberador simbólico.",
             style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
+    }
+}
+
+/** PARTIAL_WAKE_LOCK, WifiLock low-latency, temperatura e sessão ADPF das threads de IA. */
+@Composable
+fun PowerPanel() {
+    val locks by com.enhikyy.girassol.service.ServiceLocks.state.collectAsStateWithLifecycle()
+    val adpf by com.enhikyy.girassol.perf.AdpfHints.stats.collectAsStateWithLifecycle()
+    SectionCard("Energia e ADPF", Modifier.testTag("power_panel")) {
+        KeyValue("PARTIAL_WAKE_LOCK", if (locks.wakeLock) "ativo" else "liberado")
+        KeyValue("WifiLock FULL_LOW_LATENCY", if (locks.wifiLock) "ativo" else "liberado")
+        KeyValue("Temperatura (bateria → C_neural)", if (locks.socTempC.isNaN()) "-" else "${locks.socTempC.f(1)} °C")
+        Text("ADPF: ${adpf.message}", style = MonoStyle, color = if (adpf.supported) Lumon.Teal else Lumon.Sunflower,
+            modifier = Modifier.testTag("adpf_state"))
+        if (adpf.threads.isNotEmpty()) KeyValue("Threads (tid)", adpf.threads.entries.joinToString { "${it.key}=${it.value}" })
+        KeyValue("Alvo · último trabalho", "${adpf.targetMs.f(1)} ms · ${adpf.lastWorkMs.f(2)} ms (${adpf.reports} relatos)")
     }
 }
 
