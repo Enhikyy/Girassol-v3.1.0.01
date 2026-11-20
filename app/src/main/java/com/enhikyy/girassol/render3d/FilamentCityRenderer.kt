@@ -144,6 +144,14 @@ class FilamentCityRenderer(private val context: Context, private val surfaceView
 
     /** Pós-processamento "Kodak 500T / 70 mm": bloom suave, sombras profundas, balanço tungstênio, vinheta e névoa liminar. */
     private fun configurePostProcessing() {
+        if (isSoftwareGl()) {
+            // Rasterizadores por software (SwiftShader do emulador) não compilam os shaders de
+            // pós-processamento do Filament (FXAA aborta o processo). Renderiza a cena sem pós.
+            view.setPostProcessingEnabled(false)
+            view.setShadowingEnabled(false)
+            Log.w(TAG, "GL por software detectado: pós-processamento desativado")
+            return
+        }
         view.setPostProcessingEnabled(true)
         view.setAntiAliasing(View.AntiAliasing.FXAA)
         view.setDithering(View.Dithering.TEMPORAL)
@@ -389,7 +397,7 @@ class FilamentCityRenderer(private val context: Context, private val surfaceView
         engine.destroyVertexBuffer(agentVb); engine.destroyIndexBuffer(agentIb)
         engine.destroyMaterialInstance(cityMi); engine.destroyMaterialInstance(glowMi)
         engine.destroyMaterial(cityMat); engine.destroyMaterial(glowMat)
-        engine.destroyColorGrading(colorGrading)
+        if (::colorGrading.isInitialized) engine.destroyColorGrading(colorGrading)
         swapChain?.let { engine.destroySwapChain(it) }; swapChain = null
         engine.destroyView(view); engine.destroyScene(scene); engine.destroyRenderer(renderer)
         val camEntity = fCamera.entity
@@ -397,4 +405,13 @@ class FilamentCityRenderer(private val context: Context, private val surfaceView
         engine.destroy()
         Render3dTelemetry.set(Render3dStats(active = false))
     }
+}
+
+/** Emulador/GL por software (goldfish/ranchu, SwiftShader): sem pós-processamento do Filament. */
+internal fun isSoftwareGl(): Boolean {
+    val hw = android.os.Build.HARDWARE.lowercase()
+    val fp = android.os.Build.FINGERPRINT.lowercase()
+    val product = android.os.Build.PRODUCT.lowercase()
+    return hw == "ranchu" || hw == "goldfish" || fp.startsWith("generic") || fp.contains("emulator") ||
+        product.contains("sdk_gphone") || product.startsWith("sdk") || product.contains("emulator")
 }

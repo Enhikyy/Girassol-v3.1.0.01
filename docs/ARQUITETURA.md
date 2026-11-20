@@ -100,7 +100,9 @@ campos `Long` que guardam ponteiros nativos do llama.cpp.
 ## Limitações conhecidas
 
 - Não testado em aparelho físico de 4 GB; o orçamento de RAM e os 30 fps são estimativas de projeto.
-  O emulador usa GPU por software (swiftshader); se o GLES3 falhar, o teste valida a queda para o 2D.
+  O emulador usa GPU por software (SwiftShader), que não compila os shaders de pós-processamento do Filament
+  (o FXAA aborta o processo); em GL por software o app desativa o pós-processamento, então o CI valida a cena
+  3D, a câmera e o raycast, mas não a estética Kodak.
 - Filament fixado em 1.75.1: versões ≥ 1.76 exigem compileSdk 37, e o AGP 8.7.3 suporta até o 35.
 - GGML compilado para armv8-a portátil (sem dotprod/i8mm específicos, KleidiAI e OpenMP desligados):
   compatível com qualquer arm64, mas não é o máximo de tokens/s possível.
