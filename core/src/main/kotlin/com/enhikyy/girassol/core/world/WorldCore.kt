@@ -496,10 +496,17 @@ class WorldCore(
             val broadcast = workspace.broadcastWinningSignals(signals)
             // 4. Memória & atualização epistêmica (ACT-R + MemRL + A-MEM)
             val tags = broadcast.mapNotNull { it.entityId }.toSet() + broadcast.map { it.sourceModule }.toSet()
-            memoryEngine.clearWorkingMemory()
             val queryText = broadcast.joinToString(" ") { it.summary }
-            val retrieval = memoryEngine.retrieveTwoStage(c.memories, tick, queryText, tags, broadcast.mapNotNull { it.entityId }.toSet(),
-                topK = 4, workingCapacity = 5 + (4.0 * c.trait("conscienciosidade")).roundToInt())
+            val retrieval = memoryEngine.retrieveTwoStage(
+                nodes = c.memories,
+                currentTick = tick,
+                queryText = queryText,
+                queryTags = tags,
+                queryEntities = broadcast.mapNotNull { it.entityId }.toSet(),
+                topK = 4,
+                workingCapacity = 5 + (4.0 * c.trait("conscienciosidade")).roundToInt(),
+                workingMemoryIds = c.workingMemoryIds
+            )
             val recalled = retrieval.memories
             state.retrievalQueries++
             state.retrievalStage1Total += retrieval.stage1Candidates
