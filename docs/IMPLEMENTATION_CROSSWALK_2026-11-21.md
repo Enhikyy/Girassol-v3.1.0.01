@@ -68,7 +68,7 @@ Os números de ganhos no arquivo de pesquisa são declarações atribuídas aos 
 | P1 | Painel Dados e observabilidade coerente | métricas derivadas do `DashboardSnapshot`; testes Compose; sem dados sintéticos em produção |
 | P1 | Crosswalk dos módulos, migrações e contratos persistidos | versões de schema/eventos documentadas e testes de roundtrip/migração |
 | P2 | Fechar lacunas de memória semântica/procedural e economia | ownership, proveniência, persistência, invariantes e testes de replay |
-| P2 | Melhorar gate RSI com validação cega e held-out fora do APK | testes determinísticos, logs auditáveis e aprovação humana explícita |
+| P2 | Harness externo de RSI com lineage archive, dev/held-out, monitor, juiz A/B cego e aprovação humana | testes stdlib no CI; callbacks reais devem executar em runner isolado e decisões são registradas em JSONL |
 | P3 | Avaliar P2P CRDT/HLC e GPU LLM por device tier | protótipos reversíveis, builds isolados e medições por SoC |
 | P3 | Validar HRTF, áudio, estabilidade 24/7 e performance | instrumentação/hardware real; CI sozinha não prova qualidade sensorial ou térmica |
 
@@ -91,4 +91,5 @@ As validações atuais são rastreadas no Pull Request #1 e em GitHub Actions. A
 - **Memória de trabalho por cidadão:** os IDs dos episódios ativos deixaram de viver num buffer transitório compartilhado pelo motor. Cada cidadão agora possui seu próprio buffer ordenado, com capacidade configurável entre 5 e 9, e o snapshot CBOR persiste esse estado. A recuperação remove referências obsoletas, deduplica e mantém LRU por cidadão.
 - **Grafo semântico/procedural inicial:** a consolidação do sono agora retorna metadados de relação para resumos `SCHEMA` e macros `SKILL_MACRO`; o mundo grava arestas para os episódios verificados, preserva entidades e atualiza nós antigos na próxima consolidação. Isso estabelece proveniência relacional sem afirmar que já existe um grafo semântico causal completo.
 - **Preço subjetivo e liquidação bilateral:** o escambo entre cidadãos deixou de usar preço fixo. A cotação utiliza necessidade/estoque do comprador, excedente do vendedor, reservas dos comuns e média móvel de transações anteriores recuperadas do ledger. O novo `exchange` pré-valida as duas pernas antes de alterar saldos; contratos, dívidas e impostos seguem pendentes.
+- **Harness externo de autoaperfeiçoamento:** `tools/guarded_rsi/safe_loop.py` mantém arquivo de linhagens, seleção Thompson, métricas dev/held-out, monitor, comparação A/B com ordem aleatória, aprovação humana e auditoria JSONL. Os testes usam callbacks simulados. O harness declara explicitamente que não é sandbox nem executa código; integração com gerador/avaliadores reais depende de runner isolado sem segredos/rede e de aprovação específica.
 - **Limite da evidência:** as alterações precisam passar pelo CI desta branch. A validação em emulador/aparelhos físicos e a carga 24/7 continuam sendo etapas separadas.
