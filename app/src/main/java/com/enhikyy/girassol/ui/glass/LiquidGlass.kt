@@ -45,6 +45,9 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.enhikyy.girassol.ui.theme.Lumon
 import com.enhikyy.girassol.ui.theme.ThemeController
+import com.enhikyy.girassol.ui.glass.GlassPerformanceController
+import com.enhikyy.girassol.ui.glass.GlassTier
+import com.enhikyy.girassol.ui.glass.LocalGlassTier
 
 /**
  * v3.9 — Liquid Glass nativo.
@@ -76,7 +79,7 @@ val LocalGlassBackdrop = staticCompositionLocalOf<GlassBackdrop?> { null }
 
 @Composable
 fun rememberGlassBackdrop(): GlassBackdrop {
-    val layer = rememberGraphicsLayer()
+    val layer = if (GlassPerformanceController.tier != GlassTier.LOW) rememberGraphicsLayer() else null
     return remember { GlassBackdrop() }.also { it.layer = layer }
 }
 
@@ -84,6 +87,7 @@ fun rememberGlassBackdrop(): GlassBackdrop {
 fun Modifier.glassBackdropSource(backdrop: GlassBackdrop): Modifier = this
     .onGloballyPositioned { backdrop.origin = it.positionInRoot() }
     .drawWithContent {
+        if (GlassPerformanceController.tier == GlassTier.LOW) { drawContent(); return@drawWithContent }
         val l = backdrop.layer
         if (l == null) { drawContent(); return@drawWithContent }
         l.record(size = IntSize(size.width.toInt().coerceAtLeast(1), size.height.toInt().coerceAtLeast(1))) {
@@ -100,12 +104,14 @@ fun GlassHost(
     content: @Composable BoxScope.() -> Unit
 ) {
     val backdrop = rememberGlassBackdrop()
-    CompositionLocalProvider(LocalGlassBackdrop provides backdrop) {
-        Box(modifier) {
-            Box(Modifier.matchParentSize().glassBackdropSource(backdrop)) {
-                CompositionLocalProvider(LocalGlassBackdrop provides null) { background() }
+    CompositionLocalProvider(LocalGlassTier provides GlassPerformanceController.tier) {
+        CompositionLocalProvider(LocalGlassBackdrop provides backdrop) {
+            Box(modifier) {
+                Box(Modifier.matchParentSize().glassBackdropSource(backdrop)) {
+                    CompositionLocalProvider(LocalGlassBackdrop provides null) { background() }
+                }
+                content()
             }
-            content()
         }
     }
 }
@@ -165,8 +171,10 @@ fun Modifier.liquidGlass(
     tint: Color = Color.Unspecified,
     backdrop: Boolean = true
 ): Modifier = composed {
-    val host = if (backdrop && !LocalInspectionMode.current) LocalGlassBackdrop.current else null
-    val glassLayer = rememberGraphicsLayer()
+    val tier = LocalGlassTier.current
+    val requestedHost = if (backdrop && !LocalInspectionMode.current) LocalGlassBackdrop.current else null
+    val host = requestedHost.takeIf { tier != GlassTier.LOW }
+    val glassLayer = if (tier != GlassTier.LOW) rememberGraphicsLayer() else null
     val holder = remember { PositionHolder() }
     val dark = ThemeController.palette.dark
     val base = if (tint != Color.Unspecified) tint else Lumon.Surface
@@ -177,7 +185,7 @@ fun Modifier.liquidGlass(
     val sheen = if (dark) Color.White else Color(0xFFFFFFFF)
     val shade = if (dark) Color.Black else Color(0xFF1B1B1F)
     this
-        .shadow(elevation, shape, clip = false, ambientColor = Color.Black.copy(alpha = 0.55f), spotColor = Color.Black.copy(alpha = 0.65f))
+        .shadow(if (tier == GlassTier.LOW) 0.dp else elevation, shape, clip = false, ambientColor = Color.Black.copy(alpha = 0.55f), spotColor = Color.Black.copy(alpha = 0.65f))
         .then(if (host != null) Modifier.onGloballyPositioned { holder.pos = it.positionInRoot() } else Modifier)
         .drawWithCache {
             val outline = shape.createOutline(size, layoutDirection, this)
@@ -189,20 +197,25 @@ fun Modifier.liquidGlass(
                 }
             }
             val radius = cornerRadiusOf(outline, size)
-            val strokePx = 1.dp.toPx()
-            if (host != null && size.width >= 1f && size.height >= 1f) {
-                val blurPx = blur.toPx()
-                val shader = RuntimeShader(REFRACTION_AGSL).apply {
-                    setFloatUniform("size", size.width, size.height)
-                    setFloatUniform("radius", radius)
-                    setFloatUniform("band", (refraction.toPx() * 2.2f).coerceAtLeast(1f))
-                    setFloatUniform("strength", refraction.toPx())
-                }
+            val strokePx = if (tier == GlassTier.LOW) 1f else 1.dp.toPx()
+            if (host != null && glassLayer != null && size.width >= 1f && size.height >= 1f) {
+                val blurPx = (if (tier == GlassTier.MID) blur.value.coerceAtMost(10f) else blur.value).dp.toPx()
                 val blurFx = RenderEffect.createBlurEffect(blurPx, blurPx, Shader.TileMode.CLAMP)
-                val refractFx = RenderEffect.createRuntimeShaderEffect(shader, "content")
-                glassLayer.renderEffect = RenderEffect.createChainEffect(refractFx, blurFx).asComposeRenderEffect()
+                glassLayer.renderEffect = if (tier == GlassTier.HIGH) {
+                    val shader = RuntimeShader(REFRACTION_AGSL).apply {
+                        setFloatUniform("size", size.width, size.height)
+                        setFloatUniform("radius", radius)
+                        setFloatUniform("band", (refraction.toPx() * 2.2f).coerceAtLeast(1f))
+                        setFloatUniform("strength", refraction.toPx())
+                    }
+                    val refractFx = RenderEffect.createRuntimeShaderEffect(shader, "content")
+                    RenderEffect.createChainEffect(refractFx, blurFx).asComposeRenderEffect()
+                } else blurFx.asComposeRenderEffect()
             }
-            val fill = Brush.verticalGradient(
+            val fill = if (tier == GlassTier.LOW) {
+                val oled = if (dark) Color.Black else base
+                Brush.verticalGradient(0f to oled.copy(alpha = 0.58f), 0.55f to oled.copy(alpha = 0.48f), 1f to oled.copy(alpha = 0.38f))
+            } else Brush.verticalGradient(
                 0f to base.copy(alpha = (alphaTop + boost).coerceAtMost(0.94f)),
                 0.55f to base.copy(alpha = ((alphaTop + alphaBottom) / 2 + boost).coerceAtMost(0.94f)),
                 1f to base.copy(alpha = (alphaBottom + boost).coerceAtMost(0.94f))
@@ -222,7 +235,7 @@ fun Modifier.liquidGlass(
             )
             onDrawWithContent {
                 val src = host?.layer
-                if (host != null && src != null) {
+                if (host != null && src != null && glassLayer != null) {
                     val off = holder.pos - host.origin
                     glassLayer.record(size = IntSize(size.width.toInt().coerceAtLeast(1), size.height.toInt().coerceAtLeast(1))) {
                         translate(-off.x, -off.y) { drawLayer(src) }

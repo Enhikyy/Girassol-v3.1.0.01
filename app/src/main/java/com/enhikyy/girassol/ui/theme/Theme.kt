@@ -1,6 +1,8 @@
 package com.enhikyy.girassol.ui.theme
 
 import android.content.Context
+import android.util.LruCache
+import kotlin.math.round
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
@@ -62,32 +64,89 @@ object Lumon {
     val GlassHigh get() = c(p.surfaceHigh)
 }
 
+data class TypographyPreferences(val scale: Float = 1f, val weight: Int = 400, val tracking: Float = 0f, val lineHeight: Float = 1.25f, val preset: String = "kodak")
+data class TypographyPreset(val key: String, val label: String, val scale: Float, val weight: Int, val tracking: Float, val lineHeight: Float)
+object TypographyFontCache {
+    private val cache = LruCache<String, FontVariation.Settings>(64)
+    @OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
+    fun settings(weight: Float, width: Float = 100f): FontVariation.Settings {
+        val w = (round(weight / 25f) * 25f).coerceIn(300f, 800f)
+        val wd = (round(width / 5f) * 5f).coerceIn(75f, 125f)
+        val key = "$w:$wd"
+        return cache.get(key) ?: FontVariation.Settings(FontVariation.weight(w), FontVariation.width(wd)).also { cache.put(key, it) }
+    }
+    fun size(): Int = cache.size()
+}
+object TypographyStudioController {
+    private const val PREFS = "girassol_typography"
+    private val defaults = TypographyPreferences()
+    var preferences by mutableStateOf(defaults)
+        private set
+    val presets = listOf(
+        TypographyPreset("kodak", "Kodak Editorial", 1.00f, 450, 0.15f, 1.32f),
+        TypographyPreset("swiss", "Swiss Modern", 0.98f, 500, -0.10f, 1.20f),
+        TypographyPreset("terminal", "Terminal", 0.94f, 450, 0.35f, 1.18f),
+        TypographyPreset("reading", "Leitura", 1.12f, 400, 0.05f, 1.48f),
+        TypographyPreset("compact", "Compacto", 0.90f, 450, -0.15f, 1.12f),
+        TypographyPreset("accessibility", "Acessível", 1.20f, 600, 0.10f, 1.50f)
+    )
+    fun load(context: Context) {
+        val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        preferences = TypographyPreferences(
+            p.getFloat("scale", defaults.scale).coerceIn(0.85f, 1.30f),
+            p.getInt("weight", defaults.weight).coerceIn(300, 700),
+            p.getFloat("tracking", defaults.tracking).coerceIn(-0.5f, 1.5f),
+            p.getFloat("line_height", defaults.lineHeight).coerceIn(1.1f, 1.6f),
+            p.getString("preset", defaults.preset) ?: defaults.preset
+        )
+    }
+    fun update(context: Context, value: TypographyPreferences, persist: Boolean = true) {
+        val safe = value.copy(
+            scale = quantize(value.scale, 0.05f, 0.85f, 1.30f),
+            weight = (round(value.weight / 50f) * 50f).toInt().coerceIn(300, 700),
+            tracking = quantize(value.tracking, 0.1f, -0.5f, 1.5f),
+            lineHeight = quantize(value.lineHeight, 0.05f, 1.1f, 1.6f)
+        )
+        preferences = safe
+        if (persist) persist(context)
+    }
+    fun applyPreset(context: Context, key: String) {
+        val p = presets.firstOrNull { it.key == key } ?: return
+        update(context, TypographyPreferences(p.scale, p.weight, p.tracking, p.lineHeight, p.key))
+    }
+    fun persist(context: Context) {
+        val p = preferences
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putFloat("scale", p.scale).putInt("weight", p.weight).putFloat("tracking", p.tracking)
+            .putFloat("line_height", p.lineHeight).putString("preset", p.preset).apply()
+    }
+    fun reset(context: Context) = update(context, defaults)
+    private fun quantize(v: Float, step: Float, min: Float, max: Float) = (round(v / step) * step).coerceIn(min, max)
+}
 @OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
-private fun instrument(weight: FontWeight) =
-    Font(R.font.instrument_sans, weight, variationSettings = FontVariation.Settings(FontVariation.weight(weight.weight), FontVariation.width(100f)))
-
+private fun instrument(weight: FontWeight) = Font(R.font.instrument_sans, weight, variationSettings = TypographyFontCache.settings(weight.weight))
 @OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
-private fun jetbrains(weight: FontWeight) =
-    Font(R.font.jetbrains_mono, weight, variationSettings = FontVariation.Settings(FontVariation.weight(weight.weight)))
-
-/** Instrument Sans (UI) e JetBrains Mono (telemetria/terminais), ambas OFL 1.1, variáveis. */
+private fun jetbrains(weight: FontWeight) = Font(R.font.jetbrains_mono, weight, variationSettings = TypographyFontCache.settings(weight.weight))
 val InstrumentSans = FontFamily(instrument(FontWeight.Normal), instrument(FontWeight.Medium), instrument(FontWeight.SemiBold), instrument(FontWeight.Bold))
 val JetBrainsMono = FontFamily(jetbrains(FontWeight.Normal), jetbrains(FontWeight.Medium), jetbrains(FontWeight.Bold))
-
 private val base = Typography()
-private fun TextStyle.ui() = copy(fontFamily = InstrumentSans)
-private val typography = Typography(
-    displayLarge = base.displayLarge.ui(), displayMedium = base.displayMedium.ui(), displaySmall = base.displaySmall.ui(),
-    headlineLarge = base.headlineLarge.ui(), headlineMedium = base.headlineMedium.ui(), headlineSmall = base.headlineSmall.ui(),
-    titleLarge = base.titleLarge.ui().copy(fontWeight = FontWeight.SemiBold, letterSpacing = 0.5.sp),
-    titleMedium = base.titleMedium.ui().copy(fontWeight = FontWeight.SemiBold),
-    titleSmall = base.titleSmall.ui(),
-    bodyLarge = base.bodyLarge.ui(), bodyMedium = base.bodyMedium.ui(), bodySmall = base.bodySmall.ui(),
-    labelLarge = base.labelLarge.ui(), labelMedium = base.labelMedium.ui(),
-    labelSmall = base.labelSmall.ui().copy(letterSpacing = 1.2.sp)
+private fun TextStyle.ui(p: TypographyPreferences) = copy(
+    fontFamily = InstrumentSans, fontSize = fontSize * p.scale, fontWeight = FontWeight(p.weight),
+    letterSpacing = letterSpacing + p.tracking.sp, lineHeight = lineHeight * p.lineHeight
 )
-
-val MonoStyle get() = TextStyle(fontFamily = JetBrainsMono, fontSize = 12.sp)
+private fun typographyFor(p: TypographyPreferences) = Typography(
+    displayLarge = base.displayLarge.ui(p), displayMedium = base.displayMedium.ui(p), displaySmall = base.displaySmall.ui(p),
+    headlineLarge = base.headlineLarge.ui(p), headlineMedium = base.headlineMedium.ui(p), headlineSmall = base.headlineSmall.ui(p),
+    titleLarge = base.titleLarge.ui(p), titleMedium = base.titleMedium.ui(p), titleSmall = base.titleSmall.ui(p),
+    bodyLarge = base.bodyLarge.ui(p), bodyMedium = base.bodyMedium.ui(p), bodySmall = base.bodySmall.ui(p),
+    labelLarge = base.labelLarge.ui(p), labelMedium = base.labelMedium.ui(p), labelSmall = base.labelSmall.ui(p)
+)
+val MonoStyle get() = TextStyle(
+    fontFamily = JetBrainsMono, fontSize = 12.sp * TypographyStudioController.preferences.scale,
+    fontWeight = FontWeight(TypographyStudioController.preferences.weight),
+    letterSpacing = TypographyStudioController.preferences.tracking.sp,
+    lineHeight = 16.sp * TypographyStudioController.preferences.lineHeight
+)
 
 @Composable
 fun GirassolTheme(content: @Composable () -> Unit) {
@@ -103,5 +162,5 @@ fun GirassolTheme(content: @Composable () -> Unit) {
         onSurface = Lumon.Cream, surfaceVariant = Lumon.SurfaceHigh, onSurfaceVariant = Lumon.CreamDim,
         surfaceContainer = Lumon.Surface, surfaceContainerHigh = Lumon.SurfaceHigh, outline = Lumon.Outline, error = Lumon.Danger
     )
-    MaterialTheme(colorScheme = scheme, typography = typography, content = content)
+    MaterialTheme(colorScheme = scheme, typography = typographyFor(TypographyStudioController.preferences), content = content)
 }

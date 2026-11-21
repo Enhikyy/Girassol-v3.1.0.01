@@ -25,6 +25,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.enhikyy.girassol.render3d.PovTelemetry
+import com.enhikyy.girassol.ui.glass.GlassTone
+import com.enhikyy.girassol.ui.glass.liquidGlass
+import com.enhikyy.girassol.ui.theme.TypographyStudioController
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -35,15 +38,16 @@ private object Oled {
     val Cyan = Color(0xFF5FE6F2)
     val Amber = Color(0xFFFFB547)
     val Dim = Color(0xFF7C8A8C)
-    val mono = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 14.sp)
+    val mono get() = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp * TypographyStudioController.preferences.scale, fontWeight = androidx.compose.ui.text.font.FontWeight(TypographyStudioController.preferences.weight), letterSpacing = TypographyStudioController.preferences.tracking.sp, lineHeight = 14.sp * TypographyStudioController.preferences.lineHeight)
 }
 
 /** HUD diegético do POV: setor e coordenadas, hora simulada, objetivo e pensamento atual. */
 @Composable
 fun PovHud(t: PovTelemetry, simTime: String, modifier: Modifier = Modifier) {
     Column(
-        modifier.widthIn(max = 260.dp).clip(RoundedCornerShape(10.dp)).background(Oled.Panel)
-            .border(1.dp, Oled.Edge, RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 8.dp).testTag("pov_hud"),
+        modifier.widthIn(max = 260.dp).liquidGlass(shape = RoundedCornerShape(10.dp), tone = GlassTone.DENSE, elevation = 8.dp, tint = Oled.Panel, backdrop = false)
+            .clip(RoundedCornerShape(10.dp)).border(1.dp, Oled.Edge, RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp).testTag("pov_hud"),
         verticalArrangement = Arrangement.spacedBy(2.dp)
     ) {
         Text("POV · ${t.name}", style = Oled.mono.copy(fontSize = 12.sp), color = Oled.Amber, maxLines = 1, overflow = TextOverflow.Ellipsis)

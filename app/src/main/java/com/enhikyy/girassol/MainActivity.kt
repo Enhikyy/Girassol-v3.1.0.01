@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -30,6 +31,7 @@ import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.Public
+import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -80,6 +82,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import com.enhikyy.girassol.ui.screens.WorldScreen
 import com.enhikyy.girassol.ui.theme.GirassolTheme
 import com.enhikyy.girassol.ui.theme.Lumon
+import com.enhikyy.girassol.ui.theme.TypographyStudioController
+import com.enhikyy.girassol.ui.screens.TypographyStudioSheet
+import com.enhikyy.girassol.ui.glass.GlassPerformanceController
 import kotlinx.coroutines.launch
 
 /** v3.6: quatro abas, Chat como principal. */
@@ -102,6 +107,8 @@ class MainActivity : ComponentActivity() {
         }
         com.enhikyy.girassol.render3d.GpuCalibration.ensure(this)
         com.enhikyy.girassol.ui.theme.ThemeController.load(this)
+        TypographyStudioController.load(this)
+        GlassPerformanceController.load(this)
         setContent { GirassolTheme { GirassolApp() } }
     }
 }
@@ -111,6 +118,7 @@ private fun GirassolApp() {
     var tab by rememberSaveable { mutableStateOf(Tab.CHAT) }
     var selectedCitizen by rememberSaveable { mutableStateOf<String?>(null) }
     var drawerOpen by rememberSaveable { mutableStateOf(false) }
+    var typographyOpen by rememberSaveable { mutableStateOf(false) }
     val openMenu: () -> Unit = { drawerOpen = true }
 
     // v3.9: as telas são o "fundo" do vidro; navegação flutuante e gaveta refratam o conteúdo real.
@@ -142,13 +150,14 @@ private fun GirassolApp() {
         }
     ) {
         FloatingNavBar(tab, { tab = it; selectedCitizen = null; drawerOpen = false }, Modifier.align(Alignment.BottomCenter))
-        GlassDrawer(drawerOpen, onClose = { drawerOpen = false }) { t -> tab = t; selectedCitizen = null; drawerOpen = false }
+        GlassDrawer(drawerOpen, onClose = { drawerOpen = false }, onTypography = { drawerOpen = false; typographyOpen = true }) { t -> tab = t; selectedCitizen = null; drawerOpen = false }
     }
+    if (typographyOpen) TypographyStudioSheet(onDismiss = { typographyOpen = false })
 }
 
 /** Gaveta Liquid Glass: navegação limpa + seletor dos 15 temas nativos (grade de 2 colunas). */
 @Composable
-private fun GlassDrawer(open: Boolean, onClose: () -> Unit, onNavigate: (Tab) -> Unit) {
+private fun GlassDrawer(open: Boolean, onClose: () -> Unit, onTypography: () -> Unit, onNavigate: (Tab) -> Unit) {
     val progress by animateFloatAsState(if (open) 1f else 0f, GlassMotion.spec(), label = "drawer")
     if (progress <= 0.001f && !open) return
     if (open) BackHandler(onBack = onClose)
@@ -168,9 +177,13 @@ private fun GlassDrawer(open: Boolean, onClose: () -> Unit, onNavigate: (Tab) ->
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text("GIRASSOL", style = MaterialTheme.typography.titleLarge, color = Lumon.Sunflower, modifier = Modifier.padding(4.dp))
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(Shapes.Capsule).clickable(role = Role.Button, onClick = onTypography).padding(horizontal = 12.dp, vertical = 10.dp).testTag("open_typography_studio"), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Icon(Icons.Outlined.TextFields, contentDescription = null, tint = Lumon.Sunflower, modifier = Modifier.size(22.dp))
+                    Text("Typography Studio", style = MaterialTheme.typography.titleSmall, color = Lumon.Cream)
+                }
                 for (t in Tab.entries) {
                     Row(
-                        Modifier.fillMaxWidth().clip(Shapes.Capsule).clickable(role = Role.Button) { onNavigate(t) }
+                        Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(Shapes.Capsule).clickable(role = Role.Button) { onNavigate(t) }
                             .padding(horizontal = 12.dp, vertical = 10.dp).testTag("drawer_tab_${t.name}"),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
@@ -210,7 +223,7 @@ private fun FloatingNavBar(current: Tab, onSelect: (Tab) -> Unit, modifier: Modi
             val sel = t == current
             val selAnim by animateFloatAsState(if (sel) 1f else 0f, GlassMotion.spec(), label = "tab")
             Column(
-                Modifier.weight(1f).clip(Shapes.Capsule)
+                Modifier.weight(1f).heightIn(min = 48.dp).clip(Shapes.Capsule)
                     .background(Lumon.Sunflower.copy(alpha = 0.18f * selAnim))
                     .clickable(role = Role.Tab) { onSelect(t) }
                     .semantics { selected = sel; contentDescription = "aba ${t.label}" }
