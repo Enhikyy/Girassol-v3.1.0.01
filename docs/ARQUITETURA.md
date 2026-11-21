@@ -236,8 +236,9 @@ a importação depois.
   amostrados em projeção triplanar com normal por derivadas de tela. O nível 0 é enviado à GPU e os mipmaps são
   gerados lá (`generateMipmaps`), porque o `setImage` Java do Filament 1.75.1 calcula errado o tamanho dos
   níveis > 0; se a textura falhar, uma neutra 1×1 entra no lugar e o 3D segue.
-- Cidadãos articulados: 7 ossos (tronco, cabeça, boca, braços, pernas) com skinning rígido;
-  `CitizenRig.pose` combina `CitizenGrowth.proportions` (altura, cabeça, membros), a cadência
+- Cidadãos articulados: 7 ossos (tronco, cabeça, boca, braços, pernas) com skinning rígido feito na CPU
+  (`CpuSkinning`, ~170 vértices por cidadão, buffer duplo): a variante de skinning do Filament estoura o
+  limite de 256 vetores de uniformes do vertex shader em GPUs modestas e no SwiftShader. `CitizenRig.pose` combina `CitizenGrowth.proportions` (altura, cabeça, membros), a cadência
   `gaitCyclesPerTick` × TPS efetivo, digitação nos terminais CRT e a amplitude RMS do Pocket-TTS.
 - Temas: 15 paletas nativas; `Wcag.audit` compõe cada superfície translúcida sobre o fundo do tema, preto e
   branco e exige ≥ 4,5:1 no pior caso para texto primário e secundário.

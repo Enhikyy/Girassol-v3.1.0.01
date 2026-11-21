@@ -7,6 +7,7 @@ import android.view.Surface
 import android.view.SurfaceView
 import com.enhikyy.girassol.audio.VoiceAmplitude
 import com.enhikyy.girassol.core.render.CitizenRig
+import com.enhikyy.girassol.core.render.CpuSkinning
 import com.enhikyy.girassol.core.render.Mat4
 import com.enhikyy.girassol.core.world.ActionType
 import com.enhikyy.girassol.core.world.AgentView
@@ -111,14 +112,19 @@ class FilamentCityRenderer(
     private val rigStates = HashMap<String, CitizenRig.State>()
     private val agentViews = HashMap<String, AgentView>()
     private val boneScratch = FloatArray(CitizenRig.BONES * 16)
-    private val boneBuffer: ByteBuffer = ByteBuffer.allocateDirect(CitizenRig.BONES * 16 * 4).order(ByteOrder.nativeOrder())
+    private lateinit var agentMesh: CityMeshBuilder.RiggedMesh
+    private lateinit var skinScratch: FloatArray
+    /** Malha própria por cidadão: posições reescritas a cada quadro pelo skinning na CPU. */
+    private class AgentGpu(val entity: Int, val mi: MaterialInstance, val vb: VertexBuffer, val positions: Array<ByteBuffer>) {
+        /** Buffer duplo: o driver do Filament lê o envio anterior de forma assíncrona. */
+        var flip = 0
+    }
 
     private var cityEntity = 0; private var cityVb: VertexBuffer? = null; private var cityIb: IndexBuffer? = null
     private var glowEntity = 0; private var glowVb: VertexBuffer? = null; private var glowIb: IndexBuffer? = null
-    private lateinit var agentVb: VertexBuffer
     private lateinit var agentIb: IndexBuffer
     private var agentIndexCount = 0
-    private val agentEntities = HashMap<String, Pair<Int, MaterialInstance>>()
+    private val agentEntities = HashMap<String, AgentGpu>()
     private val visual = HashMap<String, FloatArray>()
     private var targets: Map<String, FloatArray> = emptyMap()
     private var meshKey = Long.MIN_VALUE
@@ -221,8 +227,8 @@ class FilamentCityRenderer(
         carpetTex = PbrTextures.load(context, engine, PbrTextures.CARPET)
         cityMi = cityMat.createInstance().apply { setParameter("tint", 1f, 1f, 1f, 1f); setParameter("emissiveBoost", 1.2f); bindDetail(this) }
         glowMi = glowMat.createInstance().apply { setParameter("size", 0.55f); setParameter("intensity", 1.0f) }
-        val agentMesh = CityMeshBuilder.citizenMesh()
-        agentVb = riggedVertexBuffer(agentMesh)
+        agentMesh = CityMeshBuilder.citizenMesh()
+        skinScratch = FloatArray(agentMesh.positions.size)
         agentIb = indexBuffer(agentMesh.indices)
         agentIndexCount = agentMesh.indices.size
         initPostPass()
@@ -366,7 +372,7 @@ class FilamentCityRenderer(
         applyEffectLevel(l)
         configurePost()
         bindDetail(cityMi)
-        for ((_, pair) in agentEntities) bindDetail(pair.second)
+        for ((_, g) in agentEntities) bindDetail(g.mi)
         lastSnapshot?.let { rebuildCity(it) }
         fpsGovernor.reset()
         Render3dTelemetry.update { it.copy(effectLevel = l.label) }
@@ -396,22 +402,19 @@ class FilamentCityRenderer(
         return vb
     }
 
-    /** Cidadão articulado: posição, cor e skinning rígido (1 osso por vértice, peso 1). */
+    /**
+     * Cidadão articulado: posição e cor. O skinning rígido (1 osso por vértice) é feito na CPU
+     * ([CpuSkinning]) porque a variante de skinning do Filament estoura o limite de 256 vetores
+     * de uniformes do vertex shader em GPUs modestas (e no SwiftShader), abortando o link.
+     */
     private fun riggedVertexBuffer(m: CityMeshBuilder.RiggedMesh): VertexBuffer {
         val n = m.positions.size / 3
-        val vb = VertexBuffer.Builder().bufferCount(4).vertexCount(n)
+        val vb = VertexBuffer.Builder().bufferCount(2).vertexCount(n)
             .attribute(VertexBuffer.VertexAttribute.POSITION, 0, VertexBuffer.AttributeType.FLOAT3, 0, 12)
             .attribute(VertexBuffer.VertexAttribute.COLOR, 1, VertexBuffer.AttributeType.FLOAT4, 0, 16)
-            .attribute(VertexBuffer.VertexAttribute.BONE_INDICES, 2, VertexBuffer.AttributeType.USHORT4, 0, 8)
-            .attribute(VertexBuffer.VertexAttribute.BONE_WEIGHTS, 3, VertexBuffer.AttributeType.FLOAT4, 0, 16)
             .build(engine)
         vb.setBufferAt(engine, 0, floatBuffer(m.positions))
         vb.setBufferAt(engine, 1, floatBuffer(m.colors))
-        val bi = ByteBuffer.allocateDirect(n * 8).order(ByteOrder.nativeOrder())
-        val sb = bi.asShortBuffer(); for (b in m.bones) { sb.put(b); sb.put(0); sb.put(0); sb.put(0) }
-        vb.setBufferAt(engine, 2, bi)
-        val w = FloatArray(n * 4); for (i in 0 until n) w[i * 4] = 1f
-        vb.setBufferAt(engine, 3, floatBuffer(w))
         return vb
     }
 
@@ -429,6 +432,12 @@ class FilamentCityRenderer(
         engine.renderableManager.destroy(postEntity)
         EntityManager.get().destroy(postEntity)
         postEntity = 0
+    }
+
+    private fun destroyAgent(g: AgentGpu) {
+        destroyRenderable(g.entity)
+        engine.destroyMaterialInstance(g.mi)
+        engine.destroyVertexBuffer(g.vb)
     }
 
     private fun destroyRenderable(entity: Int) {
@@ -504,27 +513,27 @@ class FilamentCityRenderer(
                 mi.setParameter("emissiveBoost", 0f)
                 bindDetail(mi)
                 engine.transformManager.create(ent)
+                val vb = riggedVertexBuffer(agentMesh)
                 RenderableManager.Builder(1)
-                    .boundingBox(Box(0f, 0.75f, 0f, 0.5f, 0.85f, 0.5f))
-                    .geometry(0, RenderableManager.PrimitiveType.TRIANGLES, agentVb, agentIb, 0, agentIndexCount)
+                    .boundingBox(Box(0f, 0.75f, 0f, 0.6f, 0.9f, 0.6f))
+                    .geometry(0, RenderableManager.PrimitiveType.TRIANGLES, vb, agentIb, 0, agentIndexCount)
                     .material(0, mi).castShadows(false).receiveShadows(false)
-                    .skinning(CitizenRig.BONES)
                     .build(engine, ent)
                 scene.addEntity(ent)
                 visual[a.id] = floatArrayOf(a.fx, 0f, a.fz)
-                Pair(ent, mi).also { agentEntities[a.id] = it }
+                val pb = Array(2) { ByteBuffer.allocateDirect(agentMesh.positions.size * 4).order(ByteOrder.nativeOrder()) }
+                AgentGpu(ent, mi, vb, pb).also { agentEntities[a.id] = it }
             }
             agentViews[a.id] = a
             val c = actionRgb(a.action)
             val glow = if (night) 1.6f else 1f
             val moodLift = (0.85f + 0.15f * a.mood.toFloat())
-            e.second.setParameter("tint", c[0] * glow * moodLift, c[1] * glow * moodLift, c[2] * glow * moodLift, 1f)
+            e.mi.setParameter("tint", c[0] * glow * moodLift, c[1] * glow * moodLift, c[2] * glow * moodLift, 1f)
         }
         val gone = agentEntities.keys.filter { it !in newTargets }
         for (id in gone) {
-            val (ent, mi) = agentEntities.remove(id) ?: continue
-            destroyRenderable(ent)
-            engine.destroyMaterialInstance(mi)
+            val g = agentEntities.remove(id) ?: continue
+            destroyAgent(g)
             visual.remove(id); rigStates.remove(id); agentViews.remove(id)
         }
         targets = newTargets
@@ -573,10 +582,9 @@ class FilamentCityRenderer(
     private fun renderFrame(frameTimeNanos: Long, dt: Float) {
         val tm = engine.transformManager
         val k = (dt * 6f).coerceAtMost(1f)
-        val rm = engine.renderableManager
         val tps = SimulationHub.status.value.effectiveTps.toFloat()
         val now = System.nanoTime()
-        for ((id, pair) in agentEntities) {
+        for ((id, g) in agentEntities) {
             val v = visual[id] ?: continue
             val t = targets[id] ?: continue
             v[0] += (t[0] - v[0]) * k; v[2] += (t[2] - v[2]) * k
@@ -587,9 +595,11 @@ class FilamentCityRenderer(
                 maturity = a?.maturity ?: 1f, vx = a?.vx ?: 0f, vz = a?.vz ?: 0f, ticksPerSecond = tps,
                 typing = a?.typing == true, amplitude = VoiceAmplitude.level(id, now), dt = dt), boneScratch)
             val m = Mat4.mul(Mat4.translate(v[0], v[1], v[2]), root)
-            tm.setTransform(tm.getInstance(pair.first), m)
-            boneBuffer.clear(); boneBuffer.asFloatBuffer().put(boneScratch); boneBuffer.rewind()
-            rm.setBonesAsMatrices(rm.getInstance(pair.first), boneBuffer, CitizenRig.BONES, 0)
+            tm.setTransform(tm.getInstance(g.entity), m)
+            CpuSkinning.skin(agentMesh.positions, agentMesh.bones, boneScratch, skinScratch)
+            val pb = g.positions[g.flip]; g.flip = g.flip xor 1
+            pb.clear(); pb.asFloatBuffer().put(skinScratch); pb.rewind()
+            g.vb.setBufferAt(engine, 0, pb)
         }
         val eye = camera.eye(); val tgt = camera.target()
         fCamera.lookAt(eye.x.toDouble(), eye.y.toDouble(), eye.z.toDouble(), tgt.x.toDouble(), tgt.y.toDouble(), tgt.z.toDouble(), 0.0, 1.0, 0.0)
@@ -631,7 +641,7 @@ class FilamentCityRenderer(
         if (!initialized) return
         initialized = false
         if (!headless) uiHelper.detach()
-        for ((_, pair) in agentEntities) { destroyRenderable(pair.first); engine.destroyMaterialInstance(pair.second) }
+        for ((_, g) in agentEntities) destroyAgent(g)
         agentEntities.clear(); visual.clear(); rigStates.clear(); agentViews.clear()
         view.setRenderTarget(null)
         renderTarget?.let { engine.destroyRenderTarget(it) }; rtColor?.let { engine.destroyTexture(it) }; rtDepth?.let { engine.destroyTexture(it) }
@@ -643,7 +653,7 @@ class FilamentCityRenderer(
         destroyRenderable(cityEntity); destroyRenderable(glowEntity)
         cityVb?.let { engine.destroyVertexBuffer(it) }; cityIb?.let { engine.destroyIndexBuffer(it) }
         glowVb?.let { engine.destroyVertexBuffer(it) }; glowIb?.let { engine.destroyIndexBuffer(it) }
-        engine.destroyVertexBuffer(agentVb); engine.destroyIndexBuffer(agentIb)
+        engine.destroyIndexBuffer(agentIb)
         engine.destroyMaterialInstance(cityMi); engine.destroyMaterialInstance(glowMi)
         engine.destroyMaterial(cityMat); engine.destroyMaterial(glowMat)
         engine.destroyTexture(concreteTex); engine.destroyTexture(carpetTex)

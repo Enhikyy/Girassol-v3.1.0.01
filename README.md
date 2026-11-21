@@ -49,7 +49,7 @@ Os 11 pontos do adendo de fechamento, com onde cada um vive no código:
 8. Pós-processamento `girassol_dehancer_post.filamat` (bloom, halação vermelho-alaranjada, sombras densas e grão
    Kodak) numa segunda View sobre um RenderTarget, e corredores liminares Backrooms ligando os laboratórios
    Severance/Lumon às praças e hortas da ala Modernismo Tropical (`core/render/BackroomsCorridors.kt`).
-9. Crescimento infantil → adulto (`CitizenGrowth`) e esqueleto procedural de 7 ossos com skinning no Filament
+9. Crescimento infantil → adulto (`CitizenGrowth`) e esqueleto procedural de 7 ossos com skinning rígido na CPU enviado ao Filament
    (`core/render/CitizenRig.kt`): passada sincronizada com a velocidade ORCA/RVO2, braços no teclado nos
    terminais CRT e boca/gesto pela amplitude vocal do Pocket-TTS (`VoiceAmplitude`).
 10. 15 temas nativos com contraste WCAG AA ≥ 4,5:1 (pior caso sobre superfícies translúcidas) entre Instrument Sans /
