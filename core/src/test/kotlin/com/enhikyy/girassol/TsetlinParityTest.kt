@@ -65,7 +65,7 @@ class TsetlinParityTest {
         repeat(25) { source.trainStep(features, it % 2 == 0) }
         val v2 = source.serialize()
 
-        val legacy = java.nio.ByteBuffer.allocate(20 + 10 + 8 * 10 * 4)
+        val legacy = java.nio.ByteBuffer.allocate(20 + 10 + 8 * 10 * 2 * 4)
             .order(java.nio.ByteOrder.LITTLE_ENDIAN)
             .putInt(0x47525354)
             .putInt(8).putInt(10).putInt(32).putInt(5)
