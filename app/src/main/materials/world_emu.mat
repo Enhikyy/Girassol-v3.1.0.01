@@ -3,7 +3,7 @@
 // cinza uniforme ou pretos), então aqui o sombreamento é feito à mão em material unlit, como na
 // v3: mesmos parâmetros e texturas do world_pbr, Lambert do sol + ambiente do céu já
 // convertidos para luminância de tela pela MESMA câmera física (WorldExposure), AO do ORM e
-// emissivo. Celulares reais continuam no world_pbr (PBR completo).
+// emissivo, tonemapping ACES e sRGB no próprio shader. Celulares reais continuam no world_pbr.
 material {
     name : girassol_world_emu,
     shadingModel : unlit,
@@ -52,6 +52,12 @@ fragment {
         float up = 0.55 + 0.45 * fn.y;
         vec3 lit = base * (materialParams.skyAmbient.rgb * up * ao + materialParams.sunColor.rgb * ndl * materialParams.sunDirAmount.w);
         vec3 e = texture(materialParams_emissiveTex, uv).rgb * materialParams.emissiveColor.rgb * materialParams.emissiveColor.w;
-        material.baseColor = vec4(lit + e, 1.0);
+        // no emulador o pós do Filament fica DESLIGADO (a LUT 3D de color grading sai corrompida no
+        // SwiftShader: cor magenta/verde, branco e NaN → preto). Tonemapping ACES (ajuste de
+        // Narkowicz) + codificação sRGB feitos aqui, saída já em valores de tela.
+        vec3 c = max(lit + e, vec3(0.0));
+        c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), 0.0, 1.0);
+        c = pow(c, vec3(1.0 / 2.2));
+        material.baseColor = vec4(c, 1.0);
     }
 }

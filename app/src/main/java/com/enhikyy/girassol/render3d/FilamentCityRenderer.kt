@@ -858,6 +858,11 @@ class FilamentCityRenderer(
     private fun applyEffectLevel(l: EffectLevel) {
         val p = CinematicProfile.forLevel(preset, l)
         view.setShadowingEnabled(p.castShadows)
+        if (WorldGpu.softwareGl) {
+            // emulador: sem pós do Filament (bloom, LUT 3D) — o world_emu entrega valores de tela
+            view.setPostProcessingEnabled(false)
+            return
+        }
         if (!l.postProcessing) {
             view.setPostProcessingEnabled(false)
             return
@@ -1189,8 +1194,9 @@ class FilamentCityRenderer(
         for (p in worldParts) p.mi?.let { set(it) }
         for ((_, mi) in citizenMis) set(mi)
         // céu do emulador: cor de fundo na mesma escala de tela (sem Skybox/cubemap)
-        val sky = if (preset == WorldPreset.LUMON_INTERIOR) doubleArrayOf(0.02, 0.02, 0.025, 1.0)
-            else doubleArrayOf((tint[0] * skyAmt * 2.2f).toDouble(), (tint[1] * skyAmt * 2.2f).toDouble(), (tint[2] * skyAmt * 2.2f).toDouble(), 1.0)
+        fun display(x: Float): Double { val c = x.coerceAtLeast(0f); val t = ((c * (2.51f * c + 0.03f)) / (c * (2.43f * c + 0.59f) + 0.14f)).coerceIn(0f, 1f); return Math.pow(t.toDouble(), 1.0 / 2.2) }
+        val sky = if (preset == WorldPreset.LUMON_INTERIOR) doubleArrayOf(display(0.01f), display(0.01f), display(0.012f), 1.0)
+            else doubleArrayOf(display(tint[0] * skyAmt * 2.2f), display(tint[1] * skyAmt * 2.2f), display(tint[2] * skyAmt * 2.2f), 1.0)
         renderer.setClearOptions(Renderer.ClearOptions().apply { clear = true; clearColor = sky })
     }
 
