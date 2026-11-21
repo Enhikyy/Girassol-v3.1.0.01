@@ -156,10 +156,10 @@ internal object WorldGpu {
         }.getOrElse { Log.w(TAG, "IBL ${phase.label} falhou", it); null }
     }
 
-    class Ibl(val phase: TimePhase, val cubemap: Texture, val light: IndirectLight, val skybox: Skybox, val sh: FloatArray) {
+    class Ibl(val phase: TimePhase, val cubemap: Texture?, val light: IndirectLight, val skybox: Skybox, val sh: FloatArray) {
         /** Irradiância (já dividida por π, convenção do Filament) na direção +Y — calibra a intensidade em lux. */
         val upIrradiance: Float get() = shEval(sh, 0f, 1f, 0f)
-        fun destroy(engine: Engine) { engine.destroyIndirectLight(light); engine.destroySkybox(skybox); engine.destroyTexture(cubemap) }
+        fun destroy(engine: Engine) { engine.destroyIndirectLight(light); engine.destroySkybox(skybox); cubemap?.let { engine.destroyTexture(it) } }
     }
 
     /** Avalia o SH pré-escalado (luminância Rec.709) na direção (x, y, z). */
@@ -171,7 +171,18 @@ internal object WorldGpu {
     }
 
     fun uploadIbl(engine: Engine, d: IblData, targetLux: Float): Ibl {
-        val levels = ProceduralAssetsNative.mipLevels(d.faceSize)
+        if (softwareGl) {
+            // GL por software (emulador): enviar o cubemap derruba o tradutor GL do emulador. Só SH3
+            // (irradiância difusa, sem reflexo especular do céu) e céu de cor sólida — aproximação.
+            val light = IndirectLight.Builder().irradiance(3, d.sh).intensity(1f).build(engine)
+            val k = (targetLux / Math.PI.toFloat()) / shEval(d.sh, 0f, 1f, 0f)
+            fun ch(c: Int) = (d.sh[c] * 0.2820948f * k / 30000f).coerceIn(0f, 1f)
+            val sky = Skybox.Builder().color(ch(0), ch(1), ch(2), 1f).build(engine)
+            return Ibl(d.phase, null, light, sky, d.sh)
+        }
+        // GL por software: os mips do cubemap (enviados linha a linha por causa do bug do JNI) derrubam o
+        // emulador; usa só o nível 0 (reflexo sem pré-filtragem por rugosidade) — aproximação documentada.
+        val levels = if (softwareGl) 1 else ProceduralAssetsNative.mipLevels(d.faceSize)
         val tex = Texture.Builder().width(d.faceSize).height(d.faceSize).levels(levels).sampler(Texture.Sampler.SAMPLER_CUBEMAP)
             .format(Texture.InternalFormat.RGBA16F).build(engine)
         var off = 0
