@@ -1218,18 +1218,50 @@ class WorldCore(
             m.recentAccessTicks += state.tick
             m.tdPredictionError *= 0.5
         }
+        val semanticRelations = report.semanticRelations.associateBy { it.summary }
         for (summary in report.promotedSemanticSummaries) {
             if (c.memories.none { it.layer == MemoryLayer.SEMANTIC && it.content == summary }) {
-                c.memories += AssociativeMemoryNode(c.nextMemoryId++, c.id, MemoryLayer.SEMANTIC, summary,
-                    linkedSetOf("SCHEMA"), linkedSetOf(), salience = 0.7, confidence = 0.9, sourceEventId = null,
-                    sourceAgentId = null, createdTick = state.tick, verifiedByWorldCore = true, qUtility = 0.4)
+                val relation = semanticRelations[summary]
+                val tags = linkedSetOf("SCHEMA").apply { relation?.topicTag?.let(::add) }
+                c.memories += AssociativeMemoryNode(
+                    id = c.nextMemoryId++,
+                    ownerAgentId = c.id,
+                    layer = MemoryLayer.SEMANTIC,
+                    content = summary,
+                    tags = tags,
+                    entityIds = relation?.entityIds ?: emptySet(),
+                    linkedMemoryIds = relation?.sourceEpisodeIds?.toMutableSet() ?: mutableSetOf(),
+                    salience = 0.7,
+                    confidence = relation?.meanConfidence ?: 0.9,
+                    sourceEventId = null,
+                    sourceAgentId = c.id,
+                    createdTick = state.tick,
+                    verifiedByWorldCore = true,
+                    qUtility = 0.4
+                )
             }
         }
+        val proceduralRelations = report.proceduralRelations.associateBy { it.macro }
         for (macro in report.distilledProceduralMacros) {
             if (c.memories.none { it.layer == MemoryLayer.PROCEDURAL && it.content == macro }) {
-                c.memories += AssociativeMemoryNode(c.nextMemoryId++, c.id, MemoryLayer.PROCEDURAL, macro,
-                    linkedSetOf("MACRO"), linkedSetOf(), salience = 0.8, confidence = 0.95, sourceEventId = null,
-                    sourceAgentId = null, createdTick = state.tick, verifiedByWorldCore = true, qUtility = 0.6)
+                val relation = proceduralRelations[macro]
+                val tags = linkedSetOf("MACRO").apply { addAll(relation?.tags.orEmpty()) }
+                c.memories += AssociativeMemoryNode(
+                    id = c.nextMemoryId++,
+                    ownerAgentId = c.id,
+                    layer = MemoryLayer.PROCEDURAL,
+                    content = macro,
+                    tags = tags,
+                    entityIds = relation?.entityIds ?: emptySet(),
+                    linkedMemoryIds = relation?.sourceEpisodeId?.let { mutableSetOf(it) } ?: mutableSetOf(),
+                    salience = 0.8,
+                    confidence = relation?.confidence ?: 0.95,
+                    sourceEventId = null,
+                    sourceAgentId = c.id,
+                    createdTick = state.tick,
+                    verifiedByWorldCore = true,
+                    qUtility = 0.6
+                )
             }
         }
         val pruned = report.prunedNodeIds.toSet()
