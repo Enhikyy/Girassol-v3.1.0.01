@@ -180,7 +180,7 @@ object CityMeshBuilder {
     }
 
     /** Postes de luz (praças e a cada 4 tiles de rua) + janelas acesas → sprites de halation. */
-    fun glowSprites(width: Int, tiles: IntArray, objects: List<ObjectView>, maxSprites: Int = 900): GlowSprites {
+    fun glowSprites(width: Int, tiles: IntArray, objects: List<ObjectView>, maxSprites: Int = 240): GlowSprites {
         val centers = ArrayList<FloatArray>()
         val types = TileType.values()
         for (z in 0 until width) for (x in 0 until width) {

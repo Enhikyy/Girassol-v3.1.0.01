@@ -39,7 +39,9 @@ import com.enhikyy.girassol.nativebridge.NativeDiagnosticReport
 import com.enhikyy.girassol.nativebridge.NativeDiagnostics
 import com.enhikyy.girassol.service.GirassolContinuousService
 import com.enhikyy.girassol.sim.SimulationHub
+import com.enhikyy.girassol.ui.components.Collapsible
 import com.enhikyy.girassol.ui.components.KeyValue
+import com.enhikyy.girassol.ui.components.Shapes
 import com.enhikyy.girassol.ui.components.SectionCard
 import com.enhikyy.girassol.ui.components.f
 import com.enhikyy.girassol.ui.theme.Lumon
@@ -78,9 +80,11 @@ fun SystemScreen() {
                 KeyValue("Estado", if (status.running) "rodando" else "pausado")
                 KeyValue("Ticks/s alvo · efetivo", "${status.targetTps} · ${status.effectiveTps.f(1)}")
                 KeyValue("Estado térmico", thermalLabel(status.thermalStatus) + if (status.thermalCapped) " (limitado)" else "")
+                KeyValue("Perfil do aparelho", LocalLlmManager.profile.label + " · " + LocalLlmManager.profile.description)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    SimulationHub.SPEEDS.filter { hw == null || it <= hw!!.maxTicksPerSecond }.forEach { s ->
-                        FilterChip(selected = status.targetTps == s, onClick = { SimulationHub.setSpeed(s) }, label = { Text("$s/s") })
+                    SimulationHub.SPEEDS.forEach { s ->
+                        FilterChip(selected = status.targetTps == s, onClick = { SimulationHub.setSpeed(s) }, label = { Text("${s}x") },
+                            shape = com.enhikyy.girassol.ui.components.Shapes.Capsule, modifier = Modifier.testTag("speed_$s"))
                     }
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -92,74 +96,8 @@ fun SystemScreen() {
                     style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
             }
         }
-        item {
-            SectionCard("Hardware (autodetectado)") {
-                val h = hw
-                if (h == null) Text("Detectando…", color = Lumon.CreamDim) else {
-                    KeyValue("Aparelho", "${h.manufacturer} ${h.model}")
-                    KeyValue("SoC", "${h.socManufacturer} ${h.socModel}")
-                    KeyValue("ABIs", h.abis.joinToString())
-                    KeyValue("Núcleos · RAM", "${h.cpuCores} · ${h.totalRamMb} MB")
-                    KeyValue("Classe de desempenho", h.performanceClass.toString())
-                    KeyValue("Nível · teto de ticks/s", "${h.tier.label} · ${h.maxTicksPerSecond}")
-                    KeyValue("Núcleo nativo C++", if (h.nativeLoaded) "carregado" else "indisponível (fallback Kotlin)")
-                    h.nativeCapabilities.toSortedMap().forEach { (k, v) -> KeyValue(k, v) }
-                }
-            }
-        }
-        item { LlmCpuPanel() }
-        item { MemoryPanel() }
-        item { PowerPanel() }
-        item { GpuPanel() }
+        item { FounderModelsPanel() }
         item { SigningPanel() }
-        item {
-            SectionCard("Módulos nativos C++") {
-                ModuleSwitch("Navegação A* nativa", "toggle_nav", toggles.nativeNavigation,
-                    if (parity.navOk) "paridade OK ${parity.navSignature}" else "sem paridade: Kotlin") { v -> SimulationHub.updateModules(context) { it.copy(nativeNavigation = v) } }
-                ModuleSwitch("LoRA on-device no sono", "toggle_lora", toggles.nativeLora,
-                    if (parity.loraOk) "paridade OK ${parity.loraSignature}" else "sem paridade: Kotlin") { v -> SimulationHub.updateModules(context) { it.copy(nativeLora = v) } }
-                ModuleSwitch("Áudio binaural (AAudio)", "toggle_audio", toggles.binauralAudio, audio) { v -> SimulationHub.updateModules(context) { it.copy(binauralAudio = v) } }
-                val voice by com.enhikyy.girassol.audio.CitizenVoice.status.collectAsStateWithLifecycle()
-                ModuleSwitch("Vozes TTS offline (pt-BR)", "toggle_tts", toggles.voiceTts,
-                    "${voice.message} · ${voice.spoken} falas") { v -> SimulationHub.updateModules(context) { it.copy(voiceTts = v) } }
-                ModuleSwitch("LLM local (llama.cpp + GBNF)", "toggle_llm", toggles.localLlm,
-                    "${llm.status.label}${if (!LocalLlmManager.engineCompiled) "" else " · orçamento ${llm.budgetMb} MB"}") { v -> SimulationHub.updateModules(context) { it.copy(localLlm = v) } }
-                KeyValue("Paridade dourada", parity.message, if (parity.navOk && parity.loraOk && parity.memoryOk) Lumon.Ok else Lumon.Sunflower)
-                KeyValue("Memória binária bit[256]", if (parity.memoryOk) "popcount C++ = Kotlin ${parity.memorySignature}" else "sem paridade: ${parity.memorySignature}")
-                KeyValue("Filament 3D", if (r3d.active) "${r3d.fps.f(0)} fps · ${r3d.vertices} vértices · ${r3d.citizens} cidadãos" else r3d.error.ifEmpty { "inativo (Modo Eco 2D)" })
-                Text("Backends C++ só substituem os Kotlin após reproduzirem as assinaturas douradas neste aparelho; trocar um módulo reconstrói o WorldCore sobre o mesmo estado.",
-                    style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
-            }
-        }
-        item {
-            SectionCard("Diagnóstico nativo") {
-                OutlinedButton(enabled = !diagRunning, modifier = Modifier.testTag("system_diagnostics"), onClick = {
-                    diagRunning = true
-                    scope.launch {
-                        report = withContext(Dispatchers.Default) { NativeDiagnostics.run() }
-                        withContext(Dispatchers.Default) { NativeModules.verifyParity() }
-                        diagRunning = false
-                    }
-                }) { Text(if (diagRunning) "Executando…" else "Executar autoteste e paridade C++") }
-                if (!GeaNativeBridge.isNativeLoaded) Text("Biblioteca nativa não carregada neste aparelho.", color = Lumon.Danger)
-                report?.let { r ->
-                    Column(Modifier.testTag("diag_result")) {
-                        KeyValue("Autoteste C++", r.selfTest)
-                        KeyValue("Paridade Tsetlin Kotlin↔C++", r.parity)
-                        KeyValue("Tsetlin nativo", r.benchmark)
-                        KeyValue("Tsetlin Kotlin", r.kotlinBenchmark)
-                    }
-                }
-                OutlinedButton(enabled = !benchRunning, modifier = Modifier.testTag("system_benchmark"), onClick = {
-                    benchRunning = true
-                    scope.launch {
-                        bench = withContext(Dispatchers.Default) { NativeDiagnostics.cpuBenchmark() }
-                        benchRunning = false
-                    }
-                }) { Text(if (benchRunning) "Medindo…" else "Benchmark de CPU") }
-                if (bench.isNotEmpty()) Text(bench, style = MonoStyle, color = Lumon.Cream, modifier = Modifier.testTag("benchmark_result"))
-            }
-        }
         item {
             SectionCard("Persistência e determinismo") {
                 KeyValue("Semente do mundo", status.seed.toString())
@@ -181,10 +119,80 @@ fun SystemScreen() {
                 if (status.lastMessage.isNotEmpty()) Text(status.lastMessage, style = MaterialTheme.typography.bodySmall, color = Lumon.Teal)
             }
         }
-        item { HashChainPanel(dash) }
-        item { MeshSyncPanel(dash) }
-        item { ThemesPanel() }
-        item { SectionCard("Voz dos cidadãos") { PocketTtsToggle() } }
+        item {
+            Collapsible("Detalhes técnicos do hardware", "hw_details_toggle",
+                subtitle = "CPU (avx2/dotprod/fp16), memória, GPU, energia, módulos C++ e diagnóstico") {
+            run {
+                SectionCard("Hardware (autodetectado)") {
+                    val h = hw
+                    if (h == null) Text("Detectando…", color = Lumon.CreamDim) else {
+                        KeyValue("Aparelho", "${h.manufacturer} ${h.model}")
+                        KeyValue("SoC", "${h.socManufacturer} ${h.socModel}")
+                        KeyValue("ABIs", h.abis.joinToString())
+                        KeyValue("Núcleos · RAM", "${h.cpuCores} · ${h.totalRamMb} MB")
+                        KeyValue("Classe de desempenho", h.performanceClass.toString())
+                        KeyValue("Nível · teto de ticks/s", "${h.tier.label} · ${h.maxTicksPerSecond}")
+                        KeyValue("Núcleo nativo C++", if (h.nativeLoaded) "carregado" else "indisponível (fallback Kotlin)")
+                        h.nativeCapabilities.toSortedMap().forEach { (k, v) -> KeyValue(k, v) }
+                    }
+                }
+            }
+            LlmCpuPanel()
+            MemoryPanel()
+            PowerPanel()
+            GpuPanel()
+            run {
+                SectionCard("Módulos nativos C++") {
+                    ModuleSwitch("Navegação A* nativa", "toggle_nav", toggles.nativeNavigation,
+                        if (parity.navOk) "paridade OK ${parity.navSignature}" else "sem paridade: Kotlin") { v -> SimulationHub.updateModules(context) { it.copy(nativeNavigation = v) } }
+                    ModuleSwitch("LoRA on-device no sono", "toggle_lora", toggles.nativeLora,
+                        if (parity.loraOk) "paridade OK ${parity.loraSignature}" else "sem paridade: Kotlin") { v -> SimulationHub.updateModules(context) { it.copy(nativeLora = v) } }
+                    ModuleSwitch("Áudio binaural (AAudio)", "toggle_audio", toggles.binauralAudio, audio) { v -> SimulationHub.updateModules(context) { it.copy(binauralAudio = v) } }
+                    val voice by com.enhikyy.girassol.audio.CitizenVoice.status.collectAsStateWithLifecycle()
+                    ModuleSwitch("Vozes TTS offline (pt-BR)", "toggle_tts", toggles.voiceTts,
+                        "${voice.message} · ${voice.spoken} falas") { v -> SimulationHub.updateModules(context) { it.copy(voiceTts = v) } }
+                    ModuleSwitch("LLM local (llama.cpp + GBNF)", "toggle_llm", toggles.localLlm,
+                        "${llm.status.label}${if (!LocalLlmManager.engineCompiled) "" else " · orçamento ${llm.budgetMb} MB"}") { v -> SimulationHub.updateModules(context) { it.copy(localLlm = v) } }
+                    KeyValue("Paridade dourada", parity.message, if (parity.navOk && parity.loraOk && parity.memoryOk) Lumon.Ok else Lumon.Sunflower)
+                    KeyValue("Memória binária bit[256]", if (parity.memoryOk) "popcount C++ = Kotlin ${parity.memorySignature}" else "sem paridade: ${parity.memorySignature}")
+                    KeyValue("Filament 3D", if (r3d.active) "${r3d.fps.f(0)} fps · ${r3d.vertices} vértices · ${r3d.citizens} cidadãos" else r3d.error.ifEmpty { "inativo (Modo Eco 2D)" })
+                    Text("Backends C++ só substituem os Kotlin após reproduzirem as assinaturas douradas neste aparelho; trocar um módulo reconstrói o WorldCore sobre o mesmo estado.",
+                        style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
+                }
+            }
+            run {
+                SectionCard("Diagnóstico nativo") {
+                    OutlinedButton(enabled = !diagRunning, modifier = Modifier.testTag("system_diagnostics"), onClick = {
+                        diagRunning = true
+                        scope.launch {
+                            report = withContext(Dispatchers.Default) { NativeDiagnostics.run() }
+                            withContext(Dispatchers.Default) { NativeModules.verifyParity() }
+                            diagRunning = false
+                        }
+                    }) { Text(if (diagRunning) "Executando…" else "Executar autoteste e paridade C++") }
+                    if (!GeaNativeBridge.isNativeLoaded) Text("Biblioteca nativa não carregada neste aparelho.", color = Lumon.Danger)
+                    report?.let { r ->
+                        Column(Modifier.testTag("diag_result")) {
+                            KeyValue("Autoteste C++", r.selfTest)
+                            KeyValue("Paridade Tsetlin Kotlin↔C++", r.parity)
+                            KeyValue("Tsetlin nativo", r.benchmark)
+                            KeyValue("Tsetlin Kotlin", r.kotlinBenchmark)
+                        }
+                    }
+                    OutlinedButton(enabled = !benchRunning, modifier = Modifier.testTag("system_benchmark"), onClick = {
+                        benchRunning = true
+                        scope.launch {
+                            bench = withContext(Dispatchers.Default) { NativeDiagnostics.cpuBenchmark() }
+                            benchRunning = false
+                        }
+                    }) { Text(if (benchRunning) "Medindo…" else "Benchmark de CPU") }
+                    if (bench.isNotEmpty()) Text(bench, style = MonoStyle, color = Lumon.Cream, modifier = Modifier.testTag("benchmark_result"))
+                }
+            }
+                HashChainPanel(dash)
+                SectionCard("Voz dos cidadãos") { PocketTtsToggle() }
+            }
+        }
         item {
             SectionCard("Zona de perigo") {
                 Button(onClick = { confirmReset = true }, colors = ButtonDefaults.buttonColors(containerColor = Lumon.Danger)) { Text("Reiniciar mundo") }
@@ -216,4 +224,67 @@ private fun ModuleSwitch(label: String, tag: String, checked: Boolean, detail: S
             colors = SwitchDefaults.colors(checkedThumbColor = Lumon.Background, checkedTrackColor = Lumon.Sunflower, uncheckedTrackColor = Lumon.SurfaceHigh)
         )
     }
+}
+
+/**
+ * Cidadãos-Modelo: cada .gguf importado (registro `registered_models` no SQLite WAL) com o
+ * fundador ligado a ele. Ativar/pausar troca o cidadão entre o próprio LLM e o deliberador
+ * simbólico; remover apaga o arquivo do armazenamento privado (o cidadão segue vivo, simbólico).
+ */
+@Composable
+fun FounderModelsPanel() {
+    val context = LocalContext.current
+    val models by LocalLlmManager.models.collectAsStateWithLifecycle()
+    val dash by SimulationHub.dashboard.collectAsStateWithLifecycle()
+    val llm by LocalLlmManager.stats.collectAsStateWithLifecycle()
+    val importer = rememberFounderImporter()
+    var confirmRemove by remember { mutableStateOf<String?>(null) }
+    val founders = dash?.citizens?.filter { it.alive && it.modelKey != null }?.associateBy { it.modelKey!! }.orEmpty()
+    val profile = LocalLlmManager.profile
+    SectionCard("Cidadãos-Modelo (${models.size} .gguf)", Modifier.testTag("founder_models")) {
+        if (!LocalLlmManager.engineCompiled) Text("Motor llama.cpp não compilado neste build: os cidadãos usam o deliberador simbólico.",
+            style = MaterialTheme.typography.bodySmall, color = Lumon.Sunflower)
+        if (models.isEmpty()) Text("Nenhum modelo importado. Cada .gguf (F16, BF16, Q8_0, Q5_K, Q4_K_M, Q4_0…) vira exatamente um cidadão fundador.",
+            style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
+        for (m in models) {
+            val f = founders[m.key]
+            val ramMb = LlmQuantPolicyRam.estimateMb(m.bytes, profile)
+            Column(Modifier.fillMaxWidth().testTag("model_row_${m.key}")) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(f?.let { "${it.name} · g${it.generation}" } ?: "sem cidadão", style = MaterialTheme.typography.titleSmall,
+                            color = if (f != null) Lumon.Sunflower else Lumon.CreamDim)
+                        Text("${m.displayName} · ${m.bytes / (1024 * 1024)} MB · ~$ramMb MB RAM ativa${if (llm.modelName == m.key) " · residente" else ""}",
+                            style = MonoStyle, color = Lumon.CreamDim, maxLines = 2)
+                    }
+                    Switch(checked = m.active, onCheckedChange = { SimulationHub.setModelActive(context, m.key, it) },
+                        modifier = Modifier.testTag("model_active_${m.key}"),
+                        colors = SwitchDefaults.colors(checkedThumbColor = Lumon.Background, checkedTrackColor = Lumon.Sunflower, uncheckedTrackColor = Lumon.SurfaceHigh))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (f == null) OutlinedButton(onClick = { importer(m.key) }, shape = Shapes.Control) { Text("Dar vida") }
+                    OutlinedButton(onClick = { confirmRemove = m.key }, shape = Shapes.Control) { Text("Remover") }
+                }
+            }
+        }
+        Button(enabled = LocalLlmManager.engineCompiled, onClick = { importer(null) }, shape = Shapes.Control,
+            modifier = Modifier.fillMaxWidth().testTag("system_import_gguf"),
+            colors = ButtonDefaults.buttonColors(containerColor = Lumon.Sunflower, contentColor = Lumon.Background)) { Text("Importar .gguf (novo fundador)") }
+        Text("Perfil ${profile.label}: n_ctx ${profile.nCtx}; os pesos ficam em mmap (páginas de arquivo, não heap) e um modelo fica residente por vez — os demais entram por turno.",
+            style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
+    }
+    confirmRemove?.let { key ->
+        AlertDialog(
+            onDismissRequest = { confirmRemove = null },
+            title = { Text("Remover $key?") },
+            text = { Text("O arquivo sai do armazenamento privado. O cidadão continua vivo com o deliberador simbólico (e a linhagem perde a mente herdada).") },
+            confirmButton = { TextButton(onClick = { LocalLlmManager.removeModel(context, key); confirmRemove = null }) { Text("Remover") } },
+            dismissButton = { TextButton(onClick = { confirmRemove = null }) { Text("Cancelar") } }
+        )
+    }
+}
+
+private object LlmQuantPolicyRam {
+    fun estimateMb(bytes: Long, p: com.enhikyy.girassol.llm.LlmQuantPolicy.DeviceProfile): Long =
+        com.enhikyy.girassol.llm.LlmQuantPolicy.activeRamEstimate(bytes, p.nCtx, p.kvType) / (1024 * 1024)
 }

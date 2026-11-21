@@ -203,15 +203,13 @@ val buildLlguidance by tasks.registering(CargoBuildLlguidance::class) {
 }
 
 // ----------------------------------------------------------------------------
-// v3.5 — modelos embutidos (todos verificados por SHA-256):
-//   -Pgirassol.embedModels=true|false (padrão false: builds de desenvolvimento leves)
+// v3.6 — "Adão e Eva": NENHUM modelo GGUF é embutido. O mundo nasce vazio (0 cidadãos) e o
+// usuário o povoa importando os próprios .gguf (1 modelo = 1 cidadão fundador).
+//   -Pgirassol.embedModels=true|false (padrão false): embute só o Sherpa-ONNX (SenseVoice +
+//   Pocket-TTS), verificado por SHA-256; texturas KTX2 e o runtime llama.cpp vão sempre.
 //   -Pgirassol.distribution=direto|play (padrão direto)
-// direto: o APK arm64-v8a leva o modelo rápido Q4_0 + Sherpa-ONNX (SenseVoice + Pocket-TTS)
-//         nos assets do módulo base — teto 1,90 GB (limite de 2,0 GB do Android para APK único).
-// play:   o .aab leva tudo em asset packs install-time (cada pack ≤ 1,5 GB; base + packs
-//         ≤ 4 GB): pack_rapido (Q4_0 + Sherpa) e o modelo profundo (~2,2 GB) dividido em
-//         pack_profundo_a/pack_profundo_b, remontado e verificado no 1º uso.
-// O modelo profundo também pode ser importado manualmente pelo SAF (qualquer .gguf válido).
+// direto: Sherpa nos assets do módulo base do APK arm64-v8a.
+// play:   Sherpa no asset pack install-time pack_rapido do .aab.
 // ----------------------------------------------------------------------------
 val embedModels = providers.gradleProperty("girassol.embedModels").map { it.toBoolean() }.getOrElse(false)
 val distribution = providers.gradleProperty("girassol.distribution").getOrElse("direto").lowercase()
@@ -236,8 +234,9 @@ fun downloadTask(id: String, a: VerifiedAsset) = tasks.register<DownloadVerified
     url.set(a.url); sha256.set(a.sha256)
     dest.set(thirdParty.map { it.file("models/${a.name}") })
 }
-val downloadFastModel = downloadTask("FastModel", fastModel)
-val downloadDeepModel = downloadTask("DeepModel", deepModel)
+// modelos GGUF de fábrica desativados na v3.6 (tarefas mantidas só para builds experimentais)
+val downloadFastModel = downloadTask("FastModel", fastModel).also { t -> t.configure { enabled = false } }
+val downloadDeepModel = downloadTask("DeepModel", deepModel).also { t -> t.configure { enabled = false } }
 val downloadSenseVoice = downloadTask("SenseVoice", senseVoice)
 val downloadPocketTts = downloadTask("PocketTts", pocketTts)
 
@@ -318,14 +317,14 @@ val packProfundoDirs = listOf("pack_profundo_a", "pack_profundo_b").map { rootPr
 
 val assembleModelAssets by tasks.registering(AssembleModelAssets::class) {
     enabled = embedModels
-    sourceArchives.from(downloadFastModel.flatMap { it.dest }, downloadSenseVoice.flatMap { it.dest }, downloadPocketTts.flatMap { it.dest })
+    sourceArchives.from(downloadSenseVoice.flatMap { it.dest }, downloadPocketTts.flatMap { it.dest })
     fastName.set(fastModel.name); fastSha.set(fastModel.sha256)
-    includeFast.set(true); includeSherpa.set(true)
+    includeFast.set(false); includeSherpa.set(true)
     outputDir.set(if (distribution == "play") rootProject.layout.projectDirectory.dir("pack_rapido/src/main/assets")
                   else layout.buildDirectory.dir("generated/girassolModels").get())
 }
 val splitDeepModel by tasks.registering(SplitDeepModel::class) {
-    enabled = embedModels && distribution == "play"
+    enabled = false
     model.set(downloadDeepModel.flatMap { it.dest })
     modelName.set(deepModel.name); sha.set(deepModel.sha256)
     packDirs.set(packProfundoDirs)
@@ -333,7 +332,7 @@ val splitDeepModel by tasks.registering(SplitDeepModel::class) {
 }
 val prepareAssetPacks by tasks.registering {
     enabled = embedModels && distribution == "play"
-    dependsOn(assembleModelAssets, splitDeepModel)
+    dependsOn(assembleModelAssets)
 }
 
 val sherpaVersion = "2.0.2"
@@ -360,8 +359,8 @@ android {
         applicationId = "com.enhikyy.girassol"
         minSdk = 33
         targetSdk = 35
-        versionCode = 3500000
-        versionName = "3.5.0.00"
+        versionCode = 3600000
+        versionName = "3.6.0.00"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "FILAMENT_VERSION", "\"$filamentVersion\"")
         buildConfigField("String", "DISTRIBUTION", "\"$distribution\"")
@@ -432,7 +431,7 @@ android {
     }
 
     // .aab (distribuição play): modelos em asset packs install-time.
-    if (embedModels && distribution == "play") assetPacks += listOf(":pack_rapido", ":pack_profundo_a", ":pack_profundo_b")
+    if (embedModels && distribution == "play") assetPacks += listOf(":pack_rapido")
     // GGUF/ONNX nunca comprimidos (cópia direta do AssetManager, sem inflar 2 GB na instalação)
     androidResources { noCompress += listOf("gguf", "onnx", "part", "ktx2") }
 

@@ -92,7 +92,7 @@ class CitizenRigTest {
 
 class BackroomsCorridorsTest {
     @Test fun corridorsLinkLumonLabsToTropicalWingDeterministically() {
-        val s = WorldRenderSnapshot.of(WorldCore.create(42L).state)
+        val s = WorldRenderSnapshot.of(WorldCore.create(42L, 24).state)
         val a = BackroomsCorridors.plan(s.widthTiles, s.tiles, s.objects)
         val b = BackroomsCorridors.plan(s.widthTiles, s.tiles, s.objects)
         assertTrue("nenhum corredor", a.isNotEmpty())

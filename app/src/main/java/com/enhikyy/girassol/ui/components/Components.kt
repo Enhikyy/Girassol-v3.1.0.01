@@ -2,6 +2,10 @@ package com.enhikyy.girassol.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.platform.testTag
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,6 +29,13 @@ import com.enhikyy.girassol.ui.theme.Lumon
 import com.enhikyy.girassol.ui.theme.MonoStyle
 import java.util.Locale
 
+/** v3.6: geometria editorial — cards/painéis/gavetas 28 dp, inputs/botões 20 dp, cápsulas circulares. */
+object Shapes {
+    val Card = RoundedCornerShape(28.dp)
+    val Control = RoundedCornerShape(20.dp)
+    val Capsule = androidx.compose.foundation.shape.CircleShape
+}
+
 fun Double.f(d: Int = 2): String = String.format(Locale.ROOT, "%.${d}f", this)
 
 @Composable
@@ -32,10 +43,10 @@ fun SectionCard(title: String, modifier: Modifier = Modifier, content: @Composab
     Column(
         modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(Shapes.Card)
             .background(Lumon.Surface)
-            .border(1.dp, Lumon.Outline, RoundedCornerShape(10.dp))
-            .padding(14.dp),
+            .border(1.dp, Lumon.Outline, Shapes.Card)
+            .padding(18.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Text(title.uppercase(Locale.ROOT), style = MaterialTheme.typography.labelSmall, color = Lumon.Teal)
@@ -88,7 +99,7 @@ fun MetricRow(vararg items: Pair<String, String>) {
 fun Pill(text: String, color: Color) {
     Text(
         text, style = MaterialTheme.typography.labelSmall, color = color,
-        modifier = Modifier.clip(RoundedCornerShape(50)).background(color.copy(alpha = 0.15f)).padding(horizontal = 8.dp, vertical = 2.dp)
+        modifier = Modifier.clip(androidx.compose.foundation.shape.CircleShape).background(color.copy(alpha = 0.15f)).padding(horizontal = 8.dp, vertical = 2.dp)
     )
 }
 
@@ -103,3 +114,37 @@ fun EmptyState(text: String) {
         Text(text, color = Lumon.CreamDim, style = MaterialTheme.typography.bodyMedium)
     }
 }
+
+/** Seção colapsável limpa (Arquiteto / Sistema): cabeçalho tocável, conteúdo recolhido por padrão. */
+@Composable
+fun Collapsible(title: String, tag: String, initiallyOpen: Boolean = false, subtitle: String = "", content: @Composable () -> Unit) {
+    var open by androidx.compose.runtime.saveable.rememberSaveable(tag) { androidx.compose.runtime.mutableStateOf(initiallyOpen) }
+    Column(
+        Modifier.fillMaxWidth().clip(Shapes.Card).background(Lumon.Surface)
+            .border(1.dp, Lumon.Outline, Shapes.Card)
+    ) {
+        Row(
+            Modifier.fillMaxWidth().clickable { open = !open }.testTag(tag).padding(horizontal = 20.dp, vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleSmall, color = Lumon.Cream)
+                if (subtitle.isNotEmpty()) Text(subtitle, style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Text(if (open) "−" else "+", style = MaterialTheme.typography.titleMedium, color = Lumon.Sunflower)
+        }
+        if (open) Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { content() }
+    }
+}
+
+/** Barra compacta de uma linha (rótulo curto + barra fina), para os cards de cidadão. */
+@Composable
+fun CompactBar(label: String, value: Double, color: Color, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = Lumon.CreamDim, maxLines = 1)
+        Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(Lumon.SurfaceHigh)) {
+            Box(Modifier.fillMaxWidth(value.toFloat().coerceIn(0f, 1f)).height(4.dp).clip(RoundedCornerShape(2.dp)).background(color))
+        }
+    }
+}
+

@@ -84,7 +84,7 @@ object MemoryGuard {
     private fun ensureBreaker(totalBytes: Long): MemoryBreaker {
         breaker?.let { return it }
         val limit = limitOverrideBytes ?: MemoryBreaker.limitForTotalRam(totalBytes)
-        return MemoryBreaker(limit).also { breaker = it }
+        return MemoryBreaker(limit, rearmHoldMs = 30_000L).also { breaker = it }
     }
 
     /** Lê memória do processo: C++ (/proc/self/status) ou fallback Kotlin. */
@@ -111,8 +111,9 @@ object MemoryGuard {
         val mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
         val b = ensureBreaker(mi.totalMem)
         val now = android.os.SystemClock.elapsedRealtime()
-        val rssBytes = if (pm[0] > 0) pm[0] * 1024 else -1
-        when (b.onSample(rssBytes, now)) {
+        // RAM anônima (RssAnon + swap): o .gguf mapeado por mmap não é heap exclusivo
+        val pressure = MemoryBreaker.pressureBytes(pm)
+        when (b.onSample(pressure, now, mi.lowMemory)) {
             MemoryBreaker.Action.TRIP -> trip(b.lastReason)
             MemoryBreaker.Action.REARM -> rearm()
             MemoryBreaker.Action.NONE -> Unit
@@ -140,8 +141,10 @@ object MemoryGuard {
             val mi = ActivityManager.MemoryInfo().also { ctx.getSystemService(ActivityManager::class.java).getMemoryInfo(it) }
             ensureBreaker(mi.totalMem)
         } ?: return
-        @Suppress("DEPRECATION")
-        val critical = level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE
+        val low = appContext?.let { ctx ->
+            ActivityManager.MemoryInfo().also { ctx.getSystemService(ActivityManager::class.java).getMemoryInfo(it) }.lowMemory
+        } ?: false
+        val critical = MemoryBreaker.isCriticalTrim(level, low)
         if (critical && b.onCriticalSignal("onTrimMemory($level)", android.os.SystemClock.elapsedRealtime()) == MemoryBreaker.Action.TRIP) {
             trip(b.lastReason)
         }
@@ -150,6 +153,9 @@ object MemoryGuard {
 
     fun onLowMemory() {
         val b = breaker ?: return
+        val ctx = appContext ?: return
+        val mi = ActivityManager.MemoryInfo().also { ctx.getSystemService(ActivityManager::class.java).getMemoryInfo(it) }
+        if (!mi.lowMemory) return // callback legado; só age com lowMemory real
         if (b.onCriticalSignal("onLowMemory", android.os.SystemClock.elapsedRealtime()) == MemoryBreaker.Action.TRIP) trip(b.lastReason)
     }
 

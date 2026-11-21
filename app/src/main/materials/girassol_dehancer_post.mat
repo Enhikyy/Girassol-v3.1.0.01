@@ -24,7 +24,10 @@ material {
         { type : float2, name : texelSize },
         // x = bloom, y = halação, z = densidade das sombras, w = grão
         { type : float4, name : strength },
-        { type : float, name : time }
+        { type : float, name : time },
+        // v3.6: joelho do bright-pass em LDR (x = início, y = fim). O limiar 1.15 em luz
+        // linear da cena equivale a ~0.82 depois do tone mapping Filmic.
+        { type : float2, name : brightKnee }
     ]
 }
 
@@ -45,8 +48,18 @@ fragment {
     // Altas luzes acima do limiar, com joelho suave.
     vec3 girassolBright(vec3 c) {
         float l = girassolLuma(c);
-        float k = smoothstep(0.55, 0.95, l);
+        float k = smoothstep(materialParams.brightKnee.x, materialParams.brightKnee.y, l);
         return c * k;
+    }
+
+    // Ombro suave: acima de 0.80 a luminância é comprimida exponencialmente e nunca passa
+    // de 0.96 — sem branco chapado, mesmo com bloom + halação somados (fp16/mediump-safe).
+    vec3 girassolShoulder(vec3 c) {
+        float l = girassolLuma(c);
+        if (l <= 0.80) return c;
+        float ls = 0.80 + 0.16 * (1.0 - exp(-(l - 0.80) / 0.16));
+        c *= ls / l;
+        return min(c, vec3(0.985));
     }
 
     void material(inout MaterialInputs material) {
@@ -73,7 +86,7 @@ fragment {
         float halo = girassolLuma(max(bloomWide - bloomNear * 0.35, vec3(0.0)));
         vec3 halation = halationTint * halo;
 
-        vec3 c = base + bloom * materialParams.strength.x + halation * materialParams.strength.y;
+        vec3 c = girassolShoulder(base + bloom * materialParams.strength.x + halation * materialParams.strength.y);
 
         // --- 3: sombras densas (toe da curva característica) ---
         float l = girassolLuma(c);

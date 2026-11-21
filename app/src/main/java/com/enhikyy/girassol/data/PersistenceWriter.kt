@@ -18,7 +18,7 @@ import java.util.concurrent.Executors
  * passam por uma única thread, em transações. A simulação nunca bloqueia em disco.
  */
 class PersistenceWriter(private val context: Context) {
-    private val db = GirassolDatabase(context)
+    private val db = GirassolDatabase.get(context)
     private val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "girassol-writer").apply { isDaemon = true } }
 
     val snapshotFile: File get() = File(context.filesDir, SNAPSHOT_FILE)
@@ -63,6 +63,38 @@ class PersistenceWriter(private val context: Context) {
             })
         }.onFailure { Log.e(TAG, "falha ao gravar RSI", it) }
     }
+
+    /** Conversa permanente (aba Chat): cada mensagem também está no .grs (WorldState.chat). */
+    fun submitChat(seed: Long, messages: List<com.enhikyy.girassol.core.world.ChatMessage>) {
+        if (messages.isEmpty()) return
+        executor.execute {
+            runCatching {
+                val w = db.writableDatabase
+                w.beginTransaction()
+                try {
+                    for (m in messages) w.insertWithOnConflict("chat_messages", null, ContentValues().apply {
+                        put("id", m.id); put("world_seed", seed); put("world_tick", m.tick); put("wall_clock_ms", m.wallClockMs)
+                        put("citizen_id", m.citizenId); put("author", m.author); put("author_name", m.authorName)
+                        put("text", m.text); put("engine", m.engine)
+                    }, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+                    w.setTransactionSuccessful()
+                } finally { w.endTransaction() }
+            }.onFailure { Log.e(TAG, "falha ao gravar chat", it) }
+        }
+    }
+
+    /** Mensagens gravadas de um mundo (usado para recompor o chat se o snapshot for anterior a elas). */
+    fun loadChat(seed: Long, afterId: Long): List<com.enhikyy.girassol.core.world.ChatMessage> = runCatching {
+        val out = ArrayList<com.enhikyy.girassol.core.world.ChatMessage>()
+        db.readableDatabase.rawQuery(
+            "SELECT id, world_tick, wall_clock_ms, citizen_id, author, author_name, text, engine FROM chat_messages " +
+                "WHERE world_seed = ? AND id > ? ORDER BY id ASC LIMIT 2000", arrayOf(seed.toString(), afterId.toString())
+        ).use { c ->
+            while (c.moveToNext()) out += com.enhikyy.girassol.core.world.ChatMessage(c.getLong(0), c.getLong(1), c.getLong(2),
+                if (c.isNull(3)) null else c.getString(3), c.getString(4), c.getString(5), c.getString(6), c.getString(7))
+        }
+        out
+    }.getOrDefault(emptyList())
 
     fun submitStressEvent(s: StressEventRecord) = executor.execute {
         runCatching {
@@ -120,7 +152,7 @@ class PersistenceWriter(private val context: Context) {
             val w = db.writableDatabase
             listOf("canonical_events", "double_entry_ledger", "world_snapshots", "rsi_promotion_ledger", "stress_events",
                 "subjective_beliefs", "tsetlin_automata_blobs", "bkt_fsrs_mastery", "voyager_skill_library", "adico_institutions",
-                "ecological_niche_structures", EpisodicFts.TABLE).forEach { w.delete(it, null, null) }
+                "ecological_niche_structures", "chat_messages", EpisodicFts.TABLE).forEach { w.delete(it, null, null) }
         }
     }
 

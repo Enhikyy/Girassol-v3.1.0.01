@@ -37,7 +37,12 @@ class GirassolDatabase(private val context: Context) :
 
     companion object {
         const val DB_NAME = "girassol.db"
-        const val DB_VERSION = 3
+        const val DB_VERSION = 4
+
+        @Volatile private var instance: GirassolDatabase? = null
+        /** Instância única (escritor + registro de modelos compartilham a mesma conexão WAL). */
+        fun get(context: Context): GirassolDatabase =
+            instance ?: synchronized(this) { instance ?: GirassolDatabase(context.applicationContext).also { instance = it } }
 
         fun splitStatements(sql: String): List<String> = sql
             .lines().filterNot { it.trimStart().startsWith("--") }.joinToString("\n")
@@ -66,6 +71,30 @@ class GirassolDatabase(private val context: Context) :
                 file_name TEXT NOT NULL,
                 created_utc INTEGER NOT NULL
             )""",
+            """CREATE TABLE IF NOT EXISTS registered_models (
+                model_key TEXT PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                sha256_head TEXT NOT NULL,
+                founder_id TEXT,
+                founder_name TEXT,
+                founder_sex TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                imported_utc INTEGER NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER NOT NULL,
+                world_seed INTEGER NOT NULL,
+                world_tick INTEGER NOT NULL,
+                wall_clock_ms INTEGER NOT NULL,
+                citizen_id TEXT,
+                author TEXT NOT NULL,
+                author_name TEXT NOT NULL,
+                text TEXT NOT NULL,
+                engine TEXT NOT NULL,
+                PRIMARY KEY (world_seed, id)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_chat_citizen ON chat_messages(citizen_id, id)",
             """CREATE TABLE IF NOT EXISTS stress_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 world_tick INTEGER NOT NULL,

@@ -57,8 +57,8 @@ class NeuralAndLoraTest {
 
     @Test
     fun decisoesNeuraisEntramComoEventosEReplayEDeterministico() {
-        val a = WorldCore.create(314L, ports = CorePorts(neural = FakeNeuralPort()))
-        val b = WorldCore.create(314L, ports = CorePorts(neural = FakeNeuralPort()))
+        val a = WorldCore.create(314L, 24, ports = CorePorts(neural = FakeNeuralPort()))
+        val b = WorldCore.create(314L, 24, ports = CorePorts(neural = FakeNeuralPort()))
         repeat(300) { a.step(); b.step() }
         assertEquals(a.state.lastEventHash, b.state.lastEventHash)
         assertEquals(WorldSnapshotCodec.stateHash(a.state), WorldSnapshotCodec.stateHash(b.state))
@@ -68,7 +68,7 @@ class NeuralAndLoraTest {
 
     @Test
     fun modoEconomicoProduzFalasSimbolicas() {
-        val core = WorldCore.create(21L)
+        val core = WorldCore.create(21L, 24)
         repeat(200) { core.step() }
         assertTrue(core.state.speechesEmitted > 0)
         assertTrue(core.state.aliveCitizens().any { it.lastSpeech.isNotBlank() })
@@ -76,7 +76,7 @@ class NeuralAndLoraTest {
 
     @Test
     fun cicloLoraDoSonoTestaEmSandboxERegistra() {
-        val core = WorldCore.create(808L)
+        val core = WorldCore.create(808L, 24)
         repeat((TICKS_PER_DAY * 2 + 1).toInt()) { core.step() }
         val s = core.state
         assertTrue("ciclos LoRA registrados: ${s.loraLedger.size}", s.loraLedger.isNotEmpty())
@@ -86,7 +86,7 @@ class NeuralAndLoraTest {
         if (rec.accepted) assertTrue(s.lora.acceptedCycles > 0)
         assertEquals(0, s.metrics.invariantsViolated)
         // determinismo com o ciclo LoRA
-        val twin = WorldCore.create(808L)
+        val twin = WorldCore.create(808L, 24)
         repeat((TICKS_PER_DAY * 2 + 1).toInt()) { twin.step() }
         assertEquals(WorldSnapshotCodec.stateHash(s), WorldSnapshotCodec.stateHash(twin.state))
     }

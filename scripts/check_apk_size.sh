@@ -20,5 +20,8 @@ extra=$(echo "$list" | grep -E 'libggml-cpu' | grep -v -E 'armv8\.0_1|armv8\.2_2
 dups=$(echo "$list" | grep -c -E 'libgirassol_llm' || true)
 [ "$dups" -eq 1 ] || { echo "FALHA: esperado 1 libgirassol_llm*.so, encontrado $dups"; fail=1; }
 [ "$size" -lt $((limit*1024*1024)) ] || { echo "FALHA: APK >= ${limit} MiB"; fail=1; }
+# v3.6 "Adão e Eva": nenhum modelo GGUF de fábrica (o usuário povoa o mundo importando .gguf)
+ggufs=$(unzip -l "$apk" | awk '{print $4}' | grep -iE '\.gguf(\.part[0-9]+)?$' || true)
+[ -z "$ggufs" ] || { echo "FALHA: modelos GGUF embutidos:"; echo "$ggufs"; fail=1; }
 [ $fail -eq 0 ] && echo "ok: APK arm64 < ${limit} MiB, motor compartilhado + 3 backends dinâmicos"
 exit $fail

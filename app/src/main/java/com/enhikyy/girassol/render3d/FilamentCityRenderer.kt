@@ -64,6 +64,17 @@ class FilamentCityRenderer(
 ) {
     companion object {
         private const val TAG = "GirassolFilament"
+        /** Calibração v3.6 anti-clarão (Mali-G57 MC2 / Adreno): ver docs/RENDER_CALIBRATION.md. */
+        const val CAMERA_APERTURE = 16f
+        const val CAMERA_SHUTTER = 1f / 125f
+        const val CAMERA_ISO = 100f
+        const val BLOOM_STRENGTH = 0.18f
+        /** Limiar do bright-pass em luz linear da cena (≥ 1.15) e seu equivalente pós-Filmic. */
+        const val BLOOM_THRESHOLD_LINEAR = 1.15f
+        const val BRIGHT_KNEE_LDR = 0.82f
+        /** Clamp das altas luzes antes do bloom do Filament (mínimo aceito pela API: 10). */
+        const val BLOOM_HIGHLIGHT_CLAMP = 10f
+        const val NIGHT_EMISSIVE = 1.4f
         private const val TARGET_FRAME_NS = 1_000_000_000L / 30
         @Volatile private var filamentReady = false
         fun ensureFilament(): Boolean {
@@ -219,7 +230,9 @@ class FilamentCityRenderer(
         view.setScene(scene)
         view.setCamera(fCamera)
         renderer.setClearOptions(Renderer.ClearOptions().apply { clear = true; clearColor = doubleArrayOf(0.0, 0.0, 0.0, 1.0) })
-        fCamera.setExposure(1.0f)
+        // v3.6: exposição física f/16 · 1/125 s · ISO 100 (EV100 15, "sunny 16"). Os materiais
+        // são unlit (cor de base não é atenuada), então ela só domina emissivos/brilhos.
+        fCamera.setExposure(CAMERA_APERTURE, CAMERA_SHUTTER, CAMERA_ISO)
         cityMat = loadMaterial("materials/city.filamat")
         glowMat = loadMaterial("materials/glow.filamat")
         postMat = loadMaterial("materials/girassol_dehancer_post.filamat")
@@ -271,9 +284,10 @@ class FilamentCityRenderer(
 
     /** Intensidades (bloom, halação, densidade das sombras, grão) por nível de efeito. */
     private fun postStrength(l: EffectLevel): FloatArray? = when (l) {
-        EffectLevel.FULL -> floatArrayOf(0.32f, 0.55f, 0.38f, 0.055f)
-        EffectLevel.REDUCED -> floatArrayOf(0.24f, 0.45f, 0.32f, 0.05f)
-        EffectLevel.MINIMAL -> floatArrayOf(0f, 0.35f, 0.28f, 0.045f)
+        // v3.6: bloom ≤ 0.18 e halação sutil — o FX completo estourava em branco na Mali-G57
+        EffectLevel.FULL -> floatArrayOf(BLOOM_STRENGTH, 0.15f, 0.40f, 0.045f)
+        EffectLevel.REDUCED -> floatArrayOf(0.14f, 0.12f, 0.34f, 0.04f)
+        EffectLevel.MINIMAL -> floatArrayOf(0f, 0.10f, 0.30f, 0.035f)
         EffectLevel.NONE -> null
     }
 
@@ -300,6 +314,7 @@ class FilamentCityRenderer(
             postMi.setParameter("sceneColor", color, TextureSampler(TextureSampler.MinFilter.LINEAR, TextureSampler.MagFilter.LINEAR, TextureSampler.WrapMode.CLAMP_TO_EDGE))
             postMi.setParameter("texelSize", 1f / widthPx, 1f / heightPx)
             postMi.setParameter("strength", strength[0], strength[1], strength[2], strength[3])
+            postMi.setParameter("brightKnee", BRIGHT_KNEE_LDR, 1.0f)
             true
         }.getOrElse { Log.w(TAG, "girassol_dehancer_post indisponível; seguindo sem a passada analógica", it); false }
         postActive = ok
@@ -331,8 +346,9 @@ class FilamentCityRenderer(
         view.setAntiAliasing(if (l.fxaa) View.AntiAliasing.FXAA else View.AntiAliasing.NONE)
         view.setDithering(if (l.temporalDithering) View.Dithering.TEMPORAL else View.Dithering.NONE)
         view.setBloomOptions(View.BloomOptions().apply {
-            enabled = l.bloomLevels > 0; strength = 0.22f; levels = l.bloomLevels.coerceAtLeast(1); resolution = if (l.bloomLevels >= 6) 256 else 192
-            threshold = true; highlight = 1000f; lensFlare = false
+            // threshold ligado e altas luzes limitadas antes do bloom (sem lens flare/starburst)
+            enabled = l.bloomLevels > 0; strength = BLOOM_STRENGTH; levels = l.bloomLevels.coerceAtLeast(1); resolution = if (l.bloomLevels >= 6) 256 else 192
+            threshold = true; highlight = BLOOM_HIGHLIGHT_CLAMP; lensFlare = false; starburst = false
         })
         view.setVignetteOptions(View.VignetteOptions().apply {
             enabled = l.vignette; midPoint = 0.42f; roundness = 0.55f; feather = 0.62f; color = floatArrayOf(0f, 0f, 0f, 1f)
@@ -526,7 +542,7 @@ class FilamentCityRenderer(
             }
             agentViews[a.id] = a
             val c = actionRgb(a.action)
-            val glow = if (night) 1.6f else 1f
+            val glow = if (night) 1.12f else 1f
             val moodLift = (0.85f + 0.15f * a.mood.toFloat())
             e.mi.setParameter("tint", c[0] * glow * moodLift, c[1] * glow * moodLift, c[2] * glow * moodLift, 1f)
         }
@@ -542,9 +558,10 @@ class FilamentCityRenderer(
 
     private fun applyDayNight() {
         if (night) {
-            cityMi.setParameter("tint", 0.42f, 0.46f, 0.62f, 1f); cityMi.setParameter("emissiveBoost", 6.0f); glowMi.setParameter("intensity", 2.4f)
+            // v3.6: emissivo noturno 6.0 → 1.4 e brilho 2.4 → 0.55 (janelas e postes acesos sem cegar)
+            cityMi.setParameter("tint", 0.42f, 0.46f, 0.62f, 1f); cityMi.setParameter("emissiveBoost", NIGHT_EMISSIVE); glowMi.setParameter("intensity", 0.55f)
         } else {
-            cityMi.setParameter("tint", 1.0f, 0.97f, 0.9f, 1f); cityMi.setParameter("emissiveBoost", 1.2f); glowMi.setParameter("intensity", 0.6f)
+            cityMi.setParameter("tint", 0.96f, 0.93f, 0.86f, 1f); cityMi.setParameter("emissiveBoost", 0.8f); glowMi.setParameter("intensity", 0.22f)
         }
     }
 

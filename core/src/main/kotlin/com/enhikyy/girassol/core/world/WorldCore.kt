@@ -34,6 +34,7 @@ import com.enhikyy.girassol.core.memory.EpisodicIndex
 import com.enhikyy.girassol.core.ports.CorePorts
 import com.enhikyy.girassol.core.ports.NeuralDecision
 import com.enhikyy.girassol.core.ports.NeuralRequest
+import com.enhikyy.girassol.core.ports.NeuralPrompt
 import com.enhikyy.girassol.core.memory.AssimilationOutcome
 import com.enhikyy.girassol.core.memory.AssociativeMemoryNode
 import com.enhikyy.girassol.core.memory.EpistemicImmunity
@@ -148,6 +149,7 @@ class WorldCore(
 
     companion object {
         const val MAX_MEMORIES = 160
+        const val MAX_CHAT = 2000
         const val RSI_PERIOD_TICKS = TICKS_PER_DAY * 3
         const val TSETLIN_FEATURES = 16
         const val MAX_DISTRICTS_PER_SIDE = 9
@@ -162,7 +164,12 @@ class WorldCore(
         const val SUPERACAO_RATIO = 1.15
         const val MAX_RECENT_SPEECHES = 6
 
-        fun create(seed: Long, initialPopulation: Int = 24, ports: CorePorts = CorePorts()): WorldCore {
+        /**
+         * v3.6: o mundo nasce VAZIO (0 cidadãos). A população vem só de fundadores — um por
+         * modelo .gguf importado ([spawnFounder]) — e da reprodução natural. [initialPopulation]
+         * existe apenas para testes e para a sonda de GPU (processo isolado).
+         */
+        fun create(seed: Long, initialPopulation: Int = 0, ports: CorePorts = CorePorts()): WorldCore {
             val state = WorldState(seed = seed, board = SpatialStigmergyAndReservationBoard(36, 36, cellSize = 1f))
             state.districts += CityGenerator.initialLayout(seed)
             CityGenerator.rebuildTiles(state)
@@ -228,6 +235,110 @@ class WorldCore(
         return c
     }
 
+    /**
+     * Cria o cidadão fundador de um modelo .gguf (1 modelo = 1 pessoa). Já nasce adulto, com
+     * identidade derivada deterministicamente da chave do modelo; [name]/[sex] opcionais.
+     * Recusa um segundo fundador para o mesmo modelo enquanto o primeiro estiver vivo.
+     */
+    fun spawnFounder(modelKey: String, name: String? = null, sex: String? = null): Citizen {
+        state.citizens.firstOrNull { it.alive && it.modelKey == modelKey }?.let { return it }
+        val rng = StreamSeeds.rng(state.seed, "FUNDADOR:$modelKey", state.tick, "fundador")
+        val c = spawnCitizen(randomGenome(rng), emptyList(), 0, rng)
+        val idx = state.citizens.indexOf(c)
+        val chosenSex = sex?.uppercase()?.takeIf { it == "F" || it == "M" }
+            ?: if (state.citizens.count { it.alive && it.founder && it.sex == "F" } >
+                state.citizens.count { it.alive && it.founder && it.sex == "M" }) "M" else if (rng.nextDouble() < 0.5) "F" else "M"
+        val founder = c.copy(
+            name = name?.trim()?.take(40)?.takeIf { it.isNotEmpty() } ?: c.name,
+            birthTick = state.tick - (ADULT_DAYS * TICKS_PER_DAY).toLong() - TICKS_PER_DAY
+        ).also { it.modelKey = modelKey; it.sex = chosenSex }
+        state.citizens[idx] = founder
+        emit("FUNDADOR", founder.id, "modelo=$modelKey;nome=${founder.name};sexo=$chosenSex")
+        return founder
+    }
+
+    // ===================================================================== Chat (v3.6)
+
+    /**
+     * Registra uma mensagem do usuário (Arquiteto) para [citizenId] (null = canal aberto). Entra na
+     * cadeia de eventos (CHAT), na memória episódica do destinatário e no léxico emergente.
+     */
+    fun postUserChat(citizenId: String?, text: String, wallClockMs: Long): ChatMessage {
+        val clean = text.trim().take(600)
+        val h = emit("CHAT", citizenId, "autor=usuario;sha=${Sha256.hex(clean).take(16)};chars=${clean.length}")
+        val msg = ChatMessage(state.nextChatSerial++, state.tick, wallClockMs, citizenId, "usuario", "Você", clean, "usuario")
+        appendChat(msg)
+        state.lexicon.observe(clean)
+        val targets = if (citizenId == null) state.aliveCitizens() else listOfNotNull(state.citizen(citizenId)?.takeIf { it.alive })
+        for (c in targets) rememberChat(c, "O Arquiteto disse: $clean", h)
+        return msg
+    }
+
+    /** Registra a resposta de um cidadão (gerada pelo próprio .gguf ou pelo deliberador simbólico). */
+    fun postCitizenReply(citizenId: String, channel: String?, text: String, engine: String, wallClockMs: Long): ChatMessage? {
+        val c = state.citizen(citizenId)?.takeIf { it.alive } ?: return null
+        val clean = text.trim().take(600).ifEmpty { return null }
+        val h = emit("CHAT", c.id, "autor=${c.id};motor=$engine;sha=${Sha256.hex(clean).take(16)};chars=${clean.length}")
+        val msg = ChatMessage(state.nextChatSerial++, state.tick, wallClockMs, channel, c.id, c.name, clean, engine)
+        appendChat(msg)
+        c.lastSpeech = clean.take(120); c.lastSpeechTick = state.tick
+        rememberSpeech(c, clean.take(120))
+        state.speechesEmitted++
+        state.lexicon.observe(clean)
+        rememberChat(c, "Respondi ao Arquiteto: ${clean.take(200)}", h)
+        return msg
+    }
+
+    /**
+     * Resposta simbólica ancorada no estado real do cidadão (sem modelo .gguf ativo): ação atual,
+     * necessidade mais urgente e a memória mais relacionada à pergunta (sobreposição de termos).
+     */
+    fun symbolicReply(citizenId: String, question: String): String {
+        val c = state.citizen(citizenId) ?: return ""
+        val worst = c.needs.minWith(compareBy<Map.Entry<Need, Double>> { it.value }.thenBy { it.key.ordinal })
+        val action = c.intention?.action?.label?.lowercase() ?: "parado(a)"
+        val terms = question.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length > 3 }.toSet()
+        val mem = c.memories.filter { it.layer != MemoryLayer.PROCEDURAL }
+            .maxWithOrNull(compareBy<AssociativeMemoryNode> { m -> terms.count { t -> m.content.lowercase().contains(t) } }.thenBy { it.createdTick })
+        val memLine = mem?.takeIf { m -> terms.any { m.content.lowercase().contains(it) } }?.content?.take(140)
+        return buildString {
+            append("Agora estou $action. ")
+            append("O que mais me falta é ${worst.key.name.lowercase()} (${(worst.value * 100).roundToInt()}%). ")
+            if (memLine != null) append("Lembro disto: $memLine")
+            else if (c.lastThought.isNotBlank()) append(c.lastThought)
+        }.trim()
+    }
+
+    /** Prompt de conversa do cidadão (estado real + memórias relacionadas + histórico do canal). */
+    fun chatPromptFor(citizenId: String, question: String): NeuralPrompt? {
+        val c = state.citizen(citizenId)?.takeIf { it.alive } ?: return null
+        val terms = question.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length > 3 }.toSet()
+        val mems = c.memories.sortedWith(compareByDescending<AssociativeMemoryNode> { m -> terms.count { t -> m.content.lowercase().contains(t) } }
+            .thenByDescending { it.createdTick }).take(4).map { it.content.take(90) }
+        val history = state.chat.filter { it.citizenId == citizenId || (it.citizenId == null && it.author == citizenId) }
+            .takeLast(6).map { (if (it.author == "usuario") "Arquiteto" else it.authorName) to it.text }
+        val lineage = if (c.parents.isEmpty()) "fundador(a)" else "filho(a) de " + c.parents.mapNotNull { state.citizen(it)?.name }.joinToString(" e ")
+        return NeuralProtocol.chatPrompt(c.name,
+            "Geração ${c.generation}, $lineage, ${"%.0f".fmt(c.ageDays(state.tick))} dias de vida. Agora: ${c.intention?.action?.label ?: "parado(a)"}.",
+            Need.entries.associate { it.name.lowercase() to c.needs.getValue(it) }, c.emotion.mood, mems, history, question,
+            StreamSeeds.derive(state.seed, c.id, state.tick, "chat"))
+    }
+
+    private fun appendChat(msg: ChatMessage) {
+        state.chat += msg
+        if (state.chat.size > MAX_CHAT) state.chat.subList(0, state.chat.size - MAX_CHAT).clear()
+    }
+
+    private fun rememberChat(c: Citizen, content: String, eventHash: String) {
+        c.memories += AssociativeMemoryNode(c.nextMemoryId++, c.id, MemoryLayer.EPISODIC, content.take(300),
+            linkedSetOf("CHAT"), linkedSetOf(), salience = 0.7, confidence = 0.9, sourceEventId = state.eventSeq,
+            sourceAgentId = null, createdTick = state.tick, verifiedByWorldCore = true, qUtility = 0.1)
+        while (c.memories.size > MAX_MEMORIES) c.memories.removeAt(c.memories.indices.minBy { c.memories[it].salience })
+    }
+
+    /** Parceiros compatíveis para reprodução: sexos diferentes (ou desconhecido em mundos antigos). */
+    private fun compatible(a: Citizen, b: Citizen): Boolean = ReproductionMerit.compatible(a, b)
+
     private fun leastOccupiedHome(): SmartObject {
         val homes = state.objects.filter { it.type == SmartObjectType.CASA }
         val counts = state.aliveCitizens().groupingBy { it.homeObjectId }.eachCount()
@@ -247,6 +358,7 @@ class WorldCore(
         c.acceptorValence = cmp.valence
         c.acceptorPlasticity = cmp.plasticity
         if (cmp.confirmed) c.acceptorConfirmations++ else c.acceptorViolations++
+        if (!shadow) ReproductionMerit.updateAcceptor(c, cmp.mismatch, state.tick)
         // a surpresa entra no appraisal: descompasso negativo eleva excitação e cortisol
         if (!cmp.confirmed) {
             c.emotion.arousal = (c.emotion.arousal + 0.15 * cmp.surprise).coerceIn(0.0, 1.0)
@@ -348,7 +460,8 @@ class WorldCore(
     // ===================================================================== tick
 
     fun step(telemetry: TelemetryInput? = null, wallClockUtc: Long = 0L): TickReport {
-        tickEvents.clear()
+        // eventos emitidos entre ticks (FUNDADOR, CHAT, comandos da UI) seguem neste relatório,
+        // para que a cadeia SHA-256 gravada no SQLite não tenha lacunas
         violations.clear()
         state.tick++
         state.wallClockUtcAtLastTick = wallClockUtc
@@ -497,7 +610,9 @@ class WorldCore(
         checkInvariants()
 
         val entries = state.ledger.drainPendingEntries()
-        return TickReport(tick, tickEvents.toList(), if (shadow) emptyList() else entries, violations.toList())
+        val events = tickEvents.toList()
+        tickEvents.clear()
+        return TickReport(tick, events, if (shadow) emptyList() else entries, violations.toList())
     }
 
     // ===================================================================== estágio 2
@@ -911,6 +1026,7 @@ class WorldCore(
             c.skills[skill] = st.updateFromPractice(success, state.tick, c.trait("aptidao"))
             state.forecastWindow += p
             state.outcomeWindow += success
+            if (!shadow) ReproductionMerit.updateBrier(c, (p - if (success) 1.0 else 0.0).let { e -> e * e }, state.tick)
             if (state.forecastWindow.size > 600) { state.forecastWindow.removeAt(0); state.outcomeWindow.removeAt(0) }
         }
         when (it.action) {
@@ -1117,6 +1233,7 @@ class WorldCore(
             for (m in episodic) {
                 val action = ActionType.entries.firstOrNull { it.name in m.tags } ?: continue
                 state.loraPendingSamples += LoraSample(LoraFeatures.of(action, m.createdTick), m.qUtility.coerceIn(-1.0, 1.0).toFloat())
+                state.loraContributors += c.id
             }
             if (state.loraPendingSamples.size > 512) state.loraPendingSamples.subList(0, state.loraPendingSamples.size - 512).clear()
         }
@@ -1165,7 +1282,7 @@ class WorldCore(
             recentSpeeches = c.recentSpeeches.toList(),
             seed = StreamSeeds.derive(state.seed, c.id, state.tick, "llm")
         )
-        return NeuralRequest(c.id, state.tick, prompt, options.map { it.intention.action.name }.distinct())
+        return NeuralRequest(c.id, state.tick, prompt, options.map { it.intention.action.name }.distinct(), c.effectiveModelKey)
     }
 
     /** Estágio 1: decisões neurais concluídas entram como eventos canônicos (ordem por agente). */
@@ -1204,7 +1321,12 @@ class WorldCore(
         val accepted = cand.second == 0 && cand.first >= base.first - 1e-6
         val record = LoraCycleRecord(state.tick, samples.size, result.mseFirstEpoch, result.mseLastEpoch,
             base.first, cand.first, accepted, result.backend, candidate.deltaNorm())
-        if (accepted) state.lora = candidate
+        if (accepted) {
+            state.lora = candidate
+            // mérito: cada cidadão cujas memórias treinaram o adaptador aceito recebe a promoção
+            for (id in state.loraContributors.sorted()) state.citizen(id)?.takeIf { it.alive }?.let { it.promotions++ }
+        }
+        state.loraContributors.clear()
         state.loraLedger += record
         if (state.loraLedger.size > 60) state.loraLedger.removeAt(0)
         emit("LORA_SONO", null, "amostras=${samples.size};mse=${"%.4f".fmt(result.mseFirstEpoch)}->${"%.4f".fmt(result.mseLastEpoch)};" +
@@ -1363,6 +1485,7 @@ class WorldCore(
         state.metrics.mapElitesNiches = state.mapElites.occupiedNiches()
         // Expansão urbana dirigida por demanda
         maybeExpand(alive)
+        recordEvolution(day, state.aliveCitizens())
         emit("DIA", null, "dia=$day;pop=${alive.size};alimento_produzido=${"%.2f".fmt(state.dayFoodProduced)};consumido=${"%.2f".fmt(state.dayFoodConsumed)}")
         state.dayFoodProduced = 0.0
         state.dayFoodConsumed = 0.0
@@ -1375,18 +1498,19 @@ class WorldCore(
             if (population >= state.admissionCap || population >= housing) break
             if (a.ageDays(state.tick) < ADULT_DAYS || a.children >= 4) continue
             if (state.tick - a.lastReproductionTick < reproductionCooldown(a)) continue
-            if (a.needs.getValue(Need.FOME) < 0.45 || a.needs.getValue(Need.ENERGIA) < 0.35) continue
+            // v3.6: gatilho obrigatório de desempenho (Anokhin + Brier + promoção + bem-estar) em AMBOS
+            if (!ReproductionMerit.check(a, state.tick).all) continue
+            if (!ReproductionMerit.commonsSurplus(state, population)) break
             val partnerTie = a.social.sortedTies()
-                .filter { it.affinity > 0.30 && it.familiarity > 0.25 }
+                .filter { it.affinity > 0.0 }
                 .sortedByDescending { it.tieStrength() }
                 .firstOrNull { t ->
                     val p = state.citizen(t.toAgentId)
-                    p != null && p.alive && p.ageDays(state.tick) >= ADULT_DAYS && p.children < 4 &&
-                        state.tick - p.lastReproductionTick >= reproductionCooldown(p) && p.needs.getValue(Need.FOME) >= 0.45
+                    p != null && p.alive && compatible(a, p) && p.children < 4 &&
+                        state.tick - p.lastReproductionTick >= reproductionCooldown(p) && ReproductionMerit.check(p, state.tick).all
                 } ?: continue
             val b = state.citizen(partnerTie.toAgentId)!!
             val rng = StreamSeeds.rng(state.seed, a.id + "+" + b.id, state.tick, "reproducao")
-            if (rng.nextDouble() > 0.35) continue
             var genome = a.genome.recombineWith(b.genome, Random(rng.nextLong()), mutationSigma = 0.03)
             // Efeito Baldwin: aptidão aprendida dos pais é lentamente assimilada no genoma
             val acquired = (a.skills.values.map { it.masteryProb } + b.skills.values.map { it.masteryProb }).average()
@@ -1412,14 +1536,39 @@ class WorldCore(
                 FloatArray(p.personalAdapter.size) { k -> p.personalAdapter[k] * scale }
             }, density = 0.5)
             child.parentsFitnessAtBirth = (a.lifeFitness() + b.lifeFitness()) / 2.0
+            // pensa com o modelo da linhagem (alterna entre mãe e pai por nascimento); sexo sorteado
+            val lineage = listOfNotNull(a.effectiveModelKey, b.effectiveModelKey).distinct()
+            child.lineageModelKey = lineage.getOrNull(rng.nextInt(lineage.size.coerceAtLeast(1)))
+            child.sex = if (rng.nextDouble() < 0.5) "F" else "M"
             state.tiesMerges++
             child.social.getOrCreateTie(a.id).apply { affinity = 0.6; familiarity = 0.6 }
             child.social.getOrCreateTie(b.id).apply { affinity = 0.6; familiarity = 0.6 }
             a.children++; b.children++
             a.lastReproductionTick = state.tick; b.lastReproductionTick = state.tick
+            a.promotionsAtLastReproduction = a.promotions; b.promotionsAtLastReproduction = b.promotions
+            emit("NASCIMENTO_MERITO", child.id, "pais=${a.id}+${b.id};g=${child.generation};promocoes=${a.promotions}/${b.promotions};" +
+                "anokhin=${"%.3f".fmt(a.acceptorEma)}/${"%.3f".fmt(b.acceptorEma)};brier=${"%.3f".fmt(a.brierEma)}/${"%.3f".fmt(b.brierEma)}")
             state.metrics.births++
             population++
         }
+    }
+
+    private fun recordEvolution(day: Long, alive: List<Citizen>) {
+        val withA = alive.filter { it.acceptorEma >= 0 }
+        val withB = alive.filter { it.brierEma >= 0 }
+        state.evolutionHistory += EvolutionSample(
+            day = day, population = alive.size, maxGeneration = alive.maxOfOrNull { it.generation } ?: 0,
+            acceptorMismatch = if (withA.isEmpty()) state.acceptorMeanMismatch else withA.sumOf { it.acceptorEma } / withA.size,
+            brier = if (withB.isEmpty()) state.metrics.brierScore else withB.sumOf { it.brierEma } / withB.size,
+            promotions = state.rsiLedger.count { it.decision.promoted },
+            loraAccepted = state.lora.acceptedCycles,
+            cmaGeneration = state.cmaEs?.generation ?: 0,
+            psi = state.cliodynamics?.politicalStressIndicator ?: 0.0,
+            gini = state.cliodynamics?.giniIndex ?: 0.0,
+            commonsFood = state.ledger.getBalance(COMMUNAL_COMMONS, FOOD),
+            ledgerEntries = state.ledger.totalEntries()
+        )
+        if (state.evolutionHistory.size > 180) state.evolutionHistory.removeAt(0)
     }
 
     private fun reproductionCooldown(c: Citizen): Long = if (c.superacao) TICKS_PER_DAY * 4 else TICKS_PER_DAY * 6

@@ -63,7 +63,7 @@ class V35Test {
 
     @Test
     fun acceptorRunsInsideWorldCoreBeforePlasticity() {
-        val core = WorldCore.create(77L)
+        val core = WorldCore.create(77L, 24)
         repeat(900) { core.step() }
         val alive = core.state.aliveCitizens()
         val conf = alive.sumOf { it.acceptorConfirmations }
@@ -99,7 +99,7 @@ class V35Test {
 
     @Test
     fun policySearchSpaceRoundTrips() {
-        val g = WorldCore.create(1L).state.policy.copy(locomotionSpeedScale = 1.1)
+        val g = WorldCore.create(1L, 24).state.policy.copy(locomotionSpeedScale = 1.1)
         val back = PolicySearchSpace.decode(PolicySearchSpace.encode(g), g)
         assertEquals(g.locomotionSpeedScale, back.locomotionSpeedScale, 1e-9)
         assertEquals(g.memRlLearningRate, back.memRlLearningRate, 1e-9)
@@ -107,7 +107,7 @@ class V35Test {
 
     @Test
     fun rsiCycleUsesCmaEsAndGate() {
-        val core = WorldCore.create(5L)
+        val core = WorldCore.create(5L, 24)
         repeat(400) { core.step() }
         val rsi = RsiCoordinator()
         val rec = rsi.runCycle(core)
@@ -122,7 +122,7 @@ class V35Test {
 
     @Test
     fun hashChainVerifiesAndDetectsTampering() {
-        val core = WorldCore.create(11L)
+        val core = WorldCore.create(11L, 24)
         val events = ArrayList<CanonicalEvent>()
         repeat(300) { events += core.step().events }
         val ok = WorldStateHashChain.verifyHead(events, core.state)
@@ -139,7 +139,7 @@ class V35Test {
 
     @Test
     fun deterministicReplayKeepsChain() {
-        val a = WorldCore.create(42L); val b = WorldCore.create(42L)
+        val a = WorldCore.create(42L, 24); val b = WorldCore.create(42L, 24)
         repeat(500) { a.step(); b.step() }
         assertEquals(a.state.lastEventHash, b.state.lastEventHash)
     }
@@ -205,7 +205,7 @@ class V35Test {
 
     @Test
     fun knowledgeIngestionFeedsSemanticMemory() {
-        val core = WorldCore.create(21L)
+        val core = WorldCore.create(21L, 24)
         val text = (1..40).joinToString(" ") { "Capítulo $it. A cooperação nos comuns melhora a colheita e o estudo da energia solar fortalece a usina." }
         val rec = core.ingestKnowledge(ParsedDocument("Manual da Biosfera", DocumentFormat.TXT, text))
         assertNotNull(rec)
@@ -235,7 +235,7 @@ class V35Test {
 
     @Test
     fun lexiconEmergesInWorld() {
-        val core = WorldCore.create(3L)
+        val core = WorldCore.create(3L, 24)
         repeat(2400) { core.step() }
         assertTrue("sem fala observada", core.state.lexicon.observedWords > 0)
     }
@@ -262,7 +262,7 @@ class V35Test {
     @Test
     fun meshDeltaSnapshotAndMigration() {
         val key = MeshSyncProtocol.deriveKey("246810")
-        val origin = WorldCore.create(8L)
+        val origin = WorldCore.create(8L, 24)
         repeat(300) { origin.step() }
         val base = WorldSnapshotCodec.encodeRaw(origin.state)
         repeat(40) { origin.step() }
@@ -304,7 +304,7 @@ class V35Test {
         val restored = WorldSnapshotCodec.decode(received!!)
         assertEquals(WorldSnapshotCodec.stateHash(WorldSnapshotCodec.decodeRaw(raw)), WorldSnapshotCodec.stateHash(restored))
 
-        val dest = WorldCore.create(99L)
+        val dest = WorldCore.create(99L, 24)
         val before = dest.state.aliveCitizens().size
         val admitted = dest.admitMigrant(migrant!!)
         assertEquals(before + 1, dest.state.aliveCitizens().size)
@@ -320,7 +320,7 @@ class V35Test {
     fun meshFrameTamperingDetected() {
         val key = MeshSyncProtocol.deriveKey("246810")
         val raw = "pacote".toByteArray()
-        val packet = MeshSyncProtocol.MigrationPacket("A", 1L, 1L, WorldCore.create(1L).state.aliveCitizens().first(), mapOf(CREDIT to 3.0), "0".repeat(64))
+        val packet = MeshSyncProtocol.MigrationPacket("A", 1L, 1L, WorldCore.create(1L, 24).state.aliveCitizens().first(), mapOf(CREDIT to 3.0), "0".repeat(64))
         try { MeshSyncProtocol.decodeMigrant(MeshSyncProtocol.encodeMigrant(packet)); fail("digest inválido aceito") } catch (_: MeshSyncProtocol.MeshSyncException) {}
         assertEquals(32, MeshSyncProtocol.hmac(key, raw).size)
         assertNotNull(MeshSyncProtocol.parseBeacon(MeshSyncProtocol.beacon("dev1", 5000, "Pixel")))

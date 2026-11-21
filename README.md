@@ -1,4 +1,4 @@
-# Girassol v3.5.0.00
+# Girassol v3.6.0.00
 
 Sociedade sintética que vive continuamente num aparelho Android: cidadãos com corpo, memória,
 emoções, crenças e instituições habitam uma cidade isométrica gerada a partir de uma semente,
@@ -12,12 +12,31 @@ Implementação feita do zero a partir do documento consolidado "PROJETO GIRASSO
 | Módulo | Conteúdo |
 |---|---|
 | `core/` | Motor Kotlin/JVM puro (sem Android): `WorldCore` com ciclo de 12 estágios, economia por partidas dobradas, estigmergia, ADICO + cliodinâmica, inferência ativa, memória ACT-R/MemRL, imunidade epistêmica, sono/consolidação, pedagogia BKT, evolução diploide, Tsetlin, MAP-Elites/AURORA, RSI delimitado com Shadow-Replay e snapshot CBOR+gzip com SHA-256. |
-| `app/` | App Android (Compose, minSdk 33, targetSdk 35, só `arm64-v8a` no release): serviço em primeiro plano contínuo, persistência SQLite WAL, autodetecção de hardware, viewport 3D Google Filament (estética Kodak 500T/70mm) com Modo Eco 2D isométrico, balões de fala dos cidadãos, barra de navegação flutuante OLED e cinco abas (Mundo, Cidadãos, Sociedade, Mente, Sistema). |
+| `app/` | App Android (Compose, minSdk 33, targetSdk 35, só `arm64-v8a` no release): serviço em primeiro plano contínuo, persistência SQLite WAL, autodetecção de hardware, viewport 3D Google Filament (estética Kodak 500T/70mm) com Modo Eco 2D isométrico, balões de fala dos cidadãos, barra de navegação flutuante em cápsula e quatro abas (Chat, Biosfera, Evolução, Sistema) + gaveta com 15 temas, Biblioteca Offline e MeshSync. |
 | `app/src/main/cpp/` | Núcleo nativo C++20 via JNI: `libgirassol_core.so` (A* com clearance, LoRA on-device treinado no sono, áudio binaural em AAudio com ducking, Tsetlin bit a bit idêntico ao Kotlin, MAP-Elites, índice episódico binário bit[256] com popcount, sonda de SoC, detecção SIMD por HWCAP, `/proc/self/status`) e um único motor LLM `libgirassol_llm.so` sobre `libllama.so`/`libggml.so` compartilhadas, com backends de CPU dinâmicos (`GGML_BACKEND_DL`) `libggml-cpu-android_armv8.0_1.so`, `armv8.2_2` (dotprod+fp16+KleidiAI) e `armv8.6_1` (i8mm), escolhidos em runtime. As bibliotecas do Girassol exportam só `JNI_OnLoad` e `Java_*`. |
 | `app/src/main/materials/` | Materiais Filament (`city.mat` com PBR KTX2 triplanar, `glow.mat` e o pós analógico `girassol_dehancer_post.mat`) compilados para `.filamat` pelo `matc` na task Gradle `compileFilamentMaterials`. |
 | `app/src/main/assets/textures/` | Texturas PBR procedurais KTX2 (concreto brutalista, carpete Backrooms), geradas por `scripts/gen_pbr_ktx2.py` e conferidas por `licenses/TEXTURES.sha256`. |
 | `pack_rapido/`, `pack_profundo_a/`, `pack_profundo_b/` | Asset packs `install-time` do AAB (modelo rápido + Sherpa-ONNX; modelo profundo em duas partes < 1,5 GB). |
 | `native-tests/` | Testes nativos de host com ASan/UBSan, incluindo a assinatura de paridade Kotlin↔C++. |
+
+## Novidades da v3.6.0.00 (Adão e Eva)
+
+- Mundo começa com 0 cidadãos. Cada `.gguf` importado (F16, BF16, Q8_0, Q5_K, Q4_K_M, Q4_0…) cria exatamente
+  um fundador g0 com nome e sexo escolhidos (`WorldCore.spawnFounder`, `SimulationHub.importFounder`). Nenhum
+  modelo é embutido no APK; os modelos ficam no armazenamento privado e na tabela `registered_models`
+  (SQLite WAL), restaurados ao reabrir. Painel "Cidadãos-Modelo" na aba Sistema: importar, pausar/ativar, remover.
+- Reprodução por mérito (`core/world/ReproductionMerit.kt`): os dois adultos precisam provar evolução desde t0 —
+  erro do aceitador Anokhin ≤ 90 % da linha de base, Brier melhor, ≥ 1 promoção aprovada no `BoundedRsiPromotionGate`
+  (CMA-ES ou ciclo LoRA aceito no sono), bem-estar ≥ 0,70 e excedente de comida nos comuns. ETA dinâmico
+  (ticks, dias, tempo real) no HUD da Biosfera e na aba Evolução; evento `NASCIMENTO_MERITO` na cadeia SHA-256.
+- Chat (aba principal): pílulas para conversar com cada cidadão ou com o canal aberto; cada cidadão responde com o
+  seu `.gguf` (gramática restrita) ou, sem modelo, pelo deliberador simbólico baseado no estado real. Mensagens
+  persistidas em `chat_messages` (SQLite WAL), no `.grs` (`WorldState.chat`) e na cadeia de eventos; voz TTS pt-BR.
+- Evolução: gráficos Canvas (Anokhin/Brier/CMA-ES com marcadores de promoção/LoRA, árvore g0→g1→g2 com nó do
+  próximo nascimento, comuns/PSI/Gini/população), mérito individual e seções recolhíveis.
+- RAM: pesos em mmap não contam como heap; admissão por RAM ativa estimada (LFM2.5-230M-F16, 350M F16 e Q5_K
+  aceitos em 3631 MB). Perfis 4/8/12 GB mudam `n_ctx` e o tipo de KV; um contexto residente por vez.
+- Anti-clarão Mali: ver `docs/RENDER_CALIBRATION.md`. Balões: no máximo 2, sem sobreposição, com fade-out.
 
 ## Novidades da v3.5.0.00
 

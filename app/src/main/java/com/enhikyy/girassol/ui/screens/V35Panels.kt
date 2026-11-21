@@ -41,7 +41,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.enhikyy.girassol.BuildConfig
 import com.enhikyy.girassol.audio.CitizenVoice
 import com.enhikyy.girassol.audio.PocketTtsVoice
 import com.enhikyy.girassol.core.ui.NativeThemes
@@ -50,7 +49,6 @@ import com.enhikyy.girassol.core.world.DashboardSnapshot
 import com.enhikyy.girassol.knowledge.AudioTranscriber
 import com.enhikyy.girassol.knowledge.LibraryIngest
 import com.enhikyy.girassol.llm.LocalLlmManager
-import com.enhikyy.girassol.llm.ModelProvisioner
 import com.enhikyy.girassol.mesh.MeshSyncManager
 import com.enhikyy.girassol.sim.SimulationHub
 import com.enhikyy.girassol.ui.components.KeyValue
@@ -160,42 +158,6 @@ fun FunctionalSystemsPanel(dash: DashboardSnapshot?) {
             style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
         MetricRow("Geração CMA-ES" to v.cmaGeneration.toString(), "σ" to v.cmaSigma.f(3), "Melhor custo" to v.cmaBestCost.f(3))
         KeyValue("Escala de locomoção (promovida pelo gate RSI)", "× ${v.locomotionSpeedScale.f(3)}")
-    }
-}
-
-/** Modelos GGUF (rápido embutido / profundo do asset pack), LoRA real e backend de gramática. */
-@Composable
-fun LlmV35Panel() {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val llm by LocalLlmManager.stats.collectAsStateWithLifecycle()
-    val prov by ModelProvisioner.state.collectAsStateWithLifecycle()
-    var msg by remember { mutableStateOf("") }
-    LaunchedEffect(Unit) { ModelProvisioner.refresh(context) }
-    SectionCard("Modelos GGUF e LoRA on-device", Modifier.testTag("v35_llm")) {
-        KeyValue("Distribuição", "${BuildConfig.DISTRIBUTION}${if (BuildConfig.EMBEDDED_MODELS) " · modelos embutidos" else ""}")
-        KeyValue("Pesos · head_dim", "${llm.weightType.ifEmpty { "-" }} · ${if (llm.headDim > 0) llm.headDim.toString() else "-"}")
-        KeyValue("KV-cache", llm.kvCache.ifEmpty { "-" })
-        KeyValue("Gramática", llm.grammarBackend.ifEmpty { "-" })
-        KeyValue("LoRA (llama_adapter_lora)", if (llm.loraActive) "ativo · ${llm.loraCycles} ciclos aceitos" else "${llm.loraCycles} ciclos · inativo")
-        if (llm.loraStatus.isNotEmpty()) Text(llm.loraStatus, style = MonoStyle, color = Lumon.CreamDim, maxLines = 3, overflow = TextOverflow.Ellipsis)
-        if (prov.models.isEmpty()) Text("Este build não embute modelos; importe qualquer .gguf (F16/Q8_0/Q4_0) pelo botão Importar.",
-            style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
-        prov.models.forEach { m ->
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Column(Modifier.weight(1f)) {
-                    Text("${if (m.role == "rapido") "Rápido" else "Profundo"} · ${m.file}", style = MaterialTheme.typography.bodyMedium, color = Lumon.Cream,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(if (m.installed != null) "provisionado · SHA-256 ok" else "${m.parts.size} parte(s) no pacote", style = MonoStyle, color = Lumon.CreamDim)
-                }
-                OutlinedButton(enabled = !prov.busy && LocalLlmManager.engineCompiled, onClick = {
-                    scope.launch { msg = ModelProvisioner.provisionAndSelect(context, m.role) }
-                }, modifier = Modifier.testTag("model_${m.role}")) { Text("Usar") }
-            }
-        }
-        if (prov.busy) LinearProgressIndicator(progress = { prov.progress }, modifier = Modifier.fillMaxWidth(), color = Lumon.Teal)
-        if (prov.message.isNotEmpty()) Text(prov.message, style = MaterialTheme.typography.bodySmall, color = Lumon.Teal)
-        if (msg.isNotEmpty()) Text(msg, style = MaterialTheme.typography.bodySmall, color = Lumon.Teal)
     }
 }
 

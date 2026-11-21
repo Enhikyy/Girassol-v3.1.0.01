@@ -12,10 +12,40 @@ import com.enhikyy.girassol.core.world.StockFlowDoubleEntryLedger.Companion.COMM
  */
 data class CitizenSummary(
     val id: String, val name: String, val generation: Int, val ageDays: Double, val alive: Boolean,
-    val action: String, val mood: Double, val meanNeed: Double, val lastThought: String, val deathCause: String?
+    val action: String, val mood: Double, val meanNeed: Double, val lastThought: String, val deathCause: String?,
+    /** Barras compactas da lista de cidadãos (0..1). */
+    val energy: Double = meanNeed, val social: Double = meanNeed,
+    /** Modelo .gguf exclusivo (fundador) ou null; linhagem = modelo herdado e nomes dos pais. */
+    val modelKey: String? = null, val lineageModelKey: String? = null,
+    val parentNames: List<String> = emptyList(), val sex: String = ""
 )
 
 data class NamedValue(val label: String, val value: Double)
+
+/** Nó da árvore geracional g0 → g1 → g2… */
+data class LineageNode(val id: String, val name: String, val generation: Int, val parents: List<String>, val alive: Boolean, val modelKey: String?)
+
+/** Estado do mérito individual (gatilho de reprodução) para a aba Evolução. */
+data class MeritView(
+    val id: String, val name: String, val generation: Int,
+    val acceptorBaseline: Double, val acceptorRecent: Double,
+    val brierBaseline: Double, val brierRecent: Double,
+    val promotions: Int, val wellbeing: Double, val ready: Boolean, val blockers: List<String>
+)
+
+data class GenerationView(
+    val status: ReproductionMerit.Status = ReproductionMerit.Status.SEM_POPULACAO,
+    val etaTicks: Long = -1,
+    val parentA: String? = null,
+    val parentB: String? = null,
+    val nextGeneration: Int = 0,
+    val blockers: List<String> = emptyList(),
+    val lineage: List<LineageNode> = emptyList(),
+    val merit: List<MeritView> = emptyList(),
+    val history: List<EvolutionSample> = emptyList()
+) {
+    val etaDays: Double get() = if (etaTicks < 0) -1.0 else etaTicks.toDouble() / TICKS_PER_DAY
+}
 data class SkillView(val skill: String, val mastery: Double, val verifiedExecutions: Int)
 data class BeliefView(val claim: String, val probability: Double, val uncertainty: Double, val verified: Boolean, val quarantined: Boolean, val source: String?)
 data class MemoryView(val layer: String, val content: String, val salience: Double, val tick: Long, val verified: Boolean)
@@ -118,13 +148,18 @@ data class DashboardSnapshot(
     val tick: Long,
     val citizens: List<CitizenSummary>,
     val society: SocietyView,
-    val mind: MindView
+    val mind: MindView,
+    val generation: GenerationView = GenerationView()
 ) {
     companion object {
         fun summaryOf(state: WorldState, c: Citizen) = CitizenSummary(
             c.id, c.name, c.generation, c.ageDays(state.tick), c.alive,
             c.intention?.action?.label ?: if (c.alive) "Ocioso" else "Falecido(a)",
-            c.emotion.mood, c.meanNeed(), c.lastThought, c.deathCause
+            c.emotion.mood, c.meanNeed(), c.lastThought, c.deathCause,
+            energy = c.needs[Need.ENERGIA] ?: c.meanNeed(), social = c.needs[Need.SOCIAL] ?: c.meanNeed(),
+            modelKey = c.modelKey, lineageModelKey = c.lineageModelKey,
+            parentNames = c.parents.mapNotNull { pid -> state.citizens.firstOrNull { it.id == pid }?.name },
+            sex = c.sex
         )
 
         fun of(state: WorldState): DashboardSnapshot {
@@ -198,7 +233,22 @@ data class DashboardSnapshot(
                     lastEventHash = state.lastEventHash
                 )
             )
-            return DashboardSnapshot(state.tick, citizens, society, mind)
+            val eta = ReproductionMerit.estimate(state)
+            val name = { id: String? -> id?.let { i -> state.citizen(i)?.name ?: i } }
+            val generation = GenerationView(
+                status = eta.status, etaTicks = eta.ticks, parentA = name(eta.parentA), parentB = name(eta.parentB),
+                nextGeneration = eta.nextGeneration, blockers = eta.blockers,
+                lineage = (alive + state.citizens.filter { !it.alive }.sortedByDescending { it.deathTick }.take(20))
+                    .sortedWith(compareBy<Citizen> { it.generation }.thenBy { it.birthTick }.thenBy { it.id })
+                    .map { LineageNode(it.id, it.name, it.generation, it.parents, it.alive, it.modelKey) },
+                merit = alive.sortedWith(compareBy<Citizen> { it.generation }.thenBy { it.name }).map { c ->
+                    val ch = ReproductionMerit.check(c, state.tick)
+                    MeritView(c.id, c.name, c.generation, c.acceptorBaseline, c.acceptorEma, c.brierBaseline, c.brierEma,
+                        c.promotions - c.promotionsAtLastReproduction, c.meanNeed(), ch.all, ch.blockers())
+                },
+                history = state.evolutionHistory.toList()
+            )
+            return DashboardSnapshot(state.tick, citizens, society, mind, generation)
         }
 
         fun detailOf(state: WorldState, id: String): CitizenDetail? {

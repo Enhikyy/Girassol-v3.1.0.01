@@ -25,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -62,9 +63,9 @@ fun CitizensScreen(selectedId: String?, onSelect: (String?) -> Unit) {
 }
 
 @Composable
-private fun CitizenRow(c: CitizenSummary, onClick: () -> Unit) {
+fun CitizenRow(c: CitizenSummary, onClick: () -> Unit) {
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Lumon.Surface).clickable(onClick = onClick).padding(10.dp)
+        Modifier.fillMaxWidth().clip(com.enhikyy.girassol.ui.components.Shapes.Card).background(Lumon.Surface).clickable(onClick = onClick).padding(horizontal = 18.dp, vertical = 14.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(c.name, color = if (c.alive) Lumon.Cream else Lumon.CreamDim, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
@@ -79,7 +80,7 @@ private fun CitizenRow(c: CitizenSummary, onClick: () -> Unit) {
 }
 
 @Composable
-private fun CitizenDetailView(id: String, onBack: () -> Unit) {
+fun CitizenDetailView(id: String, onBack: () -> Unit) {
     var detail by remember(id) { mutableStateOf<CitizenDetail?>(null) }
     LaunchedEffect(id) {
         while (true) {
@@ -91,7 +92,7 @@ private fun CitizenDetailView(id: String, onBack: () -> Unit) {
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onBack) { Text("← Lista") }
+                TextButton(onClick = onBack, modifier = Modifier.testTag("citizen_back")) { Text("← Voltar") }
                 Text(d.summary.name, style = MaterialTheme.typography.titleLarge, color = Lumon.Sunflower, modifier = Modifier.weight(1f))
             }
             Text(d.summary.lastThought, style = MaterialTheme.typography.bodyMedium, color = Lumon.Cream)

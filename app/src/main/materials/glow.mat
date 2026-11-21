@@ -1,10 +1,13 @@
-// Halação/brilho (Kodak 500T): sprites aditivos voltados para a câmera ao redor das
-// fontes de luz, com núcleo quente e franja vermelho-alaranjada, somados ao bloom.
+// Halação/brilho (Kodak 500T): sprites voltados para a câmera ao redor das fontes de luz,
+// com núcleo quente e franja vermelho-alaranjada.
+// v3.6: blending "screen" (src + dst·(1 − src)) em vez de aditivo — centenas de sprites
+// sobrepostos vistos de longe NUNCA somam além de 1.0 (era o círculo branco que cegava a
+// cena na Mali-G57) — e cada sprite é limitado a 0.45 de contribuição.
 material {
     name : girassol_glow,
     shadingModel : unlit,
     requires : [ uv0, color ],
-    blending : add,
+    blending : screen,
     depthWrite : false,
     culling : none,
     parameters : [
@@ -33,6 +36,6 @@ fragment {
         float fringe = exp(-d * 2.2) * (1.0 - smoothstep(0.75, 1.0, d));
         vec3 halation = vec3(1.0, 0.36, 0.12);
         vec3 c = getColor().rgb * core + halation * fringe * 0.55;
-        material.baseColor = vec4(c * materialParams.intensity, 0.0);
+        material.baseColor = vec4(min(c * materialParams.intensity, vec3(0.45)), 0.0);
     }
 }

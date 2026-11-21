@@ -21,5 +21,8 @@ while read -r m b; do
 done <<< "$mods"
 echo "base + asset packs: $((total/1048576)) MiB (limite Play 4 GB)"
 [ "$total" -lt 4000000000 ] || { echo "FALHA: base + install-time >= 4 GB"; fail=1; }
+# v3.6 "Adão e Eva": nenhum modelo GGUF de fábrica (o usuário povoa o mundo importando .gguf)
+ggufs=$(unzip -l "$aab" | awk '{print $4}' | grep -iE '\.gguf(\.part[0-9]+)?$' || true)
+[ -z "$ggufs" ] || { echo "FALHA: modelos GGUF embutidos:"; echo "$ggufs"; fail=1; }
 [ $fail -eq 0 ] && echo "ok: AAB < 5 GiB, packs < 1,5 GB, base + install-time < 4 GB"
 exit $fail

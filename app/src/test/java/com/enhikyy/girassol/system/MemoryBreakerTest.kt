@@ -56,4 +56,34 @@ class MemoryBreakerTest {
         assertEquals(MemoryBreaker.Action.NONE, b.onSample(-1, 500_000))
         assertTrue(b.open)
     }
+
+    @Test
+    fun mmapFilePagesDoNotCountAsPressure() {
+        // SM-A226BR com LFM2.5-230M-F16 (~460 MB) mapeado: VmRSS alto, RssAnon baixo
+        val pm = longArrayOf(2_100_000, 2_200_000, 9_000_000, 420_000, 1_680_000, 0)
+        assertEquals(420_000L * 1024, MemoryBreaker.pressureBytes(pm))
+        val b = MemoryBreaker(MemoryBreaker.limitForTotalRam(3_631L * mb))
+        assertEquals(MemoryBreaker.Action.NONE, b.onSample(MemoryBreaker.pressureBytes(pm), 0))
+        assertFalse(b.open)
+        // sem RssAnon (kernel antigo) cai no VmRSS
+        assertEquals(1_000L * 1024, MemoryBreaker.pressureBytes(longArrayOf(1_000, -1, -1, -1, -1, -1)))
+    }
+
+    @Test
+    fun realLowMemoryTripsAndBlocksRearm() {
+        val b = MemoryBreaker(1_800 * mb, rearmHoldMs = 30_000)
+        assertEquals(MemoryBreaker.Action.TRIP, b.onSample(400 * mb, 0, systemLowMemory = true))
+        assertEquals(MemoryBreaker.Action.NONE, b.onSample(400 * mb, 40_000, systemLowMemory = true))
+        assertEquals(MemoryBreaker.Action.NONE, b.onSample(400 * mb, 75_000))
+        assertEquals(MemoryBreaker.Action.REARM, b.onSample(400 * mb, 105_001))
+    }
+
+    @Test
+    fun hidingTheUiNeverTripsTheBreaker() {
+        assertFalse(MemoryBreaker.isCriticalTrim(20, false)) // UI_HIDDEN (seletor de arquivos)
+        assertFalse(MemoryBreaker.isCriticalTrim(40, false))
+        assertFalse(MemoryBreaker.isCriticalTrim(80, false))
+        assertTrue(MemoryBreaker.isCriticalTrim(80, true))
+        assertTrue(MemoryBreaker.isCriticalTrim(15, false))
+    }
 }

@@ -11,7 +11,7 @@ import org.junit.Test
 class DashboardSnapshotTest {
     @Test
     fun projecoesDaUiRefletemOEstado() {
-        val core = WorldCore.create(7L)
+        val core = WorldCore.create(7L, 24)
         repeat(300) { core.step() }
         val d = DashboardSnapshot.of(core.state)
         assertEquals(core.state.tick, d.tick)

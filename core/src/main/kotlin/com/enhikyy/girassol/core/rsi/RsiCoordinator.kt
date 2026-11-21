@@ -92,7 +92,11 @@ class RsiCoordinator(
             base.brierScore, cand.brierScore, base.behavioralDiversityScore, cand.behavioralDiversityScore)
         state.rsiLedger += record
         if (state.rsiLedger.size > 200) state.rsiLedger.removeAt(0)
-        if (decision.promoted) state.policy = candidate
+        if (decision.promoted) {
+            state.policy = candidate
+            // mérito reprodutivo: a promoção é creditada ao cidadão proponente
+            state.citizen(proposal.proposerAgentId)?.takeIf { it.alive }?.let { it.promotions++ }
+        }
         state.cmaEs?.let { it.lastPromoted = decision.promoted }
         core.emit("RSI", proposal.proposerAgentId,
             "promovido=${decision.promoted};ganho=${"%.4f".fmt(decision.netFitnessGain)};base=${decision.baselineHash.take(12)};cand=${decision.candidateHash.take(12)}")

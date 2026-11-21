@@ -60,7 +60,7 @@ data class HubStatus(
 object SimulationHub {
     private const val TAG = "GirassolHub"
     const val SNAPSHOT_EVERY_TICKS = 240L
-    val SPEEDS = listOf(2, 8, 30, 60, 120)
+    val SPEEDS = listOf(2, 8, 30)
 
     private val simDispatcher = Executors.newSingleThreadExecutor { r ->
         Thread(r, "girassol-worldcore").apply { isDaemon = true; priority = Thread.NORM_PRIORITY - 1 }
@@ -80,6 +80,12 @@ object SimulationHub {
     val dashboard: StateFlow<DashboardSnapshot?> = _dashboard.asStateFlow()
     private val _status = MutableStateFlow(HubStatus())
     val status: StateFlow<HubStatus> = _status.asStateFlow()
+    private val _chat = MutableStateFlow<List<com.enhikyy.girassol.core.world.ChatMessage>>(emptyList())
+    /** Conversa permanente (WorldState.chat ⇄ tabela chat_messages). */
+    val chat: StateFlow<List<com.enhikyy.girassol.core.world.ChatMessage>> = _chat.asStateFlow()
+    private val _chatPending = MutableStateFlow<Set<String>>(emptySet())
+    /** Cidadãos que estão pensando na resposta (indicador "digitando"). */
+    val chatPending: StateFlow<Set<String>> = _chatPending.asStateFlow()
     private val _hardware = MutableStateFlow<HardwareProfile?>(null)
     val hardware: StateFlow<HardwareProfile?> = _hardware.asStateFlow()
 
@@ -99,10 +105,8 @@ object SimulationHub {
             com.enhikyy.girassol.perf.AdpfHints.init(app)
             LocalLlmManager.init(app)
             LocalLlmManager.setEnabled(NativeModules.toggles.value.localLlm)
-            // v3.5: modelo rápido Q4_0 embutido (APK direto / pack_rapido) é provisionado no 1º uso
-            if (LocalLlmManager.engineCompiled) scope.launch(Dispatchers.IO) {
-                runCatching { com.enhikyy.girassol.llm.ModelProvisioner.autoProvision(app) }
-            }
+            // v3.6 "Adão e Eva": nenhum modelo de fábrica; o mundo nasce vazio e cada .gguf
+            // importado pelo usuário cria exatamente 1 cidadão fundador (ver importFounder).
             ports = buildPorts(NativeModules.toggles.value)
             writer = PersistenceWriter(app)
             val restored = writer.loadLatestSnapshot()
@@ -113,6 +117,13 @@ object SimulationHub {
                     targetTps = it.targetTps.coerceAtMost(cap),
                     lastMessage = if (restored != null) "Mundo restaurado do snapshot (tick ${core.state.tick})" else "Novo mundo criado (semente ${core.state.seed})")
             }
+            // conversas gravadas depois do último snapshot voltam do SQLite WAL
+            val lastChat = core.state.chat.lastOrNull()?.id ?: 0L
+            writer.loadChat(core.state.seed, lastChat).forEach { m ->
+                core.state.chat += m
+                if (m.id >= core.state.nextChatSerial) core.state.nextChatSerial = m.id + 1
+            }
+            restoreFounders(app)
             if (restored == null) persistSnapshot()
             publish(force = true)
             if (NativeModules.toggles.value.binauralAudio) AmbientAudioController.start()
@@ -232,6 +243,8 @@ object SimulationHub {
     private var lastDashboardNs = 0L
     private fun publish(force: Boolean) {
         _render.value = WorldRenderSnapshot.of(core.state)
+        if (_chat.value.size != core.state.chat.size || _chat.value.lastOrNull()?.id != core.state.chat.lastOrNull()?.id)
+            _chat.value = core.state.chat.takeLast(500)
         val now = System.nanoTime()
         if (force || now - lastDashboardNs > 900_000_000L) {
             _dashboard.value = DashboardSnapshot.of(core.state)
@@ -373,6 +386,89 @@ object SimulationHub {
         _status.update { it.copy(lastMessage = "MeshSync: ${c.name} chegou de ${packet.originDevice}") }
         publish(force = true)
         "${c.name} admitido como ${c.id}"
+    }
+
+    /**
+     * Cria o cidadão fundador vinculado a um modelo .gguf (1 modelo = 1 pessoa). Idempotente:
+     * se o modelo já tem um fundador vivo, devolve-o.
+     */
+    suspend fun spawnFounder(modelKey: String, name: String? = null, sex: String? = null): String = withContext(simDispatcher) {
+        if (!_status.value.loaded) return@withContext "Mundo não carregado"
+        val c = core.spawnFounder(modelKey, name, sex)
+        appContext?.let { LocalLlmManager.bindFounder(it, modelKey, c.id, c.name, c.sex) }
+        persistSnapshot()
+        _status.update { it.copy(lastMessage = "${c.name} nasceu do modelo $modelKey") }
+        publish(force = true)
+        "${c.name} vive agora com a mente de ${modelKey.removeSuffix(".gguf")}"
+    }
+
+    /** Importa um .gguf pelo SAF e cria o fundador correspondente. */
+    suspend fun importFounder(context: Context, uri: android.net.Uri, name: String?, sex: String?): String {
+        val r = withContext(Dispatchers.IO) {
+            runCatching { LocalLlmManager.importModel(context.applicationContext, uri) }
+                .getOrElse { LocalLlmManager.ImportResult(null, "Falha: ${it.message}") }
+        }
+        val key = r.key ?: return r.message
+        return r.message + " · " + spawnFounder(key, name, sex)
+    }
+
+    /**
+     * Ao reabrir o app: todo modelo do registro fixo (`registered_models`) tem o seu fundador.
+     * Se o snapshot já o contém (caso normal), só confirma o vínculo; senão recria com o nome e
+     * o sexo gravados no registro.
+     */
+    private fun restoreFounders(context: Context) {
+        for (r in LocalLlmManager.registeredModels(context)) {
+            if (LocalLlmManager.modelFor(r.key) == null) continue
+            val existing = core.state.citizens.firstOrNull { it.alive && it.modelKey == r.key }
+            val c = existing ?: core.spawnFounder(r.key, r.founderName, r.founderSex)
+            if (r.founderId != c.id) LocalLlmManager.bindFounder(context, r.key, c.id, c.name, c.sex)
+        }
+    }
+
+    /**
+     * Envia uma mensagem do Chat para [citizenId] (null = canal aberto: respondem até 2 cidadãos).
+     * Cada cidadão responde com o SEU .gguf (ou da linhagem); sem modelo disponível, responde o
+     * deliberador simbólico com base no estado real dele. Tudo entra na cadeia de eventos,
+     * no .grs (WorldState.chat) e na tabela chat_messages.
+     */
+    fun sendChat(citizenId: String?, text: String) = scope.launch {
+        if (!_status.value.loaded || text.isBlank()) return@launch
+        val msg = core.postUserChat(citizenId, text, System.currentTimeMillis())
+        writer.submitChat(core.state.seed, listOf(msg))
+        publish(force = true)
+        val alive = core.state.aliveCitizens()
+        val responders = if (citizenId != null) alive.filter { it.id == citizenId }
+            else alive.sortedWith(compareBy<com.enhikyy.girassol.core.world.Citizen> { if (it.founder) 0 else 1 }
+                .thenBy { it.needs[com.enhikyy.girassol.core.world.Need.SOCIAL] ?: 1.0 }.thenBy { it.id }).take(2)
+        for (c in responders) {
+            val prompt = core.chatPromptFor(c.id, text) ?: continue
+            _chatPending.update { it + c.id }
+            LocalLlmManager.chatAsync(c.effectiveModelKey, c.id, prompt) { reply, engine ->
+                scope.launch {
+                    val finalText = reply ?: core.symbolicReply(c.id, text)
+                    val finalEngine = if (reply != null) engine else "simbolico"
+                    core.postCitizenReply(c.id, citizenId, finalText, finalEngine, System.currentTimeMillis())?.let { r ->
+                        writer.submitChat(core.state.seed, listOf(r))
+                        if (NativeModules.toggles.value.voiceTts) com.enhikyy.girassol.audio.CitizenVoice.speakChat(c.id, c.sex, finalText)
+                    }
+                    _chatPending.update { it - c.id }
+                    publish(force = true)
+                }
+            }
+        }
+    }
+
+    /** Pausa/ativa o modelo de um fundador (painel da aba Sistema). */
+    fun setModelActive(context: Context, key: String, active: Boolean) {
+        LocalLlmManager.setModelActive(context, key, active)
+        _status.update { it.copy(lastMessage = if (active) "$key ativo" else "$key pausado (modo simbólico)") }
+    }
+
+    /** Modelos importados sem fundador vivo (ex.: depois de reiniciar o mundo). */
+    fun modelsWithoutFounder(): List<String> {
+        val alive = _dashboard.value?.citizens?.filter { it.alive }?.mapNotNull { it.modelKey }?.toSet() ?: emptySet()
+        return LocalLlmManager.models.value.map { it.key }.filter { it !in alive }
     }
 
     fun aliveCitizenIds(): List<Pair<String, String>> = _dashboard.value?.citizens?.map { it.id to it.name } ?: emptyList()

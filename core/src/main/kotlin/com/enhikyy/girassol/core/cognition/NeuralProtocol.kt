@@ -119,6 +119,47 @@ object NeuralProtocol {
     }
 
     fun sanitize(t: String): String = t.filter { it.isLetterOrDigit() || it in " ,.!?;:()-" }.trim().take(MAX_TEXT)
+
+    // ---------------------------------------------------------------- Chat (v3.6)
+
+    const val CHAT_MAX_TEXT = 220
+    val CHAT_KEYS = listOf("fala")
+    const val CHAT_PREFIX: String =
+        "Mundo: cidade de Girassol, simulação offline. Você conversa com o Arquiteto, que te observa. " +
+            "Responda em português do Brasil, em primeira pessoa, com até duas frases, apenas com JSON {\"fala\":\"...\"}.\n"
+
+    fun chatGrammar(): String = buildString {
+        appendLine("root ::= \"{\" ws \"\\\"fala\\\":\" ws texto ws \"}\"")
+        appendLine("texto ::= \"\\\"\" ch{1,$CHAT_MAX_TEXT} \"\\\"\"")
+        appendLine("ch ::= $TEXT_CLASS")
+        appendLine("ws ::= \" \"?")
+    }
+
+    fun chatLarkGrammar(): String = buildString {
+        appendLine("start: \"{\" ws \"\\\"fala\\\":\" ws texto ws \"}\"")
+        appendLine("texto: \"\\\"\" TEXTO \"\\\"\"")
+        appendLine("TEXTO: /${TEXT_CLASS}{1,$CHAT_MAX_TEXT}/")
+        appendLine("ws: \" \"?")
+    }
+
+    fun chatPrompt(name: String, identity: String, needs: Map<String, Double>, mood: Double,
+                   memories: List<String>, history: List<Pair<String, String>>, question: String, seed: Long): NeuralPrompt {
+        val system = "Você é $name, cidadão da cidade de Girassol. $identity\n"
+        val user = buildString {
+            append("Humor ").append("%.2f".fmt(mood)).append(". Necessidades (0=crítico,1=pleno): ")
+            append(needs.entries.joinToString(", ") { "${it.key}=${"%.2f".fmt(it.value)}" }).append(". ")
+            if (memories.isNotEmpty()) append("Lembranças: ").append(memories.joinToString("; ")).append(". ")
+            for ((who, text) in history.takeLast(4)) append(who).append(": ").append(text.take(160)).append("\n")
+            append("Arquiteto: ").append(question.take(400))
+        }
+        return NeuralPrompt(system, user, chatGrammar(), CHAT_PREFIX, CHAT_KEYS, emptyList(), seed, chatLarkGrammar())
+    }
+
+    /** Extrai o campo "fala" da resposta restrita por gramática. */
+    fun parseChat(raw: String): String? {
+        val m = Regex("\"fala\"\\s*:\\s*\"([^\"]*)\"").find(raw) ?: return null
+        return m.groupValues[1].filter { it.isLetterOrDigit() || it in " ,.!?;:()-" }.trim().take(CHAT_MAX_TEXT).ifEmpty { null }
+    }
 }
 
 /** Falas autônomas do modo econômico (sem LLM), escolhidas deterministicamente. */

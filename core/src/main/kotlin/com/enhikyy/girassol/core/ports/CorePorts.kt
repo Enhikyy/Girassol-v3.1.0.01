@@ -28,7 +28,9 @@ data class NeuralRequest(
     val agentId: String,
     val tick: Long,
     val prompt: NeuralPrompt,
-    val allowedActions: List<String>
+    val allowedActions: List<String>,
+    /** Modelo .gguf exclusivo do cidadão (fundador ou linhagem); null = qualquer modelo carregado. */
+    val modelKey: String? = null
 )
 
 /**

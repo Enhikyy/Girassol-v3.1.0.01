@@ -23,8 +23,8 @@ class WorldCoreTest {
 
     @Test
     fun mesmaSementeProduzMesmaCadeiaDeEventos() {
-        val a = WorldCore.create(42L)
-        val b = WorldCore.create(42L)
+        val a = WorldCore.create(42L, 24)
+        val b = WorldCore.create(42L, 24)
         run(a, 700); run(b, 700)
         assertEquals(a.state.lastEventHash, b.state.lastEventHash)
         assertEquals(WorldSnapshotCodec.stateHash(a.state), WorldSnapshotCodec.stateHash(b.state))
@@ -32,15 +32,15 @@ class WorldCoreTest {
 
     @Test
     fun sementesDiferentesDivergem() {
-        val a = WorldCore.create(1L)
-        val b = WorldCore.create(2L)
+        val a = WorldCore.create(1L, 24)
+        val b = WorldCore.create(2L, 24)
         run(a, 200); run(b, 200)
         assertNotEquals(a.state.lastEventHash, b.state.lastEventHash)
     }
 
     @Test
     fun snapshotRestauradoContinuaIdenticoAoMundoVivo() {
-        val live = WorldCore.create(99L)
+        val live = WorldCore.create(99L, 24)
         run(live, 350)
         val bytes = WorldSnapshotCodec.encode(live.state)
         val restored = WorldCore(WorldSnapshotCodec.decode(bytes))
@@ -52,7 +52,7 @@ class WorldCoreTest {
 
     @Test(expected = IllegalStateException::class)
     fun snapshotCorrompidoERejeitado() {
-        val core = WorldCore.create(5L)
+        val core = WorldCore.create(5L, 24)
         val bytes = WorldSnapshotCodec.encode(core.state)
         bytes[10] = (bytes[10].toInt() xor 0xFF).toByte()
         WorldSnapshotCodec.decode(bytes)
@@ -60,7 +60,7 @@ class WorldCoreTest {
 
     @Test
     fun doisDiasSemViolarInvariantesEConservandoRecursos() {
-        val core = WorldCore.create(2026L)
+        val core = WorldCore.create(2026L, 24)
         run(core, (TICKS_PER_DAY * 2).toInt())
         val s = core.state
         assertEquals(0, s.metrics.invariantsViolated)
@@ -102,7 +102,7 @@ class WorldCoreTest {
 
     @Test
     fun cicloRsiExecutaShadowReplaySemAlterarMundoVivo() {
-        val core = WorldCore.create(77L)
+        val core = WorldCore.create(77L, 24)
         run(core, 300)
         val before = WorldSnapshotCodec.stateHash(core.state)
         val coordinator = RsiCoordinator(replayTicks = 120)
@@ -117,7 +117,7 @@ class WorldCoreTest {
 
     @Test
     fun desinformacaoGeraEventoDeEstresseRastreavel() {
-        val core = WorldCore.create(11L)
+        val core = WorldCore.create(11L, 24)
         run(core, 100)
         val rec = core.injectMisinformation()
         assertNotNull(rec)

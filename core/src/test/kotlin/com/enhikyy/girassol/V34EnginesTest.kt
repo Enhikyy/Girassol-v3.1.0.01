@@ -206,7 +206,7 @@ class V34EnginesTest {
     }
 
     @Test fun mundoIntegraCfcOrcaMemoriaEHerancaTies() {
-        val core = WorldCore.create(2026L)
+        val core = WorldCore.create(2026L, 24)
         repeat(480 * 3) { core.step() }
         val s = core.state
         val alive = s.aliveCitizens()

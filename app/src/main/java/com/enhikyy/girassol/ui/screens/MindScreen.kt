@@ -8,7 +8,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -44,58 +44,19 @@ import com.enhikyy.girassol.ui.components.f
 import com.enhikyy.girassol.ui.theme.Lumon
 import com.enhikyy.girassol.ui.theme.MonoStyle
 
+/**
+ * Painéis da mente coletiva (Anokhin/CMA-ES, memória, LoRA, métricas, RSI…) como seções de
+ * coluna simples — usados dentro da aba Evolução (sem LazyColumn aninhada).
+ */
 @Composable
-fun MindScreen() {
-    val dash by SimulationHub.dashboard.collectAsStateWithLifecycle()
+fun MindSections(d: com.enhikyy.girassol.core.world.DashboardSnapshot) {
     val status by SimulationHub.status.collectAsStateWithLifecycle()
-    val llm by LocalLlmManager.stats.collectAsStateWithLifecycle()
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var importMsg by remember { mutableStateOf("") }
-    var importing by remember { mutableStateOf(false) }
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            importing = true
-            scope.launch {
-                importMsg = withContext(Dispatchers.IO) { runCatching { LocalLlmManager.importModel(context, uri) }.getOrElse { "Falha: ${it.message}" } }
-                importing = false
-            }
-        }
-    }
-    val d = dash ?: return EmptyState("Carregando mente coletiva…")
     val m = d.mind
     val mt = m.metrics
-    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        item {
-            SectionCard("Motor cognitivo híbrido · llama.cpp + ${llm.grammarBackend.ifEmpty { "GBNF" }}") {
-                val stColor = when (llm.status) { LlmStatus.READY, LlmStatus.BUSY -> Lumon.Teal; LlmStatus.ERROR -> Lumon.Danger; else -> Lumon.Sunflower }
-                KeyValue("Estado", llm.status.label, stColor)
-                KeyValue("Modelo", llm.modelName.ifEmpty { "nenhum (modo econômico: SymbolicLookahead)" })
-                if (llm.description.isNotEmpty()) Text(llm.description, style = MonoStyle, color = Lumon.CreamDim, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                MetricRow("tok/s" to llm.tokensPerSecond.f(1), "Latência" to "${llm.lastLatencyMs.f(0)} ms", "RAM nativa" to "${llm.nativeHeapMb.f(0)} MB")
-                KeyValue("Orçamento de RAM do modelo", "${llm.budgetMb} MB (mmap, n_ctx 1024)")
-                KeyValue("Decisões aceitas / rejeitadas", "${llm.decisions} / ${llm.rejected}")
-                KeyValue("Aplicadas no mundo · falas", "${m.neuralDecisionsApplied} · ${m.speechesEmitted}")
-                if (llm.lastOutput.isNotEmpty()) Text(llm.lastOutput, style = MonoStyle, color = Lumon.Cream, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                if (llm.lastError.isNotEmpty()) Text(llm.lastError, style = MaterialTheme.typography.bodySmall, color = Lumon.Danger)
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        enabled = LocalLlmManager.engineCompiled && !importing,
-                        onClick = { picker.launch(arrayOf("application/octet-stream", "*/*")) },
-                        modifier = Modifier.weight(1f).testTag("mind_import_gguf"),
-                        colors = ButtonDefaults.buttonColors(containerColor = Lumon.Sunflower, contentColor = Lumon.Background)
-                    ) { Text(if (importing) "Copiando…" else "Importar .gguf") }
-                    OutlinedButton(enabled = llm.modelName.isNotEmpty(), onClick = { LocalLlmManager.removeModel(context) }, modifier = Modifier.weight(1f)) { Text("Remover") }
-                }
-                if (importMsg.isNotEmpty()) Text(importMsg, style = MaterialTheme.typography.bodySmall, color = Lumon.Teal)
-                Text("Saída restrita por gramática (llguidance/Lark quando compilado, senão GBNF estrita) a JSON {acao, pensamento, fala}; decisões entram no log de eventos e são aplicadas no estágio 1 do tick seguinte. Sem modelo, sob calor ou pressão de memória, o deliberador simbólico assume.",
-                    style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
-            }
-        }
-        item { LlmV35Panel() }
-        item { KnowledgeLibraryPanel(d) }
-        item { FunctionalSystemsPanel(d) }
-        item {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        FunctionalSystemsPanel(d)
+        run {
             val v = m.v34
             SectionCard("Memória episódica em 2 estágios", Modifier.testTag("v34_memory")) {
                 MetricRow("Consultas" to v.retrievalQueries.toString(), "Estágio 1" to v.meanStage1.f(1), "Corpus" to v.meanCorpus.f(1))
@@ -121,7 +82,7 @@ fun MindScreen() {
                 }
             }
         }
-        item {
+        run {
             val v = m.v34
             SectionCard("Corpo, movimento e genética", Modifier.testTag("v34_body")) {
                 MetricRow("Cortisol" to v.meanCortisol.f(2), "Ocitocina" to v.meanOxytocin.f(2), "Dopamina" to v.meanDopamine.f(2))
@@ -132,7 +93,7 @@ fun MindScreen() {
                 KeyValue("Superações (≥ +15% sobre os pais)", v.superacoes.toString())
             }
         }
-        item {
+        run {
             SectionCard("LoRA on-device (ciclos no sono)") {
                 MetricRow("Aceitos" to m.loraAcceptedCycles.toString(), "Versão" to m.loraVersion.toString(), "‖ΔW‖" to m.loraDeltaNorm.toDouble().f(3))
                 KeyValue("Amostras de memória pendentes", m.loraPendingSamples.toString())
@@ -146,7 +107,7 @@ fun MindScreen() {
                 }
             }
         }
-        item {
+        run {
             SectionCard("Métricas cognitivas") {
                 MetricRow("H_sem" to mt.semanticEntropy.f(2), "Brier" to mt.brierScore.f(3), "Energia livre" to mt.meanFreeEnergy.f(2))
                 MetricRow("Deliber./100t" to mt.deliberationsPer100Ticks.f(0), "Reflexos/100t" to mt.reflexBypassesPer100Ticks.f(0), "Invariantes" to mt.invariantsViolated.toString())
@@ -156,7 +117,7 @@ fun MindScreen() {
                 KeyValue("Nascimentos / óbitos", "${mt.births} / ${mt.deaths}")
             }
         }
-        item {
+        run {
             SectionCard("Teste de estresse epistêmico (Emergence World)") {
                 Text("Planta um boato num cidadão bem conectado ou contamina de verdade uma horta. A imunidade epistêmica deve colocar boatos de fontes pouco confiáveis em quarentena até a verificação no WorldCore.",
                     style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
@@ -174,7 +135,7 @@ fun MindScreen() {
                 }
             }
         }
-        item {
+        run {
             SectionCard("Genoma de política cognitiva v${m.policy.version}") {
                 KeyValue("Peso epistêmico (exploração)", m.policy.epistemicExplorationWeight.f(3))
                 KeyValue("Limiar de empate do gate", m.policy.cognitiveGateTieThreshold.f(3))
@@ -186,7 +147,7 @@ fun MindScreen() {
                 m.policy.activeVpoRules.forEach { Text("VPO: $it", style = MonoStyle, color = Lumon.Sunflower) }
             }
         }
-        item {
+        run {
             SectionCard("RSI delimitado · ${status.rsiCycles} ciclos nesta sessão") {
                 OutlinedButton(onClick = { SimulationHub.forceRsiCycle() }) { Text("Executar ciclo RSI agora (Shadow-Replay)") }
                 if (m.rsiLedger.isEmpty()) Text("Primeiro ciclo a cada 3 dias do mundo.", color = Lumon.CreamDim)
@@ -201,7 +162,7 @@ fun MindScreen() {
                 }
             }
         }
-        item {
+        run {
             SectionCard("Biblioteca Voyager (${m.skillLibrary.size} habilidades)") {
                 if (m.skillLibrary.isEmpty()) Text("Habilidades entram aqui quando um mestre atinge maestria verificada.", color = Lumon.CreamDim)
                 m.skillLibrary.forEach { s ->
@@ -210,7 +171,7 @@ fun MindScreen() {
                 }
             }
         }
-        item {
+        run {
             SectionCard("Cadeia de eventos canônicos (SHA-256)") {
                 m.recentEvents.forEach { e ->
                     Text("#${e.seq} t${e.tick} ${e.type} ${e.actorId ?: ""} ${e.payload}", style = MonoStyle, color = Lumon.Cream, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -218,6 +179,5 @@ fun MindScreen() {
                 }
             }
         }
-        item { Spacer(Modifier.padding(8.dp)) }
     }
 }

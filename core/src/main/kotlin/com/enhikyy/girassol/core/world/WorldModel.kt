@@ -210,8 +210,38 @@ data class Citizen(
     var acceptorValence: Double = 0.0,
     var acceptorPlasticity: Double = 1.0,
     var acceptorConfirmations: Int = 0,
-    var acceptorViolations: Int = 0
+    var acceptorViolations: Int = 0,
+    /**
+     * v3.6 "Adão e Eva": chave do modelo .gguf exclusivo do fundador (1 modelo = 1 pessoa);
+     * null para quem nasceu na simulação, que pensa com o modelo da linhagem ([lineageModelKey]).
+     */
+    var modelKey: String? = null,
+    var lineageModelKey: String? = null,
+    /** "F", "M" ou "" (desconhecido: compatível com qualquer parceiro, mundos antigos). */
+    var sex: String = "",
+    /**
+     * v3.6 mérito reprodutivo: linha de base t0 (média das primeiras amostras) e média móvel
+     * recente do descompasso do Aceitador de Resultados (Anokhin) e do Brier individual.
+     */
+    var acceptorBaseSum: Double = 0.0,
+    var acceptorBaseN: Int = 0,
+    var acceptorEma: Double = -1.0,
+    var acceptorBaselineTick: Long = -1L,
+    var brierBaseSum: Double = 0.0,
+    var brierBaseN: Int = 0,
+    var brierEma: Double = -1.0,
+    var brierBaselineTick: Long = -1L,
+    /** Promoções aprovadas creditadas (BoundedRsiPromotionGate: CMA-ES/RSI ou LoRA do sono). */
+    var promotions: Int = 0,
+    var promotionsAtLastReproduction: Int = 0
 ) {
+    val acceptorBaseline: Double get() = if (acceptorBaseN >= MERIT_BASELINE_SAMPLES) acceptorBaseSum / acceptorBaseN else -1.0
+    val brierBaseline: Double get() = if (brierBaseN >= MERIT_BASELINE_SAMPLES) brierBaseSum / brierBaseN else -1.0
+
+    /** Modelo com que este cidadão pensa: o próprio (fundador) ou o herdado da linhagem. */
+    val effectiveModelKey: String? get() = modelKey ?: lineageModelKey
+    val founder: Boolean get() = modelKey != null
+
     fun ageDays(tick: Long): Double = (tick - birthTick).toDouble() / TICKS_PER_DAY
     fun trait(name: String): Double = genome.expressTrait(name)
     fun meanNeed(): Double = needs.values.average()
@@ -219,6 +249,42 @@ data class Citizen(
     /** Aptidão de vida: taxa de sucesso (Laplace) ponderada pelo bem-estar médio. */
     fun lifeFitness(): Double = (successes + 1.0) / (successes + failures + 2.0) * (0.5 + 0.5 * meanNeed())
 }
+
+/** Amostras iniciais que formam a linha de base t0 do mérito reprodutivo. */
+const val MERIT_BASELINE_SAMPLES = 10
+
+/** Amostra diária: desempenho (Anokhin/Brier/promoções/LoRA), população por geração e economia. */
+@Serializable
+data class EvolutionSample(
+    val day: Long,
+    val population: Int,
+    val maxGeneration: Int,
+    val acceptorMismatch: Double,
+    val brier: Double,
+    val promotions: Int,
+    val loraAccepted: Int,
+    val cmaGeneration: Int,
+    val psi: Double,
+    val gini: Double,
+    val commonsFood: Double,
+    val ledgerEntries: Long
+)
+
+/** Mensagem do Chat: usuário → cidadão (ou canal aberto, citizenId = null) e respostas. */
+@Serializable
+data class ChatMessage(
+    val id: Long,
+    val tick: Long,
+    val wallClockMs: Long,
+    /** null = canal aberto. */
+    val citizenId: String?,
+    /** "usuario" ou id do cidadão que respondeu. */
+    val author: String,
+    val authorName: String,
+    val text: String,
+    /** "gguf:<modelo>", "simbolico" ou "usuario". */
+    val engine: String
+)
 
 @Serializable
 data class CanonicalEvent(
@@ -347,7 +413,14 @@ data class WorldState(
     var acceptorMeanMismatch: Double = 0.0,
     /** Cidadãos recebidos/enviados por MeshSync LAN. */
     var migrantsIn: Int = 0,
-    var migrantsOut: Int = 0
+    var migrantsOut: Int = 0,
+    /** v3.6: contribuintes das amostras LoRA pendentes (creditados se o ciclo do sono for aceito). */
+    val loraContributors: MutableSet<String> = mutableSetOf(),
+    /** v3.6: conversa persistente (aba Chat), também no .grs e na tabela chat_messages. */
+    val chat: MutableList<ChatMessage> = mutableListOf(),
+    var nextChatSerial: Long = 1L,
+    /** v3.6: série diária de evolução (gráficos unificados da aba Evolução). */
+    val evolutionHistory: MutableList<EvolutionSample> = mutableListOf()
 ) {
     val widthTiles: Int get() = districtsPerSide * districtSize
     fun tileAt(x: Int, z: Int): TileType = TileType.entries[tiles[z * widthTiles + x]]

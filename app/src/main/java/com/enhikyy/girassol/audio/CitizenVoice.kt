@@ -119,6 +119,32 @@ object CitizenVoice {
         return r == TextToSpeech.SUCCESS
     }
 
+    /**
+     * Fala de uma mensagem do Chat (toque em "ouvir" ou resposta com voz ligada): ignora o
+     * intervalo mínimo, entra na fila e ajusta o tom pelo sexo do cidadão (F mais agudo).
+     */
+    fun speakChat(id: String, sex: String, text: String): Boolean {
+        val t = tts
+        if (t == null || !ready || text.isBlank()) return false
+        t.setPitch(when (sex) { "F" -> 1.18f; "M" -> 0.88f; else -> 1f })
+        val r = t.speak(text.take(400), TextToSpeech.QUEUE_ADD, Bundle(), "$id-chat-${System.currentTimeMillis()}")
+        t.setPitch(1f)
+        if (r == TextToSpeech.SUCCESS) _status.update { it.copy(spoken = it.spoken + 1) }
+        return r == TextToSpeech.SUCCESS
+    }
+
+    /** Garante o TextToSpeech pt-BR offline ligado e fala [text] assim que estiver pronto. */
+    fun speakOnDemand(context: Context, id: String, sex: String, text: String) {
+        if (tts == null) setEnabled(context, true)
+        val h = android.os.Handler(android.os.Looper.getMainLooper())
+        var tries = 0
+        fun attempt() {
+            if (speakChat(id, sex, text)) return
+            if (++tries < 20) h.postDelayed({ attempt() }, 250)
+        }
+        h.post { attempt() }
+    }
+
     fun stop() {
         ready = false
         runCatching { tts?.stop(); tts?.shutdown() }

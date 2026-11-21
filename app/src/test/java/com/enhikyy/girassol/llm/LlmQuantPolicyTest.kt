@@ -3,6 +3,7 @@ package com.enhikyy.girassol.llm
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class LlmQuantPolicyTest {
@@ -30,5 +31,33 @@ class LlmQuantPolicyTest {
         assertTrue(LlmQuantPolicy.weightAdvice("model-f16.gguf", fp16Cpu = true).contains("aceleração nativa ARMv8.2 fp16"))
         assertTrue(LlmQuantPolicy.weightAdvice("qualquer-nome.gguf", ftype = "F16").contains("F16 (FP16)"))
         assertTrue(LlmQuantPolicy.weightAdvice("modelo-sem-pista.gguf").contains("não identificado"))
+    }
+
+    private val mb = 1024L * 1024
+    private val a22 = 3631L * mb  // SM-A226BR
+
+    /** v3.6: os três .gguf do relato de campo são admitidos no A22 (pesos em mmap, não heap). */
+    @Test fun lfm25AdmitidosEmA22() {
+        val p = LlmQuantPolicy.profileFor(a22)
+        assertEquals("4 GB", p.label)
+        for (size in listOf(462L, 711L, 260L)) {
+            val bytes = size * mb
+            assertNull("$size MB recusado", LlmQuantPolicy.admission(bytes, a22, p.nCtx, p.kvType))
+            val est = LlmQuantPolicy.activeRamEstimate(bytes, p.nCtx, p.kvType) / mb
+            assertTrue("estimativa $est MB para $size MB", est in 150..450)
+        }
+    }
+
+    @Test fun perfisPorRam() {
+        val gb = 1024L * mb
+        assertEquals(1024, LlmQuantPolicy.profileFor(4 * gb).nCtx)
+        assertEquals(2048, LlmQuantPolicy.profileFor(8 * gb).nCtx)
+        assertEquals(4096, LlmQuantPolicy.profileFor(12 * gb).nCtx)
+        assertEquals(LlmQuantPolicy.KV_Q4_0, LlmQuantPolicy.profileFor(4 * gb).kvType)
+    }
+
+    @Test fun arquivoGiganteAindaRecusado() {
+        val p = LlmQuantPolicy.profileFor(a22)
+        assertTrue(LlmQuantPolicy.admission(3_000L * mb, a22, p.nCtx, p.kvType) != null)
     }
 }

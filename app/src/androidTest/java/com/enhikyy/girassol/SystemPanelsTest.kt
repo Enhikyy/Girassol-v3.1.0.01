@@ -47,6 +47,10 @@ class SystemPanelsTest {
         rule.waitUntilAtLeastOneExists(hasTestTag("tab_SISTEMA"), 60_000)
         rule.onNodeWithTag("tab_SISTEMA").performClick()
         rule.waitUntilAtLeastOneExists(hasTestTag("system_list"), 10_000)
+        // v3.6: painéis técnicos ficam recolhidos em "Detalhes técnicos do hardware"
+        rule.onNodeWithTag("system_list").performScrollToNode(hasTestTag("hw_details_toggle"))
+        rule.onNodeWithTag("hw_details_toggle").performClick()
+        rule.waitForIdle()
     }
 
     @After

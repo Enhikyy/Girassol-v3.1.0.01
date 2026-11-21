@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -12,64 +13,69 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AutoGraph
+import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.outlined.Memory
+import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.material.icons.outlined.Public
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.Text
+import androidx.compose.material3.rememberDrawerState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.unit.sp
-import com.enhikyy.girassol.llm.LlmStatus
-import com.enhikyy.girassol.llm.LocalLlmManager
-import com.enhikyy.girassol.render3d.Render3dTelemetry
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.AccountTree
-import androidx.compose.material.icons.outlined.Groups
-import androidx.compose.material.icons.outlined.Memory
-import androidx.compose.material.icons.outlined.Psychology
-import androidx.compose.material.icons.outlined.Public
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.enhikyy.girassol.sim.SimulationHub
-import com.enhikyy.girassol.ui.components.Dot
-import com.enhikyy.girassol.ui.components.f
-import com.enhikyy.girassol.ui.screens.CitizensScreen
-import com.enhikyy.girassol.ui.screens.MindScreen
-import com.enhikyy.girassol.ui.screens.SocietyScreen
+import com.enhikyy.girassol.ui.components.Shapes
+import com.enhikyy.girassol.ui.screens.ChatScreen
+import com.enhikyy.girassol.ui.screens.CitizenDetailView
+import com.enhikyy.girassol.ui.screens.EvolutionScreen
+import com.enhikyy.girassol.ui.screens.KnowledgeLibraryPanel
+import com.enhikyy.girassol.ui.screens.MeshSyncPanel
 import com.enhikyy.girassol.ui.screens.SystemScreen
+import com.enhikyy.girassol.ui.screens.ThemesPanel
 import com.enhikyy.girassol.ui.screens.WorldScreen
 import com.enhikyy.girassol.ui.theme.GirassolTheme
 import com.enhikyy.girassol.ui.theme.Lumon
-import com.enhikyy.girassol.ui.theme.MonoStyle
+import kotlinx.coroutines.launch
 
+/** v3.6: quatro abas, Chat como principal. */
 internal enum class Tab(val label: String, val icon: ImageVector) {
-    MUNDO("Mundo", Icons.Outlined.Public),
-    CIDADAOS("Cidadãos", Icons.Outlined.Groups),
-    SOCIEDADE("Sociedade", Icons.Outlined.AccountTree),
-    MENTE("Mente", Icons.Outlined.Psychology),
+    CHAT("Chat", Icons.AutoMirrored.Outlined.Chat),
+    BIOSFERA("Biosfera", Icons.Outlined.Public),
+    EVOLUCAO("Evolução", Icons.Outlined.AutoGraph),
     SISTEMA("Sistema", Icons.Outlined.Memory)
 }
 
@@ -83,7 +89,6 @@ class MainActivity : ComponentActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-        // GL_RENDERER/driver + nível de efeito: cache, GL por software ou sonda isolada.
         com.enhikyy.girassol.render3d.GpuCalibration.ensure(this)
         com.enhikyy.girassol.ui.theme.ThemeController.load(this)
         setContent { GirassolTheme { GirassolApp() } }
@@ -92,38 +97,83 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun GirassolApp() {
-    var tab by rememberSaveable { mutableStateOf(Tab.MUNDO) }
+    var tab by rememberSaveable { mutableStateOf(Tab.CHAT) }
     var selectedCitizen by rememberSaveable { mutableStateOf<String?>(null) }
-    Scaffold(containerColor = Lumon.Background, topBar = { TopStatusBar() }) { pad ->
-        Box(Modifier.padding(pad).fillMaxSize()) {
-            Box(Modifier.fillMaxSize().padding(bottom = 84.dp)) {
-                when (tab) {
-                    Tab.MUNDO -> WorldScreen(onOpenCitizen = { selectedCitizen = it; tab = Tab.CIDADAOS })
-                    Tab.CIDADAOS -> CitizensScreen(selectedId = selectedCitizen, onSelect = { selectedCitizen = it })
-                    Tab.SOCIEDADE -> SocietyScreen()
-                    Tab.MENTE -> MindScreen()
-                    Tab.SISTEMA -> SystemScreen()
+    val drawer = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+    val openMenu: () -> Unit = { scope.launch { drawer.open() } }
+    val dash by SimulationHub.dashboard.collectAsStateWithLifecycle()
+
+    ModalNavigationDrawer(
+        drawerState = drawer,
+        gesturesEnabled = drawer.isOpen || tab != Tab.BIOSFERA,
+        drawerContent = {
+            ModalDrawerSheet(
+                drawerShape = Shapes.Card, drawerContainerColor = Lumon.Background,
+                modifier = Modifier.fillMaxHeight().width(330.dp).testTag("main_drawer")
+            ) {
+                LazyColumn(Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    item { Text("GIRASSOL", style = MaterialTheme.typography.titleLarge, color = Lumon.Sunflower, modifier = Modifier.padding(8.dp)) }
+                    item { ThemesPanel() }
+                    item { KnowledgeLibraryPanel(dash) }
+                    item { MeshSyncPanel(dash) }
+                    item { Box(Modifier.size(24.dp)) }
                 }
             }
-            FloatingNavBar(tab, { tab = it }, Modifier.align(Alignment.BottomCenter))
+        }
+    ) {
+        Box(Modifier.fillMaxSize().background(Lumon.Background)) {
+            when (tab) {
+                Tab.BIOSFERA -> WorldScreen(onOpenCitizen = { selectedCitizen = it }, onOpenMenu = openMenu)
+                else -> Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                    TabHeader(tab.label, openMenu)
+                    Box(Modifier.fillMaxSize().padding(bottom = 84.dp)) {
+                        when (tab) {
+                            Tab.CHAT -> ChatScreen(onOpenCitizen = { selectedCitizen = it })
+                            Tab.EVOLUCAO -> EvolutionScreen(onOpenCitizen = { selectedCitizen = it })
+                            Tab.SISTEMA -> SystemScreen()
+                            Tab.BIOSFERA -> Unit
+                        }
+                    }
+                }
+            }
+            val sel = selectedCitizen
+            if (sel != null) {
+                BackHandler { selectedCitizen = null }
+                Box(Modifier.fillMaxSize().background(Lumon.Background).statusBarsPadding().padding(bottom = 84.dp).testTag("citizen_overlay")) {
+                    CitizenDetailView(sel) { selectedCitizen = null }
+                }
+            }
+            FloatingNavBar(tab, { tab = it; selectedCitizen = null }, Modifier.align(Alignment.BottomCenter))
         }
     }
 }
 
-/** Barra de navegação inferior flutuante (vidro escuro sobre preto OLED). */
+@Composable
+private fun TabHeader(title: String, onMenu: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 16.dp, top = 2.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = onMenu, modifier = Modifier.testTag("open_drawer")) {
+            Icon(Icons.Outlined.Menu, contentDescription = "abrir menu", tint = Lumon.Cream)
+        }
+        Text(title, style = MaterialTheme.typography.titleLarge, color = Lumon.Sunflower)
+    }
+}
+
+/** Barra inferior flutuante em cápsula (CircleShape). */
 @Composable
 private fun FloatingNavBar(current: Tab, onSelect: (Tab) -> Unit, modifier: Modifier) {
     Row(
-        modifier.navigationBarsPadding().padding(horizontal = 14.dp, vertical = 10.dp).fillMaxWidth()
-            .clip(RoundedCornerShape(28.dp)).background(Lumon.Glass)
-            .border(1.dp, Lumon.Outline, RoundedCornerShape(28.dp))
+        modifier.navigationBarsPadding().padding(horizontal = 18.dp, vertical = 10.dp).fillMaxWidth()
+            .clip(Shapes.Capsule).background(Lumon.Glass)
+            .border(1.dp, Lumon.Outline, Shapes.Capsule)
             .padding(horizontal = 6.dp, vertical = 6.dp).testTag("floating_nav"),
         horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically
     ) {
         for (t in Tab.entries) {
             val sel = t == current
             Column(
-                Modifier.weight(1f).clip(RoundedCornerShape(22.dp))
+                Modifier.weight(1f).clip(Shapes.Capsule)
                     .background(if (sel) Lumon.Sunflower.copy(alpha = 0.16f) else Lumon.Glass.copy(alpha = 0f))
                     .clickable(role = Role.Tab) { onSelect(t) }
                     .semantics { selected = sel; contentDescription = "aba ${t.label}" }
@@ -132,41 +182,8 @@ private fun FloatingNavBar(current: Tab, onSelect: (Tab) -> Unit, modifier: Modi
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Icon(t.icon, contentDescription = null, tint = if (sel) Lumon.Sunflower else Lumon.CreamDim, modifier = Modifier.size(22.dp))
-                Text(t.label, fontSize = 10.sp, color = if (sel) Lumon.Sunflower else Lumon.CreamDim, maxLines = 1)
+                Text(t.label, fontSize = 11.sp, color = if (sel) Lumon.Sunflower else Lumon.CreamDim, maxLines = 1)
             }
-        }
-    }
-}
-
-@Composable
-private fun TopStatusBar() {
-    val render by SimulationHub.render.collectAsStateWithLifecycle()
-    val status by SimulationHub.status.collectAsStateWithLifecycle()
-    val dash by SimulationHub.dashboard.collectAsStateWithLifecycle()
-    val r3d by Render3dTelemetry.stats.collectAsStateWithLifecycle()
-    val llm by LocalLlmManager.stats.collectAsStateWithLifecycle()
-    val mem by com.enhikyy.girassol.system.MemoryGuard.state.collectAsStateWithLifecycle()
-    Column(Modifier.fillMaxWidth().padding(top = 36.dp, start = 16.dp, end = 16.dp, bottom = 6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("GIRASSOL", style = MaterialTheme.typography.titleLarge, color = Lumon.Sunflower)
-            Spacer(Modifier.width(10.dp))
-            Dot(if (status.running) Lumon.Ok else Lumon.CreamDim)
-            Spacer(Modifier.width(6.dp))
-            Text(if (status.running) "em execução" else "pausado", style = MaterialTheme.typography.labelSmall, color = Lumon.CreamDim)
-        }
-        val r = render
-        Text(
-            if (r == null) "carregando mundo…" else
-                "dia ${r.day} · tick ${r.tick} · ${r.population} cidadãos · ${if (r.night) "noite" else "dia"}${if (r.drought) " · seca" else ""} · ${status.effectiveTps.f(1)} t/s",
-            style = MonoStyle, color = Lumon.CreamDim
-        )
-        val llmColor = when (llm.status) { LlmStatus.READY, LlmStatus.BUSY -> Lumon.Teal; LlmStatus.ERROR -> Lumon.Danger; else -> Lumon.CreamDim }
-        Row(Modifier.fillMaxWidth().testTag("telemetry_strip"), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(if (r3d.active) "3D ${r3d.fps.f(0)} fps" else "2D eco", style = MonoStyle.copy(fontSize = 10.sp), color = if (r3d.active) Lumon.Teal else Lumon.Sunflower)
-            Text("llama: ${llm.status.label}${if (llm.tokensPerSecond > 0) " ${llm.tokensPerSecond.f(1)} tok/s" else ""}", style = MonoStyle.copy(fontSize = 10.sp), color = llmColor, maxLines = 1)
-            Text("LoRA ${dash?.mind?.loraAcceptedCycles ?: 0}", style = MonoStyle.copy(fontSize = 10.sp), color = Lumon.Violet)
-            Text("RSS ${if (mem.rssKb > 0) mem.rssKb / 1024 else 0} MB", style = MonoStyle.copy(fontSize = 10.sp),
-                color = if (mem.breakerOpen) Lumon.Danger else Lumon.CreamDim)
         }
     }
 }

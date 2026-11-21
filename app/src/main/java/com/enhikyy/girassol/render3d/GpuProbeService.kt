@@ -46,7 +46,7 @@ class GpuProbeService : Service() {
     }
 
     private fun probe(level: EffectLevel): String {
-        val snap = WorldRenderSnapshot.of(WorldCore.create(2026L).state)
+        val snap = WorldRenderSnapshot.of(WorldCore.create(2026L, 4).state)
         val r = FilamentCityRenderer(applicationContext, null, level)
         try {
             r.initHeadless(320, 240)

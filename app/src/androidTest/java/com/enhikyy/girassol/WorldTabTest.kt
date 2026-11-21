@@ -18,6 +18,8 @@ import androidx.test.rule.GrantPermissionRule
 import com.enhikyy.girassol.render3d.RenderMode
 import com.enhikyy.girassol.render3d.RenderModePolicy
 import com.enhikyy.girassol.render3d.WorldPickRegistry
+import com.enhikyy.girassol.sim.SimulationHub
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -38,6 +40,14 @@ class WorldTabTest {
     fun startIn2d() {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         RenderModePolicy.set(ctx, RenderMode.ECO_2D)
+        // v3.6: Chat é a aba inicial; o mundo começa com 0 cidadãos (Adão e Eva vêm de .gguf).
+        rule.waitUntilAtLeastOneExists(hasTestTag("tab_BIOSFERA"), 60_000)
+        rule.waitUntil(60_000) { SimulationHub.status.value.loaded }
+        runBlocking {
+            SimulationHub.spawnFounder("teste-adao.gguf", "Adão", "M")
+            SimulationHub.spawnFounder("teste-eva.gguf", "Eva", "F")
+        }
+        rule.onNodeWithTag("tab_BIOSFERA").performClick()
         rule.waitUntilAtLeastOneExists(hasTestTag("world_mode_label"), 60_000)
     }
 
