@@ -89,6 +89,10 @@ fun CommandCapsule(
 ) {
     var plusOpen by remember { mutableStateOf(false) }
     var recipientsOpen by remember { mutableStateOf(false) }
+    // v3.9.2: em telas estreitas (< 400 dp) o campo de texto tem prioridade — foco sai da cápsula
+    // (continua no toque do balão) e o placeholder encurta, sem "Con ve…" espremido.
+    val compact = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp < 400
+    val hint = if (compact && placeholder.length > 30) "Converse ou dê uma diretriz…" else placeholder
     val current = recipients.firstOrNull { it.id == selected } ?: recipients.firstOrNull() ?: Recipient(null, "Todos")
     Row(
         modifier.fillMaxWidth().heightIn(min = 56.dp)
@@ -112,7 +116,7 @@ fun CommandCapsule(
                 Modifier.clip(CircleShape).background(Lumon.Sunflower.copy(alpha = 0.16f))
                     .clickable(enabled = recipients.size > 1) { recipientsOpen = true }
                     .padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp)
-                    .widthIn(max = 96.dp).testTag("capsule_recipient"),
+                    .widthIn(max = if (compact) 76.dp else 96.dp).testTag("capsule_recipient"),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(current.name, style = MaterialTheme.typography.labelMedium, color = Lumon.Sunflower, maxLines = 1,
@@ -125,7 +129,7 @@ fun CommandCapsule(
             }
         }
         Box(Modifier.weight(1f).padding(horizontal = 6.dp), contentAlignment = Alignment.CenterStart) {
-            if (draft.isEmpty()) Text(placeholder, style = MaterialTheme.typography.bodyMedium, color = Lumon.CreamDim, maxLines = 2,
+            if (draft.isEmpty()) Text(hint, style = MaterialTheme.typography.bodyMedium, color = Lumon.CreamDim, maxLines = 2,
                 overflow = TextOverflow.Ellipsis)
             BasicTextField(
                 value = draft, onValueChange = { onDraft(it.take(400)) }, enabled = enabled,
@@ -142,7 +146,7 @@ fun CommandCapsule(
                 tint = if (micActive) Lumon.Halation else if (micBusy) Lumon.Sunflower else Lumon.Cream,
                 modifier = Modifier.scale(pulse), onClick = onMic)
         }
-        if (onFocus != null) CapsuleIcon(Icons.Outlined.CenterFocusStrong, "focar na Biosfera", "capsule_focus", onClick = onFocus)
+        if (onFocus != null && !compact) CapsuleIcon(Icons.Outlined.CenterFocusStrong, "focar na Biosfera", "capsule_focus", onClick = onFocus)
         val canSend = enabled && draft.isNotBlank()
         val bg by animateColorAsState(if (busy) Lumon.Halation else if (canSend) Lumon.Sunflower else Lumon.Outline, GlassMotion.spec(), label = "send")
         Box(
