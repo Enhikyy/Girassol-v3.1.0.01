@@ -4,6 +4,9 @@
 // na GBNF estrita) em vez de um sampler sem restrição.
 #include "llg_sampler.hpp"
 
+// Sem llama.cpp (testes nativos mínimos, -Pgirassol.noLlama) esta unidade fica vazia.
+#if defined(GIRASSOL_HAS_LLAMA)
+
 #include "ggml.h"
 #include "llama.h"
 
@@ -306,3 +309,5 @@ llama_sampler * girassol_llg_sampler_init(const llama_vocab *, const char *, con
 }
 
 #endif  // GIRASSOL_USE_LLGUIDANCE
+
+#endif  // GIRASSOL_HAS_LLAMA
