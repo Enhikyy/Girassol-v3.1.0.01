@@ -74,11 +74,18 @@ object PiperVoice {
 
     @Volatile private var tokens: Set<Int>? = null
 
-    /** Síntese completa (sem streaming); falha alto se o VITS não produzir amostras. */
+    /**
+     * Síntese completa (sem streaming). O Sherpa 2.0.2 pode devolver sampleRate=0 no
+     * GeneratedAudio mesmo quando OfflineTts.sampleRate() conhece a taxa do modelo.
+     * Normaliza o metadado usando a taxa declarada pelo próprio VITS.
+     */
     fun synthesize(engine: OfflineTts, text: String, tokens: Set<Int>? = null): GeneratedAudio {
-        val a = engine.generateWithConfig("", generationConfig(text, tokens))
-        check(a.sampleRate > 0 && a.samples.isNotEmpty()) { "Piper não gerou áudio para \"${text.take(40)}\"" }
-        return a
+        val audio = engine.generateWithConfig("", generationConfig(text, tokens))
+        val rate = audio.sampleRate.takeIf { it > 0 } ?: engine.sampleRate()
+        check(rate in 8_000..192_000 && audio.samples.isNotEmpty()) {
+            "Piper não gerou áudio válido para \"${text.take(40)}\" (sampleRate=${audio.sampleRate}, modelRate=${engine.sampleRate()})"
+        }
+        return if (audio.sampleRate == rate) audio else GeneratedAudio(audio.samples, rate)
     }
 
     fun speak(context: Context, profile: LlmQuantPolicy.DeviceProfile, citizenId: String, text: String, pan: Float,
