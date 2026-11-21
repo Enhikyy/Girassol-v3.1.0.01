@@ -9,9 +9,8 @@ APK=$(ls app/build/outputs/apk/debug/*x86_64*.apk app/build/outputs/apk/debug/*.
 TAPK=$(ls app/build/outputs/apk/androidTest/debug/*.apk | head -1)
 echo "APK: $APK  /  teste: $TAPK"
 # o emulador recém-ligado sobrecarrega o Pixel Launcher (diálogo "isn't responding"): espera
-# o sistema assentar e desliga o launcher durante a demo.
+# o sistema assentar; diálogos ANR do sistema são dispensados antes de cada captura.
 sleep 45
-adb shell pm disable-user --user 0 com.google.android.apps.nexuslauncher >/dev/null 2>&1 || true
 adb shell settings put global hide_error_dialogs 1 || true
 adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS >/dev/null 2>&1 || true
 adb install -r -g "$APK"; adb install -r -g "$TAPK"

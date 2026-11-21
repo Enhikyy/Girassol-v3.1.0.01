@@ -41,7 +41,10 @@ class BiosferaDemoTest {
             SimulationHub.setSpeed(8)
             mark("VELOCIDADE_8X")
             Thread.sleep(40_000)             // ~13 h de mundo: amanhecer → dia → entardecer
-            val p = WorldPickRegistry.positions.values.firstOrNull()
+            val dm = ctx.resources.displayMetrics
+            val p = WorldPickRegistry.positions.values.minByOrNull {
+                kotlin.math.hypot(it.x - dm.widthPixels / 2f, it.y - dm.heightPixels * 0.45f)
+            }
             mark("CARTAO ${p?.x?.toInt() ?: -1} ${p?.y?.toInt() ?: -1}")
             Thread.sleep(15_000)
             SimulationHub.setSpeed(1)
