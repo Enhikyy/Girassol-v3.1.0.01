@@ -1467,9 +1467,9 @@ class WorldCore(
                 val h = emit(
                     "COMERCIO",
                     a.id,
-                    "vendedor=${b.id};recurso=$FOOD;qtd=${tradeQuantity.fmt(2)};" +
-                        "moeda=$CREDIT;preco_unitario=${quote.unitPrice.fmt(2)};" +
-                        "total=${quote.totalPrice.fmt(2)};referencia=${quote.referenceUnitPrice.fmt(2)}"
+                    "vendedor=${b.id};recurso=$FOOD;qtd=${"%.2f".fmt(tradeQuantity)};" +
+                        "moeda=$CREDIT;preco_unitario=${"%.2f".fmt(quote.unitPrice)};" +
+                        "total=${"%.2f".fmt(quote.totalPrice)};referencia=${"%.2f".fmt(quote.referenceUnitPrice)}"
                 )
                 if (state.ledger.exchange(
                     firstFrom = b.id,
@@ -1485,7 +1485,6 @@ class WorldCore(
                 )) {
                     tie.recordTrustOutcome("comercio", true)
                 } else {
-                    state.stressEvents.lastOrNull { it.targetId == b.id && it.resolvedTick < 0 }?.let { it.quarantinedBy++ }
                     tie.recordTrustOutcome("comercio", false)
                 }
             }
