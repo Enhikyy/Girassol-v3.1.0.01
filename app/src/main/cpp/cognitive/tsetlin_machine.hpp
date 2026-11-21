@@ -6,6 +6,7 @@
 #include <limits>
 #include "../common/splitmix64.hpp"
 #include <vector>
+#include <utility>
 
 namespace girassol::tsetlin {
 
@@ -152,7 +153,10 @@ public:
         } else {
             return false;
         }
-        if (nf == 0 || nc == 0 || ns < 2 || tt < 1 ||
+        if (nf == 0 || nc == 0 ||
+            nf > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) ||
+            nc > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) ||
+            ns < 2 || ns > std::numeric_limits<int32_t>::max() / 2 || tt < 1 ||
             !std::isfinite(specificity) || specificity < 1.01f) return false;
         const uint64_t stateCount64 = static_cast<uint64_t>(nc) * static_cast<uint64_t>(nf) * 2ULL;
         if (stateCount64 > static_cast<uint64_t>(std::numeric_limits<size_t>::max() / sizeof(int32_t))) return false;
