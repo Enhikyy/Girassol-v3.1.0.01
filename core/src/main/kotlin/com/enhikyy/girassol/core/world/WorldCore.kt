@@ -1220,9 +1220,13 @@ class WorldCore(
         }
         val semanticRelations = report.semanticRelations.associateBy { it.summary }
         for (summary in report.promotedSemanticSummaries) {
-            if (c.memories.none { it.layer == MemoryLayer.SEMANTIC && it.content == summary }) {
-                val relation = semanticRelations[summary]
-                val tags = linkedSetOf("SCHEMA").apply { relation?.topicTag?.let(::add) }
+            val relation = semanticRelations[summary]
+            val existing = c.memories.firstOrNull { it.layer == MemoryLayer.SEMANTIC && it.content == summary }
+            if (existing != null) {
+                // Migra nós semânticos antigos (sem arestas) quando as fontes ainda existem.
+                relation?.sourceEpisodeIds?.let(existing.linkedMemoryIds::addAll)
+            } else {
+                val tags = linkedSetOf("SCHEMA").apply { relation?.topicTag?.let { add(it) } }
                 c.memories += AssociativeMemoryNode(
                     id = c.nextMemoryId++,
                     ownerAgentId = c.id,
@@ -1243,8 +1247,11 @@ class WorldCore(
         }
         val proceduralRelations = report.proceduralRelations.associateBy { it.macro }
         for (macro in report.distilledProceduralMacros) {
-            if (c.memories.none { it.layer == MemoryLayer.PROCEDURAL && it.content == macro }) {
-                val relation = proceduralRelations[macro]
+            val relation = proceduralRelations[macro]
+            val existing = c.memories.firstOrNull { it.layer == MemoryLayer.PROCEDURAL && it.content == macro }
+            if (existing != null) {
+                relation?.sourceEpisodeId?.let(existing.linkedMemoryIds::add)
+            } else {
                 val tags = linkedSetOf("MACRO").apply { addAll(relation?.tags.orEmpty()) }
                 c.memories += AssociativeMemoryNode(
                     id = c.nextMemoryId++,
