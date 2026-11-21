@@ -19,6 +19,7 @@
 #include "../audio/binaural_hrtf_spatializer.hpp"
 #include "../forge/lora_trainer_realtime.hpp"
 #include "../hardware/soc_hardware_probe.hpp"
+#include "../common/jni_utf.hpp"
 #include <string>
 
 namespace {
@@ -124,6 +125,7 @@ Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeTsetlinSerialize(
         if (it != gTsetlinPool.end()) blob = it->second->serializeBinary();
     }
     jbyteArray out = env->NewByteArray(static_cast<jsize>(blob.size()));
+    if (!out) return nullptr;
     if (!blob.empty()) {
         env->SetByteArrayRegion(out, 0, static_cast<jsize>(blob.size()), reinterpret_cast<const jbyte*>(blob.data()));
     }
@@ -233,6 +235,7 @@ Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeNavFindPathGrid(
     }
     const auto path = astar.findPath(w, tiles.data(), sx, sz, gx, gz, tp, dp);
     jintArray out = env->NewIntArray(static_cast<jsize>(path.size()));
+    if (!out) return nullptr;
     if (out && !path.empty()) env->SetIntArrayRegion(out, 0, static_cast<jsize>(path.size()), path.data());
     return out;
 }
@@ -266,6 +269,7 @@ Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeAnokhinCompare(JNIE
     double out[4];
     evaluate(in, in[3 * NEEDS], in[3 * NEEDS + 1], in + NEEDS, in + 2 * NEEDS, in[3 * NEEDS + 2] >= 0.5, out);
     jdoubleArray r = env->NewDoubleArray(4);
+    if (!r) return nullptr;
     env->SetDoubleArrayRegion(r, 0, 4, out);
     return r;
 }
@@ -312,7 +316,7 @@ Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeAudioStatus(JNIEnv*
                                  std::to_string(gAudio->synth().framesRendered()))
                               : ("erro: " + gAudio->lastError());
     }
-    return env->NewStringUTF(s.c_str());
+    return girassol::jniutf::toJava(env, s);
 }
 
 // Renderização offline (diagnóstico/benchmark): [rms, pico, quadros].
@@ -340,6 +344,7 @@ Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeAudioOfflineProbe(J
     for (float v : buf) { sum += v * v; peak = std::max(peak, std::fabs(v)); }
     const jfloat vals[3] = {static_cast<float>(std::sqrt(sum / buf.size())), peak, static_cast<float>(frames)};
     jfloatArray out = env->NewFloatArray(3);
+    if (!out) return nullptr;
     if (out) env->SetFloatArrayRegion(out, 0, 3, vals);
     return out;
 }
@@ -374,6 +379,7 @@ Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeLoraTrain(
     std::memcpy(&stepBits, &s.step, sizeof(float));
     out.push_back(stepBits);
     jfloatArray arr = env->NewFloatArray(static_cast<jsize>(out.size()));
+    if (!arr) return nullptr;
     if (arr) env->SetFloatArrayRegion(arr, 0, static_cast<jsize>(out.size()), out.data());
     return arr;
 }
@@ -390,6 +396,7 @@ Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeCpuFeatures(JNIEnv*
     const jint v[8] = {f.neon, f.dotprod, f.fp16, f.i8mm, f.sve, f.sve2, a64,
                        static_cast<jint>(girassol::hw::selectLlmVariant(f, a64))};
     jintArray arr = env->NewIntArray(8);
+    if (!arr) return nullptr;
     if (arr) env->SetIntArrayRegion(arr, 0, 8, v);
     return arr;
 }
@@ -400,6 +407,7 @@ Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeProcMemory(JNIEnv* 
     const auto m = girassol::hw::readSelfProcMemory();
     const jlong v[6] = {m.vmRssKb, m.vmHwmKb, m.vmSizeKb, m.rssAnonKb, m.rssFileKb, m.vmSwapKb};
     jlongArray arr = env->NewLongArray(6);
+    if (!arr) return nullptr;
     if (arr) env->SetLongArrayRegion(arr, 0, 6, v);
     return arr;
 }
@@ -409,13 +417,13 @@ Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeProcMemory(JNIEnv* 
 JNIEXPORT jstring JNICALL
 Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeProbeHardware(JNIEnv* env, jobject) {
     const std::string s = girassol::hw::probeSoc().toCompactString();
-    return env->NewStringUTF(s.c_str());
+    return girassol::jniutf::toJava(env, s);
 }
 
 JNIEXPORT jstring JNICALL
 Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeSelfTest(JNIEnv* env, jobject) {
     const std::string s = girassol::hw::runSelfTest();
-    return env->NewStringUTF(s.c_str());
+    return girassol::jniutf::toJava(env, s);
 }
 
 JNIEXPORT jdoubleArray JNICALL
@@ -423,6 +431,7 @@ Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeBenchmarkTsetlin(JN
     uint64_t checksum = 0;
     const double ips = girassol::hw::benchmarkTsetlin(static_cast<uint64_t>(seed), static_cast<int>(iterations), &checksum);
     jdoubleArray out = env->NewDoubleArray(2);
+    if (!out) return nullptr;
     if (out == nullptr) return nullptr;
     const jdouble vals[2] = {ips, static_cast<jdouble>(checksum & 0xFFFFFFFFULL)};
     env->SetDoubleArrayRegion(out, 0, 2, vals);

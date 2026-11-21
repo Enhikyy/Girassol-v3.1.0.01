@@ -78,7 +78,12 @@ data class LlmStats(
     val poolHits: Long = 0,
     val poolColdLoads: Long = 0,
     val poolEvictions: Long = 0,
-    val poolKeys: List<String> = emptyList()
+    val poolKeys: List<String> = emptyList(),
+    /** v3.8: orçamento dinâmico (MemAvailable ∧ availMem − reservas), reserva e despejos por pressão. */
+    val dynamicBudgetMb: Long = -1,
+    val budgetReserveMb: Long = 0,
+    val budgetSource: String = "",
+    val pressureEvictions: Int = 0
 )
 
 /**
@@ -248,6 +253,9 @@ object LocalLlmManager : NeuralDeliberationPort {
     private val worker = Executors.newSingleThreadExecutor { r ->
         Thread(r, "girassol-llm").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
     }
+    private val pressureExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "girassol-llm-pressure").apply { isDaemon = true }
+    }
     private val results = ConcurrentLinkedQueue<NeuralDecision>()
     private val inflight = AtomicInteger(0)
     private val pendingAgents = java.util.Collections.synchronizedSet(HashSet<String>())
@@ -292,6 +300,7 @@ object LocalLlmManager : NeuralDeliberationPort {
         lazyMode = LlmQuantPolicy.lazyFor(totalMem)
         _models.value = readRegistry(context)
         _stats.update { it.copy(budgetMb = LlmQuantPolicy.budgetFor(totalMem) / (1024 * 1024), kvCache = LlmQuantPolicy.kvName(kvType), lazyMode = lazyMode) }
+        runCatching { publishBudget(RamBudget.read(context)) }
         if (!engineCompiled) { _stats.update { it.copy(status = LlmStatus.UNAVAILABLE) }; return }
         refreshStatus()
         idleChecker.scheduleWithFixedDelay({ unloadIfIdle() }, 30, 30, java.util.concurrent.TimeUnit.SECONDS)
@@ -560,27 +569,33 @@ object LocalLlmManager : NeuralDeliberationPort {
         if (!file.exists()) { _stats.update { it.copy(status = LlmStatus.ERROR, lastError = "arquivo ausente: ${m.key}") }; return false }
         val poolNow = if (profile.poolCapacity > 1) LlmQuantPolicy.parsePool(runCatching { LlmNativeBridge.nativeLlmPoolStatus() }.getOrDefault("")) else LlmQuantPolicy.PoolStatus()
         val others = poolNow.paths.zip(poolNow.bytes).filter { it.first != file.absolutePath }.map { it.second }
-        val pool = LlmQuantPolicy.fitPool(profile.poolCapacity, file.length(), others, LlmQuantPolicy.budgetFor(totalMem), nCtx, kvType)
+        // v3.8: orçamento dinâmico (MemAvailable ∧ availMem − Filament − gráfico − WAL − folga)
+        var budget = RamBudget.read(ctx)
+        // os residentes já estão dentro de "livre"; o pool cabe se novo + estacionados ≤ dinâmico + residentes
+        val residentActive = others.sumOf { LlmQuantPolicy.activeRamEstimate(it, 0, kvType) - 80L * 1024 * 1024 }
+        val pool = LlmQuantPolicy.fitPool(profile.poolCapacity, file.length(), others,
+            budget.dynamicBytes + residentActive.coerceAtLeast(0L), nCtx, kvType)
         if (ready && pool <= 1) {
-            // perfil 4 GB (3631 MB): single-model — a troca descarrega e mapeia o próximo
+            // perfil 4 GB (SM-A226BR, Moto G62 5G): single-model — a troca descarrega e mapeia o próximo
             runCatching { LlmNativeBridge.nativeLlmUnload() }
             ready = false; loadedKey = null
+            budget = RamBudget.read(ctx)
         }
-        val am = ctx.getSystemService(ActivityManager::class.java)
-        var mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
         val resident = pool > 1 && poolNow.paths.contains(file.absolutePath)
         // residente no pool: os pesos já estão mapeados, só o contexto (KV) é recriado
         val active = if (resident) LlmQuantPolicy.activeRamEstimate(0L, nCtx, kvType)
             else LlmQuantPolicy.activeRamEstimate(file.length(), nCtx, kvType)
-        if (pool > 1 && !resident && (mi.lowMemory || mi.availMem - active < MIN_FREE_AFTER_LOAD)) {
+        if (pool > 1 && !resident && !budget.fits(active)) {
             // pressão de RAM: despeja os modelos estacionados antes de recusar
             runCatching { LlmNativeBridge.nativeLlmSetPoolCapacity(1) }
-            mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+            budget = RamBudget.read(ctx)
         }
         ready = false; loadedKey = null
-        if (mi.lowMemory || mi.availMem - active < MIN_FREE_AFTER_LOAD) {
+        publishBudget(budget)
+        if (!budget.fits(active)) {
             _stats.update { it.copy(status = LlmStatus.PAUSED_MEMORY,
-                lastError = "RAM livre insuficiente agora (${mi.availMem / 1048576} MB livres, modelo precisa de ~${active / 1048576} MB)") }
+                lastError = "RAM insuficiente agora: ${budget.availableMb} MB livres (${budget.source}), reserva ${budget.reserveMb} MB " +
+                    "(Filament + gráfico + WAL + folga), modelo precisa de ~${active / 1048576} MB") }
             return false
         }
         _stats.update { it.copy(status = LlmStatus.LOADING, modelName = m.key, lastError = "") }
@@ -629,6 +644,46 @@ object LocalLlmManager : NeuralDeliberationPort {
 
     /** Caminhos dos llama_model residentes no pool nativo (ativo + estacionados). */
     private fun poolKeys(): List<String> = LlmQuantPolicy.parsePool(runCatching { LlmNativeBridge.nativeLlmPoolStatus() }.getOrDefault("")).paths
+
+    private fun publishBudget(b: RamBudget.Budget) {
+        _stats.update { it.copy(budgetMb = b.staticBytes / 1048576, dynamicBudgetMb = b.dynamicMb,
+            budgetReserveMb = b.reserveMb, budgetSource = b.source) }
+    }
+
+    /**
+     * v3.8 — pressão de memória (onTrimMemory ≥ RUNNING_MODERATE, lowMemory ou orçamento
+     * dinâmico abaixo da pegada dos residentes): no perfil 8/12 GB despeja na hora os modelos
+     * estacionados, sem esperar a geração em curso. Devolve quantos foram liberados.
+     */
+    fun evictUnderPressure(reason: String) {
+        if (profile.poolCapacity <= 1 || !engineCompiled) return
+        // thread própria: a do LLM pode estar gerando e o callback chega na thread principal
+        pressureExecutor.execute {
+            val n = runCatching { LlmNativeBridge.nativeLlmEvictParked() }.getOrDefault(0)
+            if (n > 0) {
+                Log.w(TAG, "pressão de memória ($reason): $n modelo(s) estacionado(s) despejado(s)")
+                _stats.update { it.copy(pressureEvictions = it.pressureEvictions + n, lastError = "despejo por pressão: $reason") }
+                publishPool()
+            }
+            appContext?.let { runCatching { publishBudget(RamBudget.read(it)) } }
+        }
+    }
+
+    /** Amostragem periódica (MemoryGuard, ~10 s): publica o orçamento e despeja se ele zerar. */
+    fun refreshBudget(context: Context) {
+        val b = runCatching { RamBudget.read(context) }.getOrNull() ?: return
+        publishBudget(b)
+        if (profile.poolCapacity > 1 && _stats.value.poolResident > 1 && (b.lowMemory || b.dynamicBytes == 0L)) {
+            evictUnderPressure("orçamento dinâmico esgotado (${b.availableMb} MB livres)")
+        }
+    }
+
+    /** Níveis de onTrimMemory que indicam pressão real (não apenas UI escondida). */
+    fun isPressureTrim(level: Int, lowMemory: Boolean): Boolean = lowMemory ||
+        level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE ||
+        level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
+        level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+        level >= android.content.ComponentCallbacks2.TRIM_MEMORY_BACKGROUND
 
     private fun publishPool() {
         val st = LlmQuantPolicy.parsePool(runCatching { LlmNativeBridge.nativeLlmPoolStatus() }.getOrDefault(""))

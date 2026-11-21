@@ -112,6 +112,16 @@ bool LlmEngine::loaded() const {
     return model_ != nullptr && ctx_ != nullptr;
 }
 
+uint64_t LlmEngine::modelBytes() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return modelBytes_;
+}
+
+std::string LlmEngine::description() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return desc_;
+}
+
 size_t LlmEngine::slotCount() const {
     std::lock_guard<std::mutex> lock(mu_);
     return slots_.size();
@@ -167,6 +177,7 @@ void LlmEngine::freeResidentLocked(Resident& r) {
 
 void LlmEngine::evictParkedLocked(size_t keep) {
     // LRU: remove os estacionados menos usados até sobrar `keep`
+    std::lock_guard<std::mutex> pool(poolMu_);
     while (parked_.size() > keep) {
         size_t victim = 0;
         for (size_t i = 1; i < parked_.size(); ++i) if (parked_[i].lastUse < parked_[victim].lastUse) victim = i;
@@ -190,6 +201,7 @@ void LlmEngine::parkActiveLocked() {
     r.lora = std::move(lora_); r.lastLora = lastLora_; r.lastUse = ++useClock_;
     model_ = nullptr; adapter_ = nullptr;
     unloadLocked();  // zera o resto do estado ativo (nada mais a liberar)
+    std::lock_guard<std::mutex> pool(poolMu_);
     parked_.push_back(std::move(r));
 }
 
@@ -207,10 +219,22 @@ LlmPoolStatus LlmEngine::poolStatus() const {
     st.capacity = poolCapacity_;
     st.active = modelPath_;
     if (model_) { st.paths.push_back(modelPath_); st.bytes.push_back(modelBytes_); }
+    std::lock_guard<std::mutex> pool(poolMu_);
     for (const auto& r : parked_) { st.paths.push_back(r.path); st.bytes.push_back(r.bytes); }
     st.resident = static_cast<int32_t>(st.paths.size());
-    st.switches = switches_; st.coldLoads = coldLoads_; st.evictions = evictions_;
+    st.switches = switches_; st.coldLoads = coldLoads_; st.evictions = evictions_.load();
     return st;
+}
+
+int32_t LlmEngine::evictParkedNow() {
+    std::vector<Resident> victims;
+    {
+        std::lock_guard<std::mutex> pool(poolMu_);
+        victims.swap(parked_);
+        evictions_ += victims.size();
+    }
+    for (auto& r : victims) freeResidentLocked(r);  // fora da trava: llama_model_free pode demorar
+    return static_cast<int32_t>(victims.size());
 }
 
 void LlmEngine::setPoolCapacity(int32_t capacity) {
@@ -251,11 +275,19 @@ bool LlmEngine::load(const std::string& path, const LlmLoadConfig& cfg, std::str
         evictParkedLocked(0);
     }
     cfg_ = cfg;
-    auto it = std::find_if(parked_.begin(), parked_.end(), [&](const Resident& r) { return r.path == path; });
-    if (it != parked_.end()) {
-        Resident r = std::move(*it);
-        parked_.erase(it);
-        unparkLocked(std::move(r));
+    bool found = false;
+    Resident hit;
+    {
+        std::lock_guard<std::mutex> pool(poolMu_);
+        auto it = std::find_if(parked_.begin(), parked_.end(), [&](const Resident& r) { return r.path == path; });
+        if (it != parked_.end()) {
+            hit = std::move(*it);
+            parked_.erase(it);
+            found = true;
+        }
+    }
+    if (found) {
+        unparkLocked(std::move(hit));
         ++switches_;
     } else {
         // abre espaço no pool antes de mapear outro arquivo

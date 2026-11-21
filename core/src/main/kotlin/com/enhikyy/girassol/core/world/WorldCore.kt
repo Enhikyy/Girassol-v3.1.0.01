@@ -136,6 +136,8 @@ class WorldCore(
     private val memoryEngine = FourLayerMemoryAndSleepEngine(maxNodesPerAgent = MAX_MEMORIES)
     private val workspace = GlobalWorkspaceStage(3)
     private val tickEvents = mutableListOf<CanonicalEvent>()
+    /** prev_hash esperado do primeiro evento pendente (cabeça da cadeia já gravada). */
+    private var tickEventsAnchor: String? = null
     /** Redes CfC derivadas de (semente, id) — pesos determinísticos, não persistidos. */
     private val cfcNets = HashMap<String, CfcNeuromodulator>()
     private val violations = mutableListOf<String>()
@@ -443,6 +445,7 @@ class WorldCore(
         val ev = CanonicalEvent(seq, state.tick, CURRENT_RULES_VERSION, type, actorId, payload, state.lastEventHash, hash)
         state.lastEventHash = hash
         if (!shadow) {
+            if (tickEvents.isEmpty()) tickEventsAnchor = ev.prevHash
             tickEvents += ev
             state.recentEvents += ev
             if (state.recentEvents.size > 400) state.recentEvents.subList(0, state.recentEvents.size - 400).clear()
@@ -481,37 +484,50 @@ class WorldCore(
         val trail = state.board.channelSnapshot(CH_TRAIL)
         val danger = state.board.channelSnapshot(CH_DANGER)
 
-        for (c in alive) {
-            if (c.intention != null) continue
-            val rng = StreamSeeds.rng(state.seed, c.id, tick, "decisao")
-            // 3. Percepção & competição atencional
-            val signals = perceive(c)
-            val broadcast = workspace.broadcastWinningSignals(signals)
-            // 4. Memória & atualização epistêmica (ACT-R + MemRL + A-MEM)
+        // ---- v3.8: estágios 3–7 em LOTE no núcleo C++20 (uma travessia JNI por estágio) ----
+        val pending = alive.filter { it.intention == null }
+        val rngs = pending.map { StreamSeeds.rng(state.seed, it.id, tick, "decisao") }
+        val gridW = state.board.gridWidth()
+        val gridH = state.board.gridHeight()
+        val cell = state.board.cellSizeWorld()
+        // 3. Percepção & competição atencional (kernel nativo)
+        val broadcasts = perceiveBatch(pending, state.board.channelSnapshot(CH_FOOD), danger, gridW, gridH, cell)
+        // 4. Memória & atualização epistêmica (ACT-R + MemRL + A-MEM): recuperação 2 estágios no kernel.
+        // A memória de trabalho é zerada antes de cada cidadão; logo nenhuma consulta vê vínculos
+        // Zettelkasten de outro cidadão (activeWorkingIds vazio), como no laço sequencial.
+        val queries = pending.mapIndexed { i, c ->
+            val broadcast = broadcasts[i]
             val tags = broadcast.mapNotNull { it.entityId }.toSet() + broadcast.map { it.sourceModule }.toSet()
+            NativeCognition.MemoryQuery(c.memories, tick, broadcast.joinToString(" ") { it.summary }, tags,
+                broadcast.mapNotNull { it.entityId }.toSet(),
+                topK = 4, activeWorkingIds = emptySet())
+        }
+        val retrievals = NativeCognition.retrieveBatch(queries)
+        val recalledAll = ArrayList<List<AssociativeMemoryNode>>(pending.size)
+        val gathered = ArrayList<List<Gathered>>(pending.size)
+        for ((i, c) in pending.withIndex()) {
             memoryEngine.clearWorkingMemory()
-            val queryText = broadcast.joinToString(" ") { it.summary }
-            val retrieval = memoryEngine.retrieveTwoStage(c.memories, tick, queryText, tags, broadcast.mapNotNull { it.entityId }.toSet(),
-                topK = 4, workingCapacity = 5 + (4.0 * c.trait("conscienciosidade")).roundToInt())
-            val recalled = retrieval.memories
+            val retrieval = memoryEngine.applyRetrieval(retrievals[i], c.memories.size, tick,
+                workingCapacity = 5 + (4.0 * c.trait("conscienciosidade")).roundToInt())
+            recalledAll += retrieval.memories
             state.retrievalQueries++
             state.retrievalStage1Total += retrieval.stage1Candidates
             state.retrievalCorpusTotal += retrieval.corpusSize
             // 5. Appraisal emocional
             appraise(c)
-            // 6. Utilidade & energia livre esperada G(π)
-            val candidates = buildCandidates(c, actionCounts, tier)
-            if (candidates.isEmpty()) continue
-            val sorted = candidates.sortedWith(compareBy<Candidate> { it.efe }.thenBy { it.intention.action.ordinal })
-            // 7. Planejamento com histerese (softmax de precisão γ sobre −G)
-            var idx = ActiveInferencePianoOrchestrator.selectPolicyWithHysteresis(
-                sorted.map { it.intention.action.name },
-                sorted.map { it.efe },
-                c.lastAction?.name,
-                state.policy.intentionSwitchHysteresis,
-                6.0,
-                rng.nextDouble()
-            )
+            // 6. entradas de G(π) por candidato (avaliadas no kernel)
+            gathered += gatherCandidates(c, actionCounts, tier)
+        }
+        // 6–7. G(π), ordenação (G, ordinal), softmax de precisão γ com histerese e F variacional
+        val decisions = decideBatch(pending, gathered, rngs.map { it.nextDouble() }, danger, gridW, gridH, cell)
+
+        for ((ci, c) in pending.withIndex()) {
+            val decision = decisions[ci] ?: continue
+            val rng = rngs[ci]
+            val broadcast = broadcasts[ci]
+            val recalled = recalledAll[ci]
+            val sorted = decision.sorted
+            var idx = decision.chosen
             // 8. Gate cognitivo: reflexo Tsetlin → deliberação PIANO quando necessário
             val features = reflexFeatures(c, sorted[idx].intention.action)
             val reflexConf = c.reflex.confidence(features).toDouble()
@@ -541,7 +557,7 @@ class WorldCore(
                     viaNeural = true
                     c.neuralSuggestion = null
                 } else {
-                    val bus = buildBus(c, broadcast, recalled)
+                    val bus = buildBus(c, broadcast, recalled, decision.vfe)
                     val ctx = DeliberationContext(bus, sorted.map { cand ->
                         DeliberationOption(cand.intention.action.name, cand.efe, cand.projected, cand.travel)
                     }, decayRates(c))
@@ -671,15 +687,41 @@ class WorldCore(
 
     // ===================================================================== estágios 3–6
 
-    private fun perceive(c: Citizen): List<PerceptualSignal> {
-        val out = mutableListOf<PerceptualSignal>()
-        for ((n, v) in c.needs) out += PerceptualSignal(n.name, "${n.label}=${"%.2f".fmt(v)}", n.name, (1.0 - v) * 1.1)
-        val food = state.board.readPheromone(CH_FOOD, c.x.toFloat(), c.z.toFloat())
-        if (food > 0.5f) out += PerceptualSignal("ESTIGMERGIA", "cheiro de comida", "FOOD_SCENT", (food / 10f).toDouble().coerceAtMost(0.9))
-        val danger = state.board.readPheromone(CH_DANGER, c.x.toFloat(), c.z.toFloat())
-        if (danger > 0.5f) out += PerceptualSignal("ESTIGMERGIA", "rastro de perigo", "DANGER", (danger / 5f).toDouble().coerceAtMost(1.0))
-        if (state.inDrought()) out += PerceptualSignal("CLIMA", "seca", "SECA", 0.5)
-        return out
+    /** Percepção + espaço de trabalho global no kernel nativo; o Kotlin só rotula os sinais. */
+    private fun perceiveBatch(cs: List<Citizen>, food: FloatArray, danger: FloatArray, w: Int, h: Int, cell: Float): List<List<PerceptualSignal>> {
+        if (cs.isEmpty()) return emptyList()
+        val n = cs.size
+        val needs = DoubleArray(n * NativeCognition.NEEDS)
+        val codes = IntArray(n * NativeCognition.NEEDS)
+        val values = arrayOfNulls<Map<Need, Double>>(n)
+        for ((i, c) in cs.withIndex()) {
+            var k = 0
+            for ((need, v) in c.needs) {
+                if (k >= NativeCognition.NEEDS) break
+                needs[i * NativeCognition.NEEDS + k] = v; codes[i * NativeCognition.NEEDS + k] = need.ordinal; k++
+            }
+            values[i] = c.needs
+        }
+        val sal = DoubleArray(n * NativeCognition.WORKSPACE_CAP)
+        val out = NativeCognition.nativePerceive(needs, codes, IntArray(n) { cs[it].x }, IntArray(n) { cs[it].z },
+            food, danger, w, h, cell, state.inDrought(), sal)
+        val stride = 1 + NativeCognition.WORKSPACE_CAP
+        return List(n) { i ->
+            val count = out[i * stride]
+            List(count) { k ->
+                val code = out[i * stride + 1 + k]
+                val s = sal[i * NativeCognition.WORKSPACE_CAP + k]
+                when (code) {
+                    NativeCognition.SIGNAL_FOOD -> PerceptualSignal("ESTIGMERGIA", "cheiro de comida", "FOOD_SCENT", s)
+                    NativeCognition.SIGNAL_DANGER -> PerceptualSignal("ESTIGMERGIA", "rastro de perigo", "DANGER", s)
+                    NativeCognition.SIGNAL_DROUGHT -> PerceptualSignal("CLIMA", "seca", "SECA", s)
+                    else -> {
+                        val need = Need.entries[code]
+                        PerceptualSignal(need.name, "${need.label}=${"%.2f".fmt(values[i]!!.getValue(need))}", need.name, s)
+                    }
+                }
+            }
+        }
     }
 
     private fun appraise(c: Citizen) {
@@ -702,8 +744,17 @@ class WorldCore(
 
     private data class Candidate(val intention: Intention, val efe: Double, val projected: DoubleArray, val travel: Int)
 
-    private fun buildCandidates(c: Citizen, popCounts: Map<String, Int>, tier: AllostaticThermalCoupling.ThermalTier): List<Candidate> {
-        val out = mutableListOf<Candidate>()
+    /** Entradas de G(π) de um candidato, coletadas do WorldState; o cálculo é feito no kernel C++20. */
+    private class Gathered(
+        val action: ActionType, val objId: String?, val tx: Int, val tz: Int, val claim: String?, val verified: Boolean,
+        val forecast: Double, val needsNow: DoubleArray, val memQ: Double, val travel: Int,
+        val d: DoubleArray, val i: IntArray
+    )
+
+    private class Decision(val sorted: List<Candidate>, val chosen: Int, val vfe: Double)
+
+    private fun gatherCandidates(c: Citizen, popCounts: Map<String, Int>, tier: AllostaticThermalCoupling.ThermalTier): List<Gathered> {
+        val out = mutableListOf<Gathered>()
         val foodWallet = state.ledger.getBalance(c.id, FOOD)
         val commonsFood = state.ledger.getBalance(COMMUNAL_COMMONS, FOOD)
         val material = state.ledger.getBalance(c.id, MATERIAL) + state.ledger.getBalance(COMMUNAL_COMMONS, MATERIAL)
@@ -729,8 +780,8 @@ class WorldCore(
                     .take(3).mapNotNull { (ad, d) -> state.obj(ad.sourceEntityId)?.let { it to d } }.toList()
             }
             for ((obj, dist) in targets) {
-                val cand = evaluate(c, action, profile, obj, dist.toInt(), popCounts, neural)
-                if (cand != null) out += cand
+                val g = gather(c, action, profile, obj, dist.toInt(), popCounts, neural)
+                if (g != null) out += g
             }
         }
         return out
@@ -738,10 +789,10 @@ class WorldCore(
 
     private fun manhattan(c: Citizen, o: SmartObject) = abs(c.x - o.tileX) + abs(c.z - o.tileZ)
 
-    private fun evaluate(
+    private fun gather(
         c: Citizen, action: ActionType, profile: ActionProfile, obj: SmartObject?, dist: Int,
         popCounts: Map<String, Int>, neural: Double
-    ): Candidate? {
+    ): Gathered? {
         val needsNow = Need.entries.map { c.needs.getValue(it) }.toDoubleArray()
         val skillEff = action.skill?.let { 0.6 + 0.6 * (c.skills[it]?.masteryProb ?: 0.1) } ?: 1.0
         // crença sobre o rendimento do alvo (ignora crenças em quarentena)
@@ -749,12 +800,6 @@ class WorldCore(
         val belief = claim?.let { c.beliefs[it] }?.takeIf { !it.quarantined }
         val yieldP = belief?.opinion?.projectedProbability() ?: 0.6
         val uncertainty = belief?.opinion?.uncertainty ?: 1.0
-        val travel = dist
-        val projected = DoubleArray(needsNow.size) { k ->
-            val n = Need.entries[k]
-            val gain = (profile.needGains[n] ?: 0.0) * (if ((profile.needGains[n] ?: 0.0) > 0) skillEff * (0.4 + 0.6 * yieldP / 0.6).coerceAtMost(1.4) else 1.0)
-            (needsNow[k] - decayRates(c)[k] * (travel + profile.durationTicks) + gain).coerceIn(0.0, 1.0)
-        }
         // produção econômica também tem valor pragmático (alimento futuro)
         val foodWallet = state.ledger.getBalance(c.id, FOOD)
         val economicBonus = when (action) {
@@ -766,57 +811,84 @@ class WorldCore(
             ActionType.ESTUDAR -> 0.04 * (1.0 + c.trait("aptidao"))
             else -> 0.0
         }
-        // risco pragmático: D_KL[Q(o|π) ‖ P_pref(o)] por necessidade, ponderado pela urgência
-        // (homeostase assimétrica) e modulado pelo cortisol da rede CfC
-        val stress = 0.8 + 0.4 * c.cortisol
-        val weights = DoubleArray(projected.size) { k ->
-            val deficit = 1.0 - projected[k]
-            val w = if (Need.entries[k] == Need.FOME || Need.entries[k] == Need.ENERGIA) 1.6 else 1.0
-            w * stress * (if (deficit > 0.7) 1.8 else 1.0)
-        }
-        // ganho epistêmico: redução esperada de incerteza sobre o alvo
-        val priorEntropy = entropyOf(uncertainty)
-        val posteriorEntropy = entropyOf(uncertainty * 0.5)
-        var epistemicWeight = state.policy.epistemicExplorationWeight * (0.5 + c.trait("curiosidade"))
-        if (action == ActionType.EXPLORAR) epistemicWeight *= 1.2
         val memQ = memoryUtility(c, action)
         val novelty = SemanticCollapseGuard.noveltyEpistemicBonus(action.name, popCounts)
-        val terms = ActiveInferencePianoOrchestrator.computeExpectedFreeEnergyKl(
-            projected = projected, weights = weights, preferred = PREFERRED_NEED_LEVEL,
-            outcomeUncertainty = uncertainty,
-            priorEntropy = priorEntropy, posteriorExpectedEntropy = posteriorEntropy,
-            epistemicWeight = epistemicWeight * 0.15 * (0.8 + 0.4 * c.dopamine),
-            neuralBaseCost = neural * 0.05, socTempC = state.telemetry.socTempC
-        )
-        var efe = terms.total - economicBonus - 0.12 * memQ - novelty + 0.002 * travel
-        if (obj != null && state.board.readPheromone(CH_DANGER, obj.tileX.toFloat(), obj.tileZ.toFloat()) > 2f) efe += 0.05
-        if (action == ActionType.SOCIALIZAR && obj != null) efe -= 0.02 * state.board.readPheromone(CH_SOCIAL, obj.tileX.toFloat(), obj.tileZ.toFloat()).coerceAtMost(5f)
-        if (action == ActionType.SOCIALIZAR) efe -= 0.04 * c.oxytocin
-        // viés do adaptador pessoal (herdado por TIES-Merging, treinado por LMS)
-        efe -= PersonalAdapter.DECISION_WEIGHT * PersonalAdapter.predict(c.personalAdapter, LoraFeatures.of(action, state.tick)).toDouble().coerceIn(-1.0, 1.0)
-        // viés aprendido pelo adaptador LoRA coletivo (zero até o primeiro ciclo aceito)
-        if (state.lora.acceptedCycles > 0) {
-            val pred = LoraMath.predict(state.lora, LoraFeatures.of(action, state.tick))[0].toDouble()
-            efe -= LORA_DECISION_WEIGHT * pred.coerceIn(-1.0, 1.0)
-        }
-
         val (tx, tz, objId) = if (obj != null) Triple(obj.tileX, obj.tileZ, obj.id) else {
             // EXPLORAR: vai verificar o alvo com crença mais incerta/não verificada
             val target = explorationTarget(c) ?: return null
             Triple(target.tileX, target.tileZ, null)
         }
         val forecast = action.skill?.let { c.skills[it]?.executionSuccessProbability(0.35, geneticAptitude = c.trait("aptidao")) } ?: 0.9
-        return Candidate(
-            Intention(action, objId, tx, tz, state.tick, -efe, forecast, false, false, claim,
-                belief?.verifiedByExperience ?: true,
-                expectedNeeds = projected.toList(), needsAtDecision = needsNow.toList(), memoryUtilityAtDecision = memQ),
-            efe, projected, travel
-        )
+        val decay = decayRates(c)
+        val d = DoubleArray(NativeCognition.CAND_D)
+        for (k in 0 until NativeCognition.NEEDS) {
+            d[k] = needsNow[k]; d[6 + k] = decay[k]; d[12 + k] = profile.needGains[Need.entries[k]] ?: 0.0
+        }
+        d[18] = skillEff; d[19] = yieldP; d[20] = uncertainty
+        d[21] = c.cortisol; d[22] = c.dopamine; d[23] = c.trait("curiosidade"); d[24] = state.policy.epistemicExplorationWeight
+        d[25] = neural; d[26] = state.telemetry.socTempC
+        d[27] = economicBonus; d[28] = memQ; d[29] = novelty; d[30] = c.oxytocin
+        // viés do adaptador pessoal (herdado por TIES-Merging, treinado por LMS) e da LoRA coletiva
+        d[31] = PersonalAdapter.predict(c.personalAdapter, LoraFeatures.of(action, state.tick)).toDouble()
+        val loraActive = state.lora.acceptedCycles > 0
+        d[32] = if (loraActive) LoraMath.predict(state.lora, LoraFeatures.of(action, state.tick))[0].toDouble() else 0.0
+        d[33] = PersonalAdapter.DECISION_WEIGHT; d[34] = LORA_DECISION_WEIGHT
+        var flags = 0
+        if (obj != null) flags = flags or NativeCognition.FLAG_TARGET
+        if (action == ActionType.SOCIALIZAR) flags = flags or NativeCognition.FLAG_SOCIAL
+        if (action == ActionType.EXPLORAR) flags = flags or NativeCognition.FLAG_EXPLORE
+        if (loraActive) flags = flags or NativeCognition.FLAG_LORA
+        val i = intArrayOf(dist, profile.durationTicks, obj?.tileX ?: -1, obj?.tileZ ?: -1, action.ordinal, flags)
+        return Gathered(action, objId, tx, tz, claim, belief?.verifiedByExperience ?: true, forecast, needsNow, memQ, dist, d, i)
     }
 
-    private fun entropyOf(u: Double): Double {
-        val p = (0.5 * u).coerceIn(1e-6, 0.5)
-        return -(p * ln(p) + (1 - p) * ln(1 - p))
+    /** Avalia G(π) de todos os candidatos de todos os cidadãos e escolhe a política (kernel C++20). */
+    private fun decideBatch(cs: List<Citizen>, gathered: List<List<Gathered>>, uniforms: List<Double>,
+                            danger: FloatArray, w: Int, h: Int, cell: Float): List<Decision?> {
+        if (cs.isEmpty()) return emptyList()
+        val total = gathered.sumOf { it.size }
+        val candD = DoubleArray(total * NativeCognition.CAND_D)
+        val candI = IntArray(total * NativeCognition.CAND_I)
+        val offsets = IntArray(cs.size + 1)
+        val citD = DoubleArray(cs.size * NativeCognition.CIT_D)
+        val current = IntArray(cs.size)
+        var j = 0
+        for ((ci, c) in cs.withIndex()) {
+            offsets[ci] = j
+            for (g in gathered[ci]) {
+                System.arraycopy(g.d, 0, candD, j * NativeCognition.CAND_D, NativeCognition.CAND_D)
+                System.arraycopy(g.i, 0, candI, j * NativeCognition.CAND_I, NativeCognition.CAND_I)
+                j++
+            }
+            for (k in 0 until NativeCognition.NEEDS) citD[ci * NativeCognition.CIT_D + k] = c.needs.getValue(Need.entries[k])
+            citD[ci * NativeCognition.CIT_D + 6] = uniforms[ci]
+            current[ci] = c.lastAction?.ordinal ?: -1
+        }
+        offsets[cs.size] = j
+        val efe = DoubleArray(total)
+        val proj = DoubleArray(total * NativeCognition.NEEDS)
+        val order = IntArray(total)
+        val vfe = DoubleArray(cs.size)
+        val chosen = NativeCognition.nativeCognitionBatch(candD, candI, offsets, citD, current,
+            danger, state.board.channelSnapshot(CH_SOCIAL), w, h, cell,
+            PREFERRED_NEED_LEVEL, state.policy.intentionSwitchHysteresis, 6.0, efe, proj, order, vfe)
+        return List(cs.size) { ci ->
+            val a = offsets[ci]
+            val b = offsets[ci + 1]
+            if (a == b) null else {
+                val sorted = (a until b).map { k ->
+                    val local = a + order[k]
+                    val g = gathered[ci][order[k]]
+                    val projected = proj.copyOfRange(local * NativeCognition.NEEDS, (local + 1) * NativeCognition.NEEDS)
+                    Candidate(
+                        Intention(g.action, g.objId, g.tx, g.tz, state.tick, -efe[local], g.forecast, false, false, g.claim, g.verified,
+                            expectedNeeds = projected.toList(), needsAtDecision = g.needsNow.toList(), memoryUtilityAtDecision = g.memQ),
+                        efe[local], projected, g.travel
+                    )
+                }
+                Decision(sorted, chosen[ci], vfe[ci])
+            }
+        }
     }
 
     private fun memoryUtility(c: Citizen, action: ActionType): Double {
@@ -865,13 +937,8 @@ class WorldCore(
         return f
     }
 
-    private fun buildBus(c: Citizen, broadcast: List<PerceptualSignal>, recalled: List<AssociativeMemoryNode>): PianoCognitiveBusSnapshot {
+    private fun buildBus(c: Citizen, broadcast: List<PerceptualSignal>, recalled: List<AssociativeMemoryNode>, vfe: Double): PianoCognitiveBusSnapshot {
         val needsArr = Need.entries.map { c.needs.getValue(it) }.toDoubleArray()
-        val prior = DoubleArray(6) { 1.0 / 6 }
-        val deficits = needsArr.map { (1.0 - it) + 1e-3 }
-        val sum = deficits.sum()
-        val posterior = deficits.map { it / sum }.toDoubleArray()
-        val lik = needsArr.map { it.coerceAtLeast(0.02) }.toDoubleArray()
         return PianoCognitiveBusSnapshot(
             agentId = c.id, tick = state.tick,
             coreSelf = CoreSelfAnchor(c.id, c.name, c.birthTick, listOf(
@@ -883,7 +950,7 @@ class WorldCore(
             socialSummary = "laços=${c.social.allTies().size}",
             workspaceBroadcast = broadcast,
             currentIntentionKey = c.intention?.action?.name,
-            variationalFreeEnergy = ActiveInferencePianoOrchestrator.computeVariationalFreeEnergy(posterior, prior, lik),
+            variationalFreeEnergy = vfe, // F calculada no núcleo C++20 (lote do tick)
             needsArray = needsArr
         )
     }
@@ -1691,7 +1758,14 @@ class WorldCore(
     }
 
     private fun checkInvariants() {
-        for (res in state.ledger.resourceTypes()) if (!state.ledger.verifyZeroSumConservation(res)) violations += "conservação:$res"
+        // v3.8: conservação soma-zero (com detecção de estouro de 64 bits) e cadeia SHA-256 dos
+        // eventos do tick validadas no kernel C++20 — o hash calculado pela JVM no emit é
+        // conferido por uma segunda implementação independente a cada tick.
+        for (res in NativeCognition.ledgerViolations(state.ledger)) violations += "conservação:$res"
+        if (tickEvents.isNotEmpty()) {
+            val chain = NativeCognition.verifyChain(tickEvents, tickEventsAnchor)
+            if (!chain.ok) violations += "cadeia_sha256:${chain.firstBadSeq}:${chain.reason}"
+        }
         for (c in state.aliveCitizens()) {
             if (c.needs.values.any { it < 0.0 || it > 1.0 || it.isNaN() }) violations += "necessidade_fora_do_intervalo:${c.id}"
             if (!state.inBounds(c.x, c.z)) violations += "fora_do_mapa:${c.id}"

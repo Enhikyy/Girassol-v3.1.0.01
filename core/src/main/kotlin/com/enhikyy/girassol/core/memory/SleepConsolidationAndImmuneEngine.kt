@@ -1,8 +1,8 @@
 package com.enhikyy.girassol.core.memory
 
 import com.enhikyy.girassol.core.util.fmt
+import com.enhikyy.girassol.core.world.NativeCognition
 import kotlin.math.abs
-import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.pow
 
@@ -105,6 +105,12 @@ data class AssociativeMemoryNode(
 
     fun binaryEmbedding(): LongArray = bits ?: EpisodicIndex.simHash(features()).also { bits = it }
 
+    /** v3.8: hashes FNV-1a das características para o kernel nativo (conteúdo/tags são imutáveis). */
+    @kotlinx.serialization.Transient
+    private var nativeHashes: NativeMemoryHashes? = null
+
+    fun nativeCache(): NativeMemoryHashes = nativeHashes ?: NativeMemoryHashes.of(this).also { nativeHashes = it }
+
     fun baseLevelActivation(currentTick: Long, decay: Double = 0.5): Double {
         val samples = if (recentAccessTicks.isEmpty()) listOf(createdTick) else recentAccessTicks
         var sum = 0.0
@@ -119,6 +125,18 @@ data class AssociativeMemoryNode(
         val clampedR = observedReward.coerceIn(-1.0, 1.0)
         tdPredictionError = clampedR - qUtility
         qUtility = (qUtility + alpha * tdPredictionError).coerceIn(-1.0, 1.0)
+    }
+}
+
+/** Hashes FNV-1a 64 que o núcleo C++20 usa na recuperação (calculados uma vez por memória). */
+class NativeMemoryHashes(val features: LongArray, val docTerms: LongArray, val tags: LongArray, val entities: LongArray) {
+    companion object {
+        private fun h(values: Collection<String>) = LongArray(values.size).also { out ->
+            var i = 0
+            for (v in values) out[i++] = EpisodicIndex.fnv1a64(v)
+        }
+        fun of(n: AssociativeMemoryNode) = NativeMemoryHashes(
+            h(n.features()), h(EpisodicIndex.terms(n.content) + n.tags.map { it.lowercase() }), h(n.tags), h(n.entityIds))
     }
 }
 
@@ -166,38 +184,28 @@ class FourLayerMemoryAndSleepEngine(
         workingCapacity: Int = workingMemoryCapacity
     ): RetrievalResult {
         if (nodes.isEmpty()) return RetrievalResult(emptyList(), 0, 0)
-        val qFeatures = EpisodicIndex.features(queryText, queryTags, queryEntities)
-        val qBits = EpisodicIndex.simHash(qFeatures)
-        val stage1 = nodes.indices.sortedWith(compareBy<Int> { EpisodicIndex.hamming(qBits, nodes[it].binaryEmbedding()) }.thenByDescending { nodes[it].id })
-            .take(EpisodicIndex.STAGE1_K).map { nodes[it] }
-        val qDense = EpisodicIndex.dense(qFeatures)
-        val activeWm = activeWorkingIds()
-        val cos = DoubleArray(stage1.size) { EpisodicIndex.cosine(qDense, EpisodicIndex.dense(stage1[it].features())).toDouble() }
-        val corpus = nodes.map { EpisodicIndex.terms(it.content) + it.tags.map { t -> t.lowercase() } }
-        val bm25 = EpisodicIndex.bm25(EpisodicIndex.terms(queryText) + queryTags.map { it.lowercase() },
-            stage1.map { EpisodicIndex.terms(it.content) + it.tags.map { t -> t.lowercase() } }, corpus)
-        val composite = DoubleArray(stage1.size) { i ->
-            val node = stage1[i]
-            val normAct = 1.0 / (1.0 + exp(-node.baseLevelActivation(currentTick)))
-            val zettelkastenBoost = if (node.linkedMemoryIds.any { it in activeWm }) 0.25 else 0.0
-            val tagScore = if (queryTags.isEmpty()) 0.0 else node.tags.intersect(queryTags).size.toDouble() / queryTags.size
-            val entScore = if (queryEntities.isEmpty()) 0.0 else node.entityIds.intersect(queryEntities).size.toDouble() / queryEntities.size
-            0.30 * normAct + 0.25 * (node.salience * node.confidence) + 0.25 * (0.55 * tagScore + 0.45 * entScore).coerceIn(0.0, 1.0) +
-                0.20 * (node.qUtility + 1.0) * 0.5 + zettelkastenBoost
-        }
-        val hawkes = DoubleArray(stage1.size) { EpisodicIndex.hawkesIntensity(stage1[it].hawkesExcitation, stage1[it].hawkesLastTick, currentTick) }
-        val fused = EpisodicIndex.rrf(listOf(cos, bm25, composite, hawkes), stage1.size)
-        val chosen = stage1.indices.sortedWith(compareByDescending<Int> { fused[it] }.thenByDescending { stage1[it].id }).take(topK).map { stage1[it] }
+        // v3.8: Hamming bit[256] → RRF(cosseno, BM25, ativação composta, Hawkes) no núcleo C++20
+        val r = NativeCognition.retrieveBatch(listOf(
+            NativeCognition.MemoryQuery(nodes, currentTick, queryText, queryTags, queryEntities, topK, activeWorkingIds()))).single()
+        return applyRetrieval(r, nodes.size, currentTick, workingCapacity)
+    }
+
+    /**
+     * Aplica o resultado do kernel: acesso ACT-R, evento de Hawkes (estado calculado no C++) e
+     * entrada na memória de trabalho (capacidade 7±2, despejo do mais antigo).
+     */
+    fun applyRetrieval(r: NativeCognition.Retrieval, corpusSize: Int, currentTick: Long, workingCapacity: Int = workingMemoryCapacity): RetrievalResult {
         val cap = workingCapacity.coerceIn(5, 9)
-        for (node in chosen) {
+        for ((k, node) in r.chosen.withIndex()) {
             if (node.recentAccessTicks.size >= 16) node.recentAccessTicks.removeAt(0)
             node.recentAccessTicks.add(currentTick)
-            EpisodicIndex.hawkesExcite(node, currentTick, node.salience)
+            node.hawkesExcitation = r.newExcitation[k]
+            node.hawkesLastTick = currentTick
             workingSlots.removeAll { it.id == node.id }
             while (workingSlots.size >= cap) workingSlots.removeFirst()
             workingSlots.addLast(node)
         }
-        return RetrievalResult(chosen, stage1.size, nodes.size)
+        return RetrievalResult(r.chosen, r.stage1, corpusSize)
     }
 
     fun retrieveHybrid(

@@ -62,6 +62,7 @@ object MemoryGuard {
     private var appContext: Context? = null
     @Volatile private var breaker: MemoryBreaker? = null
     @Volatile private var lastTrim = -1
+    private var samples = 0L
 
     private val _state = MutableStateFlow(MemorySnapshot())
     val state: StateFlow<MemorySnapshot> = _state.asStateFlow()
@@ -113,6 +114,7 @@ object MemoryGuard {
         val now = android.os.SystemClock.elapsedRealtime()
         // RAM anônima (RssAnon + swap): o .gguf mapeado por mmap não é heap exclusivo
         val pressure = MemoryBreaker.pressureBytes(pm)
+        if (mi.lowMemory) LocalLlmManager.evictUnderPressure("lowMemory")
         when (b.onSample(pressure, now, mi.lowMemory)) {
             MemoryBreaker.Action.TRIP -> trip(b.lastReason)
             MemoryBreaker.Action.REARM -> rearm()
@@ -131,6 +133,7 @@ object MemoryGuard {
             thermalStatus = thermal, thermalHeadroom = headroom, updatedAtMs = System.currentTimeMillis()
         )
         _state.value = snap
+        if (++samples % 5 == 0L) LocalLlmManager.refreshBudget(ctx)
         return snap
     }
 
@@ -144,6 +147,10 @@ object MemoryGuard {
         val low = appContext?.let { ctx ->
             ActivityManager.MemoryInfo().also { ctx.getSystemService(ActivityManager::class.java).getMemoryInfo(it) }.lowMemory
         } ?: false
+        // v3.8: perfil 8/12 GB — qualquer pressão real despeja já os modelos estacionados do pool
+        if (LocalLlmManager.isPressureTrim(level, low)) {
+            LocalLlmManager.evictUnderPressure("onTrimMemory($level)")
+        }
         val critical = MemoryBreaker.isCriticalTrim(level, low)
         if (critical && b.onCriticalSignal("onTrimMemory($level)", android.os.SystemClock.elapsedRealtime()) == MemoryBreaker.Action.TRIP) {
             trip(b.lastReason)
@@ -156,6 +163,7 @@ object MemoryGuard {
         val ctx = appContext ?: return
         val mi = ActivityManager.MemoryInfo().also { ctx.getSystemService(ActivityManager::class.java).getMemoryInfo(it) }
         if (!mi.lowMemory) return // callback legado; só age com lowMemory real
+        LocalLlmManager.evictUnderPressure("onLowMemory")
         if (b.onCriticalSignal("onLowMemory", android.os.SystemClock.elapsedRealtime()) == MemoryBreaker.Action.TRIP) trip(b.lastReason)
     }
 

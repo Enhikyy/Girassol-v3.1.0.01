@@ -21,3 +21,17 @@
 -keep class com.enhikyy.girassol.llm.** { *; }
 -keep class com.enhikyy.girassol.audio.** { *; }
 -keepclassmembers class * { @androidx.annotation.Keep *; }
+
+# ---- v3.8: Sherpa-ONNX (SenseVoice, Whisper, Piper VITS, Pocket-TTS) ----
+# A AAR do Sherpa-ONNX 2.0.2 não traz consumer-rules (proguard.txt vazio). O código nativo
+# (libsherpa-onnx-jni.so) lê os objetos de configuração por GetFieldID/GetMethodID com os nomes
+# originais (ex.: OfflineTtsVitsModelConfig.model, OfflineSenseVoiceModelConfig.language) e
+# instancia OfflineRecognizerResult/GeneratedAudio por FindClass. No v3.7 o R8 removeu/renomeou
+# essas classes no APK Release e qualquer ASR/TTS abortava com NoSuchFieldError dentro do JNI.
+-keep class com.k2fsa.sherpa.onnx.** { *; }
+-keepclassmembers class com.k2fsa.sherpa.onnx.** { *; }
+-dontwarn com.k2fsa.sherpa.onnx.**
+# Callbacks de áudio (lambdas Kotlin chamadas pelo nativo via invoke).
+-keep class kotlin.jvm.functions.Function1 { *; }
+# Ingestão/transcrição da Biblioteca (chama o Sherpa) e mapa de exceções nativas.
+-keep class com.enhikyy.girassol.knowledge.** { *; }

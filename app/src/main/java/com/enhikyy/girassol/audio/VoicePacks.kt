@@ -135,19 +135,61 @@ object VoicePacks {
     fun install(context: Context, p: Pack, profile: LlmQuantPolicy.DeviceProfile) {
         if (!allowedFor(profile)) { _states.update { it + (p.id to State.Blocked) }; return }
         val app = context.applicationContext
-        _states.update { it + (p.id to State.Downloading(0f)) }
+        if (!running.add(p.id)) return  // já em andamento
+        _states.update { it + (p.id to State.Downloading(partFraction(root(app), p))) }
         exec.execute {
-            val r = runCatching {
-                installFrom(root(app), p, { u ->
-                    val c = URL(u).openConnection() as HttpURLConnection
-                    c.connectTimeout = 20_000; c.readTimeout = 60_000; c.instanceFollowRedirects = true
-                    if (c.responseCode !in 200..299) error("HTTP ${c.responseCode}")
-                    c.inputStream
-                }) { f -> _states.update { it + (p.id to (if (f >= 1f) State.Verifying else State.Downloading(f))) } }
-            }
-            _states.update { it + (p.id to r.fold({ d -> State.Ready(d.absolutePath) }, { e -> State.Failed(e.message ?: e.javaClass.simpleName) })) }
+            val r = try {
+                runCatching {
+                    installFrom(root(app), p, ::openHttp,
+                        progress = { f -> _states.update { it + (p.id to (if (f >= 1f) State.Verifying else State.Downloading(f))) } },
+                        onRetry = { attempt, e -> Log.w(TAG, "${p.id}: tentativa $attempt falhou (${e.message}); retomando") })
+                }
+            } finally { running.remove(p.id) }
+            _states.update { it + (p.id to r.fold({ d -> State.Ready(d.absolutePath) }, { e -> State.Failed(describe(e)) })) }
             if (r.isSuccess) verified = HashSet(verified).apply { add(p.id) }
         }
+    }
+
+    private val running = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    /** Abre a URL (seguindo redirecionamentos do GitHub) pedindo `Range: bytes=offset-`. */
+    fun openHttp(url: String, offset: Long): Opened {
+        val c = URL(url).openConnection() as HttpURLConnection
+        c.connectTimeout = 20_000; c.readTimeout = 60_000; c.instanceFollowRedirects = true
+        c.setRequestProperty("Accept-Encoding", "identity")
+        if (offset > 0) c.setRequestProperty("Range", "bytes=$offset-")
+        val code = c.responseCode
+        if (code == 416) { c.disconnect(); return Opened(java.io.ByteArrayInputStream(ByteArray(0)), offset) { } }
+        if (code !in 200..299) { c.disconnect(); throw java.io.IOException("HTTP $code ao baixar ${url.substringAfterLast('/')}") }
+        // 206 = o servidor aceitou retomar; 200 = recomeça do zero
+        val start = if (code == 206) offset else 0L
+        return Opened(c.inputStream, start) { c.disconnect() }
+    }
+
+    /** Mensagem clara para a aba Sistema. */
+    fun describe(e: Throwable): String = when (e) {
+        is java.net.UnknownHostException -> "sem conexão com a internet (${e.message}); o download retoma ao tocar em Instalar"
+        is java.net.SocketTimeoutException -> "tempo esgotado na rede; o download parcial foi guardado e retoma automaticamente"
+        is java.io.IOException -> "falha de rede: ${e.message ?: e.javaClass.simpleName}; o download parcial foi guardado"
+        else -> e.message ?: e.javaClass.simpleName
+    }
+
+    /** Fração já baixada (arquivo `.part` de uma tentativa interrompida). */
+    fun partFraction(root: File, p: Pack): Float =
+        (partFile(root, p).length().toDouble() / p.archiveBytes).toFloat().coerceIn(0f, 0.99f)
+
+    fun partFile(root: File, p: Pack) = File(root, "${p.id}.tar.bz2.part")
+
+    /**
+     * Recuperação automática: um `.part` deixado por um download interrompido (app morto,
+     * rede caiu) é retomado com HTTP Range na próxima abertura do app (perfis 8/12 GB).
+     */
+    fun resumeInterrupted(context: Context, profile: LlmQuantPolicy.DeviceProfile): List<String> {
+        if (!allowedFor(profile)) return emptyList()
+        val r = root(context)
+        val resumed = ALL.filter { p -> partFile(r, p).length() > 0 && !isInstalled(dirOf(context, p), p) }
+        resumed.forEach { install(context, it, profile) }
+        return resumed.map { it.id }
     }
 
     fun remove(context: Context, p: Pack) {
@@ -180,43 +222,94 @@ object VoicePacks {
         return null
     }
 
+    /** Fluxo aberto a partir de [startOffset] (0 = do início) e como fechá-lo. */
+    class Opened(val input: InputStream, val startOffset: Long, val close: () -> Unit)
+
+    const val MAX_ATTEMPTS = 5
+
     /**
-     * Baixa (streaming + SHA-256 incremental), confere o hash do arquivo, extrai só os
-     * [Pack.keepPrefixes] com proteção contra path traversal e confere o hash de cada modelo.
-     * A instalação é atômica: extrai em `<id>.tmp` e renomeia ao final.
+     * Baixa com retomada (HTTP Range sobre o `.part`) e até [MAX_ATTEMPTS] tentativas com recuo
+     * exponencial, confere o SHA-256 do arquivo inteiro, extrai só os [Pack.keepPrefixes] com
+     * proteção contra path traversal e confere o SHA-256 de cada modelo. A instalação é atômica:
+     * extrai em `<id>.tmp` e renomeia ao final; nada fica meio instalado em `filesDir`.
      */
-    fun installFrom(root: File, p: Pack, open: (String) -> InputStream, progress: (Float) -> Unit = {}): File {
+    fun installFrom(
+        root: File, p: Pack, open: (String, Long) -> Opened,
+        progress: (Float) -> Unit = {},
+        onRetry: (Int, Throwable) -> Unit = { _, _ -> },
+        sleep: (Long) -> Unit = { Thread.sleep(it) }
+    ): File {
         root.mkdirs()
-        val part = File(root, "${p.id}.tar.bz2.part")
-        val md = MessageDigest.getInstance("SHA-256")
-        var total = 0L
-        open(p.url).use { input ->
-            part.outputStream().use { out ->
-                val buf = ByteArray(1 shl 16)
-                while (true) {
-                    val n = input.read(buf); if (n < 0) break
-                    md.update(buf, 0, n); out.write(buf, 0, n); total += n
-                    if (total > p.archiveBytes * 2) error("download maior que o esperado")
-                    progress((total.toDouble() / p.archiveBytes).toFloat().coerceAtMost(0.99f))
+        val need = p.archiveBytes * 4  // .part + extração (≈ 2,5×) + margem
+        if (root.usableSpace in 1 until need) error("armazenamento insuficiente: ${p.label} precisa de ~${need / 1048576} MB livres")
+        val part = partFile(root, p)
+        var mismatches = 0
+        var attempt = 0
+        while (true) {
+            attempt++
+            try {
+                downloadResumable(part, p, open, progress)
+                val got = sha256(part)
+                if (got != p.archiveSha256) {
+                    part.delete()
+                    if (++mismatches >= 2) error("SHA-256 do pacote divergente ($got) — download corrompido duas vezes")
+                    onRetry(attempt, IllegalStateException("SHA-256 divergente; baixando de novo"))
+                    continue
                 }
+                break
+            } catch (e: java.io.IOException) {
+                if (attempt >= MAX_ATTEMPTS) throw java.io.IOException("${e.message} (após $attempt tentativas)", e)
+                onRetry(attempt, e)
+                sleep(1_000L shl (attempt - 1).coerceAtMost(4))  // 1 s, 2 s, 4 s, 8 s
             }
         }
         progress(1f)
-        val got = md.digest().joinToString("") { "%02x".format(it) }
-        if (got != p.archiveSha256) { part.delete(); error("SHA-256 do pacote divergente ($got)") }
         val tmp = File(root, "${p.id}.tmp").apply { deleteRecursively(); mkdirs() }
         try {
             extractTarBz2(part, tmp, p.topDir, p.keepPrefixes)
             verifyFiles(tmp, p)?.let { error(it) }
             File(tmp, ".sha256").writeText(p.archiveSha256)
             val dest = File(root, p.id)
-            dest.deleteRecursively()
-            if (!tmp.renameTo(dest)) error("não foi possível instalar ${p.id}")
+            val old = File(root, "${p.id}.old")
+            old.deleteRecursively()
+            if (dest.exists() && !dest.renameTo(old)) error("não foi possível substituir ${p.id}")
+            if (!tmp.renameTo(dest)) { old.renameTo(dest); error("não foi possível instalar ${p.id}") }
+            old.deleteRecursively()
+            part.delete()
             return dest
         } catch (t: Throwable) {
-            tmp.deleteRecursively(); throw t
+            tmp.deleteRecursively()
+            part.delete()  // o arquivo conferiu, mas a extração falhou: recomeça limpo
+            throw t
+        }
+    }
+
+    /** Continua o `.part` existente; recomeça do zero se o servidor ignorar o Range. */
+    private fun downloadResumable(part: File, p: Pack, open: (String, Long) -> Opened, progress: (Float) -> Unit) {
+        var have = part.length()
+        if (have > p.archiveBytes) { part.delete(); have = 0L }
+        if (have == p.archiveBytes) return
+        val o = open(p.url, have)
+        try {
+            val append = o.startOffset > 0 && o.startOffset == have
+            if (!append) have = 0L
+            java.io.FileOutputStream(part, append).use { fos ->
+                val buf = ByteArray(1 shl 16)
+                var total = have
+                var lastSync = total
+                while (true) {
+                    val n = o.input.read(buf); if (n < 0) break
+                    fos.write(buf, 0, n); total += n
+                    if (total > p.archiveBytes) { fos.close(); part.delete(); error("download maior que o esperado (${total} > ${p.archiveBytes} bytes)") }
+                    if (total - lastSync >= 4L shl 20) { fos.fd.sync(); lastSync = total }  // retomada confiável após queda
+                    progress((total.toDouble() / p.archiveBytes).toFloat().coerceAtMost(0.99f))
+                }
+                fos.fd.sync()
+                if (total < p.archiveBytes) throw java.io.IOException("conexão encerrada em $total de ${p.archiveBytes} bytes")
+            }
         } finally {
-            part.delete()
+            runCatching { o.input.close() }
+            o.close()
         }
     }
 

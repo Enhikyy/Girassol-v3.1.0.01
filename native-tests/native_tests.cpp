@@ -1,5 +1,8 @@
 // Testes nativos em host (Linux x86_64) com AddressSanitizer + UBSan.
 // Executados pelo CI antes do build Android.
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -27,6 +30,7 @@
 
 static int gFailures = 0;
 int runWorldTickTests();
+int runCognitionTests();
 #define CHECK(cond, msg)                                              \
     do {                                                              \
         if (!(cond)) {                                                \
@@ -295,6 +299,50 @@ static void llmTest() {
         CHECK(ep.load(paths[0], pc, &err), "perfil 4 GB: single-model");
         st = ep.poolStatus();
         CHECK(st.resident == 1 && st.capacity == 1, "perfil 4 GB mantém 1 modelo (mmap, orçamento 3631 MB)");
+        {
+            // v3.8: troca concorrente de llama_context sob ASan/UBSan — geração, troca de modelo,
+            // leitura de status/descrição e despejo sob pressão (evictParkedNow) em 4 threads.
+            pc.poolCapacity = 3;
+            ep.setPoolCapacity(3);
+            std::atomic<bool> stop{false};
+            std::atomic<int> gens{0}, loads{0}, loadFails{0}, evicted{0}, reads{0};
+            std::thread tg([&] {
+                for (int i = 0; i < 6; ++i) {
+                    const auto r = ep.generate("Voce e um cidadao.", "Escolha uma acao.", kGrammar, 16);
+                    if (r.ok) ++gens;
+                }
+            });
+            std::thread tl([&] {
+                std::string e;
+                for (int i = 0; i < 9; ++i) { if (ep.load(paths[static_cast<size_t>(i % 3)], pc, &e)) ++loads; else ++loadFails; }
+            });
+            std::thread tr([&] {
+                while (!stop.load()) {
+                    const auto s = ep.poolStatus();
+                    const auto d = ep.description();
+                    const auto b = ep.modelBytes();
+                    volatile size_t sink = d.size() + static_cast<size_t>(b) + static_cast<size_t>(s.resident);
+                    (void)sink;
+                    ++reads;
+                }
+            });
+            std::thread te([&] {
+                for (int i = 0; i < 20; ++i) {
+                    evicted += ep.evictParkedNow();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+                }
+            });
+            tg.join(); tl.join(); te.join();
+            stop = true;
+            tr.join();
+            std::printf("concorrência: gerações=%d trocas=%d falhas=%d despejados=%d leituras=%d\n",
+                        gens.load(), loads.load(), loadFails.load(), evicted.load(), reads.load());
+            CHECK(gens == 6 && loads == 9 && loadFails == 0, "troca concorrente de llama_context sem use-after-free/deadlock");
+            CHECK(reads > 0 && ep.loaded(), "status/descrição lidos sob trava durante as trocas");
+            const auto after = ep.generate("Voce e um cidadao.", "Escolha uma acao.", kGrammar, 16);
+            CHECK(after.ok, "motor continua gerando após despejo concorrente");
+            CHECK(ep.poolStatus().resident >= 1, "modelo ativo nunca é despejado pelo evictParkedNow");
+        }
         ep.unload();
         CHECK(ep.poolStatus().resident == 0, "unload libera todo o pool");
         std::error_code ec;
@@ -477,6 +525,7 @@ int main() {
     semanticEntropyTests();
     llmTest();
     gFailures += runWorldTickTests();
+    gFailures += runCognitionTests();
 
     std::printf(gFailures == 0 ? "TODOS OS TESTES NATIVOS PASSARAM\n" : "%d FALHA(S)\n", gFailures);
     return gFailures == 0 ? 0 : 1;

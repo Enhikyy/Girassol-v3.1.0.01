@@ -105,6 +105,10 @@ object SimulationHub {
             com.enhikyy.girassol.perf.AdpfHints.init(app)
             LocalLlmManager.init(app)
             LocalLlmManager.setEnabled(NativeModules.toggles.value.localLlm)
+            // v3.8: retoma (HTTP Range) downloads de Piper/Whisper interrompidos — só 8/12 GB
+            com.enhikyy.girassol.audio.VoicePacks.refresh(app, LocalLlmManager.profile)
+            com.enhikyy.girassol.audio.VoicePacks.resumeInterrupted(app, LocalLlmManager.profile).takeIf { it.isNotEmpty() }
+                ?.let { Log.i(TAG, "retomando downloads de voz: $it") }
             // v3.6 "Adão e Eva": nenhum modelo de fábrica; o mundo nasce vazio e cada .gguf
             // importado pelo usuário cria exatamente 1 cidadão fundador (ver importFounder).
             ports = buildPorts(NativeModules.toggles.value)

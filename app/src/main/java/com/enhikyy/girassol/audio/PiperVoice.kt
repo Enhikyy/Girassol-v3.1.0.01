@@ -34,6 +34,11 @@ object PiperVoice {
     private fun ensure(context: Context, profile: LlmQuantPolicy.DeviceProfile): OfflineTts {
         tts?.let { return it }
         val dir = VoicePacks.verifiedDir(context, VoicePacks.PIPER_PT_BR, profile) ?: error("pacote Piper ausente ou com SHA-256 inválido")
+        return createEngine(dir).also { tts = it }
+    }
+
+    /** Carrega o Piper VITS pt-BR de um diretório verificado (caminhos absolutos em filesDir). */
+    fun createEngine(dir: File): OfflineTts {
         val vits = OfflineTtsVitsModelConfig().apply {
             model = File(dir, "pt_BR-faber-medium.onnx").absolutePath
             tokens = File(dir, "tokens.txt").absolutePath
@@ -45,7 +50,7 @@ object PiperVoice {
             provider = "cpu"
         }
         // assetManager = null → caminhos absolutos no armazenamento interno
-        return OfflineTts(null, OfflineTtsConfig().apply { this.model = model }).also { tts = it }
+        return OfflineTts(null, OfflineTtsConfig().apply { this.model = model })
     }
 
     fun speak(context: Context, profile: LlmQuantPolicy.DeviceProfile, citizenId: String, text: String, pan: Float,

@@ -13,8 +13,12 @@ filament = "1.75.1"
 androidxTestRunner = "1.6.2"
 androidxTestRules = "1.6.1"
 androidxTestExtJunit = "1.2.1"
+robolectric = "4.14.1"
+androidxTestCore = "1.6.1"
 
 [libraries]
+robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
+androidx-test-core = { module = "androidx.test:core", version.ref = "androidxTestCore" }
 kotlinx-serialization-cbor = { module = "org.jetbrains.kotlinx:kotlinx-serialization-cbor", version.ref = "serialization" }
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }

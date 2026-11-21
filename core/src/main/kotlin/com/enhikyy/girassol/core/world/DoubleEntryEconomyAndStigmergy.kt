@@ -101,6 +101,19 @@ class StockFlowDoubleEntryLedger(
         return netSum == 0L
     }
 
+    /** Saldos em micro-unidades achatados (conta × recurso) para a verificação nativa soma-zero. */
+    fun packMicroBalances(resourceIndex: Map<String, Int>): Pair<LongArray, IntArray> {
+        var n = 0
+        for (m in balancesMicro.values) n += m.size
+        val b = LongArray(n)
+        val r = IntArray(n)
+        var i = 0
+        for (acc in balancesMicro.keys.sorted()) for ((res, v) in balancesMicro.getValue(acc).toSortedMap()) {
+            b[i] = v; r[i] = resourceIndex[res] ?: -1; i++
+        }
+        return b to r
+    }
+
     fun resourceTypes(): Set<String> = balancesMicro.values.flatMap { it.keys }.toSortedSet()
 
     fun accounts(): List<String> = balancesMicro.keys.sorted()
@@ -197,6 +210,7 @@ class SpatialStigmergyAndReservationBoard(
     private val pheromoneChannels: MutableMap<String, FloatArray> = mutableMapOf(),
     private val nicheStructures: MutableMap<String, EcologicalNicheStructure> = mutableMapOf()
 ) {
+    fun cellSizeWorld(): Float = cellSize
     fun gridWidth(): Int = width
     fun gridHeight(): Int = height
 

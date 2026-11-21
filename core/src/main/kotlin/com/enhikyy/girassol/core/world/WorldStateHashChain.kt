@@ -31,23 +31,9 @@ object WorldStateHashChain {
      * Verifica uma janela contígua de eventos ordenados por `seq`. [anchorPrevHash] (opcional)
      * é o hash esperado para o `prev_hash` do primeiro evento — GENESIS quando a janela começa em seq 1.
      */
-    fun verify(events: List<CanonicalEvent>, anchorPrevHash: String? = null): Report {
-        if (events.isEmpty()) return Report(true, 0, null, "vazio", anchorPrevHash ?: GENESIS_HASH)
-        var prev: CanonicalEvent? = null
-        val first = events.first()
-        val anchor = anchorPrevHash ?: if (first.seq == 1L) GENESIS_HASH else null
-        if (anchor != null && first.prevHash != anchor) return Report(false, 0, first.seq, "prev_hash do primeiro evento não confere com a âncora", anchor)
-        for ((i, e) in events.withIndex()) {
-            if (prev != null) {
-                if (e.seq != prev.seq + 1) return Report(false, i, e.seq, "lacuna de sequência após ${prev.seq}", prev.hash)
-                if (e.prevHash != prev.hash) return Report(false, i, e.seq, "prev_hash não encadeia com o evento ${prev.seq}", prev.hash)
-                if (e.tick < prev.tick) return Report(false, i, e.seq, "tick regrediu", prev.hash)
-            }
-            if (computeHash(e) != e.hash) return Report(false, i, e.seq, "event_hash adulterado", prev?.hash ?: e.prevHash)
-            prev = e
-        }
-        return Report(true, events.size, null, "íntegra", prev!!.hash)
-    }
+    fun verify(events: List<CanonicalEvent>, anchorPrevHash: String? = null): Report =
+        // v3.8: verificação em lote no núcleo C++20 (SHA-256 nativo, sem uma travessia JNI por evento)
+        NativeCognition.verifyChain(events, anchorPrevHash)
 
     /** Replay determinístico: o hash da cabeça deve coincidir com o `lastEventHash` do estado. */
     fun verifyHead(events: List<CanonicalEvent>, state: WorldState): Report {

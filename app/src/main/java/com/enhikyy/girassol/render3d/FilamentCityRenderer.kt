@@ -221,8 +221,12 @@ class FilamentCityRenderer(
         return done
     }
 
+    /** v3.8: heap nativo medido em torno da criação do Engine/materiais/texturas/malhas. */
+    private var nativeFootprint = 0L
+
     private fun initCore() {
         check(ensureFilament()) { "biblioteca Filament não carregou" }
+        val heapBefore = android.os.Debug.getNativeHeapAllocatedSize()
         engine = Engine.create()
         renderer = engine.createRenderer()
         scene = engine.createScene()
@@ -247,6 +251,8 @@ class FilamentCityRenderer(
         agentIndexCount = agentMesh.indices.size
         initPostPass()
         applyEffectLevel(level)
+        nativeFootprint = (android.os.Debug.getNativeHeapAllocatedSize() - heapBefore).coerceAtLeast(FilamentMemory.MIN_ENGINE_BYTES)
+        FilamentMemory.add(nativeFootprint)
     }
 
     /** Texturas PBR KTX2 triplanares (concreto/carpete); intensidade cai nos níveis baixos. */
@@ -688,6 +694,7 @@ class FilamentCityRenderer(
         val camEntity = fCamera.entity
         engine.destroyCameraComponent(camEntity); EntityManager.get().destroy(camEntity)
         engine.destroy()
+        FilamentMemory.add(-nativeFootprint); nativeFootprint = 0L
         if (!headless) Render3dTelemetry.set(Render3dStats(active = false))
     }
 }

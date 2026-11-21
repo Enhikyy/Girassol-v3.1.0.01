@@ -359,8 +359,8 @@ android {
         applicationId = "com.enhikyy.girassol"
         minSdk = 33
         targetSdk = 35
-        versionCode = 3700000
-        versionName = "3.7.0.00"
+        versionCode = 3800000
+        versionName = "3.8.0.00"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "FILAMENT_VERSION", "\"$filamentVersion\"")
         buildConfigField("String", "DISTRIBUTION", "\"$distribution\"")
@@ -456,7 +456,11 @@ android {
         checkReleaseBuilds = true
         disable += listOf("GradleDependency", "NewerVersionAvailable", "AndroidGradlePluginVersion", "OldTargetApi")
     }
-    testOptions { unitTests.isReturnDefaultValues = true }
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+        // v3.8: Robolectric (perfis 4/8/12 GB com ActivityManager sombreado)
+        unitTests.isIncludeAndroidResources = true
+    }
 }
 
 androidComponents {
@@ -493,6 +497,8 @@ dependencies {
     debugImplementation(libs.compose.ui.tooling)
     debugImplementation(libs.compose.ui.test.manifest)
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.test.ext.junit)

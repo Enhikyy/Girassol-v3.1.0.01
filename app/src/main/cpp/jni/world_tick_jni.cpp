@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "../common/jni_utf.hpp"
 #include "../world/world_tick.hpp"
 
 using namespace girassol::world;
@@ -18,13 +19,9 @@ constexpr int kMeritL = 13;
 constexpr int kMeritD = 19;
 constexpr int kSocialD = 14;
 
-std::string jstr(JNIEnv* env, jstring s) {
-    if (!s) return {};
-    const jsize n = env->GetStringUTFLength(s);
-    std::string out(static_cast<size_t>(n), '\0');
-    env->GetStringUTFRegion(s, 0, env->GetStringLength(s), out.data());
-    return out;
-}
+// v3.8: UTF-8 padrão (igual a String.toByteArray(UTF_8) do Kotlin). GetStringUTFRegion devolvia
+// UTF-8 modificado e quebrava a paridade das sementes SHA-256 para ids com emoji ou U+0000.
+std::string jstr(JNIEnv* env, jstring s) { return girassol::jniutf::fromJava(env, s); }
 
 std::vector<std::string> jstrings(JNIEnv* env, jobjectArray arr) {
     std::vector<std::string> out;
@@ -126,6 +123,7 @@ JNIEXPORT jdoubleArray JNICALL Java_com_enhikyy_girassol_core_world_NativeWorldT
     double out[kNeeds];
     for (int k = 0; k < kNeeds; ++k) out[k] = needDecay(r, k);
     jdoubleArray arr = env->NewDoubleArray(kNeeds);
+    if (!arr) return nullptr;
     env->SetDoubleArrayRegion(arr, 0, kNeeds, out);
     return arr;
 }
@@ -150,6 +148,7 @@ JNIEXPORT jintArray JNICALL Java_com_enhikyy_girassol_core_world_NativeWorldTick
     std::vector<jint> out(static_cast<size_t>(n) * 2);
     for (int i = 0; i < n; ++i) { out[i * 2] = rows[i].cause; out[i * 2 + 1] = rows[i].heir; }
     jintArray arr = env->NewIntArray(n * 2);
+    if (!arr) return nullptr;
     env->SetIntArrayRegion(arr, 0, n * 2, out.data());
     return arr;
 }
@@ -195,6 +194,7 @@ JNIEXPORT jlongArray JNICALL Java_com_enhikyy_girassol_core_world_NativeWorldTic
     if (!O.empty() && env->GetArrayLength(outD) >= static_cast<jsize>(O.size()))
         env->SetDoubleArrayRegion(outD, 0, static_cast<jsize>(O.size()), O.data());
     jlongArray arr = env->NewLongArray(static_cast<jsize>(L.size()));
+    if (!arr) return nullptr;
     if (!L.empty()) env->SetLongArrayRegion(arr, 0, static_cast<jsize>(L.size()), L.data());
     return arr;
 }
@@ -237,6 +237,7 @@ JNIEXPORT jlongArray JNICALL Java_com_enhikyy_girassol_core_world_NativeWorldTic
     res[2] = static_cast<jlong>(bits);
     for (const auto& b : out.births) { res.push_back(b.a); res.push_back(b.b); res.push_back(static_cast<jlong>(b.seed)); }
     jlongArray arr = env->NewLongArray(static_cast<jsize>(res.size()));
+    if (!arr) return nullptr;
     env->SetLongArrayRegion(arr, 0, static_cast<jsize>(res.size()), res.data());
     return arr;
 }
@@ -253,6 +254,7 @@ JNIEXPORT jlongArray JNICALL Java_com_enhikyy_girassol_core_world_NativeWorldTic
         out[i * 2 + 1] = citizenEtaTicks(rows[i], tick, c);
     }
     jlongArray arr = env->NewLongArray(static_cast<jsize>(out.size()));
+    if (!arr) return nullptr;
     if (!out.empty()) env->SetLongArrayRegion(arr, 0, static_cast<jsize>(out.size()), out.data());
     return arr;
 }
@@ -265,6 +267,7 @@ JNIEXPORT jlongArray JNICALL Java_com_enhikyy_girassol_core_world_NativeWorldTic
     const Eta e = estimate(rows, commonsFood, tick);
     const jlong out[6] = {e.status, e.ticks, e.a, e.b, e.nextGeneration, static_cast<jlong>(e.blockers)};
     jlongArray arr = env->NewLongArray(6);
+    if (!arr) return nullptr;
     env->SetLongArrayRegion(arr, 0, 6, out);
     return arr;
 }
@@ -276,6 +279,7 @@ JNIEXPORT jintArray JNICALL Java_com_enhikyy_girassol_core_world_NativeWorldTick
     const jsize n = static_cast<jsize>(b.idx.size());
     if (n > 0 && env->GetArrayLength(weightsOut) >= n) env->SetDoubleArrayRegion(weightsOut, 0, n, b.weights.data());
     jintArray arr = env->NewIntArray(n);
+    if (!arr) return nullptr;
     if (n > 0) env->SetIntArrayRegion(arr, 0, n, reinterpret_cast<const jint*>(b.idx.data()));
     return arr;
 }

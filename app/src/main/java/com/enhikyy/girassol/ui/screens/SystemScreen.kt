@@ -82,6 +82,9 @@ fun SystemScreen() {
                 KeyValue("Estado térmico", thermalLabel(status.thermalStatus) + if (status.thermalCapped) " (limitado)" else "")
                 KeyValue("Perfil do aparelho", LocalLlmManager.profile.label + " · " + LocalLlmManager.profile.description)
                 KeyValue("Pool de modelos (llama_model)", "${llm.poolResident}/${llm.poolCapacity} residentes · ${llm.poolHits} trocas só de contexto · ${llm.poolColdLoads} cargas · ${llm.poolEvictions} despejos")
+                if (llm.dynamicBudgetMb >= 0) KeyValue("Orçamento dinâmico de RAM",
+                    "${llm.dynamicBudgetMb}/${llm.budgetMb} MB · reserva ${llm.budgetReserveMb} MB (Filament + gráfico + WAL + folga) · fonte ${llm.budgetSource}" +
+                        if (llm.pressureEvictions > 0) " · ${llm.pressureEvictions} despejos por pressão" else "")
                 if (llm.poolKeys.isNotEmpty()) KeyValue("Residentes", llm.poolKeys.joinToString(", "))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     SimulationHub.SPEEDS.forEach { s ->

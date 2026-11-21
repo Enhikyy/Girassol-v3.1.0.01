@@ -47,6 +47,16 @@ object AudioTranscriber {
     private fun whisperRecognizer(context: Context): OfflineRecognizer? {
         whisper?.let { return it }
         val dir = VoicePacks.verifiedDir(context, VoicePacks.WHISPER_TINY, LocalLlmManager.profile) ?: return null
+        return runCatching { whisperFrom(dir) }.onFailure {
+            lastError = "Whisper não carregou (${it.message ?: it.javaClass.simpleName}); usando SenseVoice"
+            Log.w(TAG, lastError, it)
+        }.getOrNull()?.also { whisper = it }
+    }
+
+    @Volatile var lastError: String = ""; private set
+
+    /** Carrega o Whisper tiny int8 de um diretório verificado (caminhos absolutos, ARM64/x86_64). */
+    fun whisperFrom(dir: File): OfflineRecognizer {
         val model = OfflineModelConfig().apply {
             whisper = OfflineWhisperModelConfig().apply {
                 encoder = File(dir, "tiny-encoder.int8.onnx").absolutePath
@@ -59,7 +69,7 @@ object AudioTranscriber {
             numThreads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(1, 4)
             provider = "cpu"
         }
-        return OfflineRecognizer(null, OfflineRecognizerConfig().apply { modelConfig = model }).also { whisper = it }
+        return OfflineRecognizer(null, OfflineRecognizerConfig().apply { modelConfig = model })
     }
 
     fun modelAvailable(context: Context): Boolean =
@@ -167,8 +177,12 @@ object AudioTranscriber {
         val rec = w ?: recognizer(context)
         lastBackend = if (w != null) "Whisper tiny (pt)" else "SenseVoice-Small"
         val pcm = decodeToMono16k(context, uri)
+        return transcribePcm(rec, pcm, onProgress)
+    }
+
+    /** Transcreve PCM mono 16 kHz em janelas de 25 s (o Whisper aceita até 30 s). */
+    fun transcribePcm(rec: OfflineRecognizer, pcm: FloatArray, onProgress: (Float) -> Unit = {}): String {
         if (pcm.isEmpty()) return ""
-        // o Whisper processa janelas de até 30 s; o SenseVoice usa 25 s
         val win = SAMPLE_RATE * WINDOW_S
         val sb = StringBuilder()
         var off = 0

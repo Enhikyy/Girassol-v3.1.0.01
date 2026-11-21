@@ -116,13 +116,18 @@ public:
     void requestAbort() { abort_.store(true); }
     // Apaga slots (RAM e disco) — usado pelo disjuntor de memória.
     void clearSlots();
-    uint64_t modelBytes() const { return modelBytes_; }
-    std::string description() const { return desc_; }
+    // v3.8: leituras sob mu_ — antes liam modelBytes_/desc_ sem trava enquanto outra thread
+    // trocava o modelo (load/unpark), uma corrida de dados sobre std::string (use-after-free).
+    uint64_t modelBytes() const;
+    std::string description() const;
     // "flash_attn=1 kv=q8_0 ctx=1024" efetivamente aplicado.
     std::string runtimeConfig() const;
     size_t slotCount() const;
     LlmPoolStatus poolStatus() const;
     void setPoolCapacity(int32_t capacity);
+    // Despejo imediato (onTrimMemory/lowMemory no perfil 8/12 GB): libera todos os modelos
+    // estacionados SEM esperar a geração em curso. Devolve quantos foram liberados.
+    int32_t evictParkedNow();
 
     // v3.5 — LoRA on-device (Sharp-Wave Ripple Replay): treina um ciclo sobre os textos
     // episódicos de maior utilidade e, se o NLL real em held-out melhorar, aplica o adaptador.
@@ -165,9 +170,14 @@ private:
     bool createContextLocked(std::string* err);
     void unloadLocked();
 
+    // v3.8: o pool estacionado tem trava própria (ordem fixa mu_ → poolMu_), para que o despejo
+    // sob pressão de memória (evictParkedNow) não espere uma geração longa que segura mu_.
+    // Os estacionados nunca são tocados pelo contexto ativo, então liberá-los em paralelo é seguro.
     std::vector<Resident> parked_;
     int32_t poolCapacity_ = 1;
-    uint64_t useClock_ = 0, switches_ = 0, coldLoads_ = 0, evictions_ = 0;
+    uint64_t useClock_ = 0, switches_ = 0, coldLoads_ = 0;
+    std::atomic<uint64_t> evictions_{0};
+    mutable std::mutex poolMu_;
 
     mutable std::mutex mu_;
     llama_model* model_ = nullptr;

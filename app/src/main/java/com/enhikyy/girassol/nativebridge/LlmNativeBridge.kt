@@ -119,6 +119,8 @@ object LlmNativeBridge {
     /** v3.7: pool de llama_model residentes ("cap|residentes|trocas|frias|despejos|ativo|p:b;…"). */
     @JvmStatic external fun nativeLlmPoolStatus(): String
     @JvmStatic external fun nativeLlmSetPoolCapacity(capacity: Int)
+    /** v3.8: libera já os modelos estacionados do pool (pressão de memória); devolve quantos. */
+    @JvmStatic external fun nativeLlmEvictParked(): Int
     @JvmStatic external fun nativeLlmUnload()
     @JvmStatic external fun nativeLlmAbort()
     @JvmStatic external fun nativeLlmClearSlots()

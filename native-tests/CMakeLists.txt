@@ -7,8 +7,9 @@ set(SRC ${CMAKE_CURRENT_SOURCE_DIR}/../app/src/main/cpp)
 set(GIRASSOL_LLAMA_DIR "" CACHE PATH "Código-fonte do llama.cpp (opcional)")
 set(SAN_FLAGS -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer)
 
-add_executable(girassol_native_tests native_tests.cpp world_tick_tests.cpp
+add_executable(girassol_native_tests native_tests.cpp world_tick_tests.cpp cognition_tests.cpp
     ${SRC}/world/world_tick.cpp
+    ${SRC}/world/cognition.cpp
     ${SRC}/hardware/soc_hardware_probe.cpp
     ${SRC}/llm/llm_engine.cpp
     ${SRC}/llm/lora_ondevice.cpp
