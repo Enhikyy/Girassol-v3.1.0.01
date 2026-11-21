@@ -18,7 +18,10 @@ material {
         { type : sampler2d, name : concreteTex, precision : medium },
         { type : sampler2d, name : carpetTex, precision : medium },
         // x = intensidade do detalhe (0 desliga), y = escala (tiles por repetição)
-        { type : float2, name : detail }
+        { type : float2, name : detail },
+        // v3.9: sol dinâmico (ciclo dia/noite contínuo). sunAmount = 0 ⇒ só a luz assada.
+        { type : float3, name : sunDir },
+        { type : float, name : sunAmount }
     ],
     culling : back
 }
@@ -57,6 +60,15 @@ fragment {
             float spec = pow(max(dot(n, h), 0.0), gloss) * (1.0 - roughness) * 0.35;
             base = mix(base, base * albedo + spec * materialParams.tint.rgb, amount);
         }
-        material.baseColor = vec4(base * (1.0 + emissive), 1.0);
+        // Lambert direcional do sol sobre a luz assada (normal facetada pelas derivadas de tela);
+        // faces contra o sol escurecem suavemente — sombra própria macia, coerente com a hora.
+        highp vec3 wp = getUserWorldPosition();
+        vec3 fn = normalize(cross(dFdx(wp), dFdy(wp)));
+        // faces visíveis sempre olham para a câmera (culling back): independe do sinal de dFdy do backend
+        if (dot(fn, getWorldCameraPosition() - getWorldPosition()) < 0.0) fn = -fn;
+        float ndl = max(dot(fn, normalize(materialParams.sunDir)), 0.0);
+        float sunTerm = mix(1.0, 0.62 + 0.62 * ndl, materialParams.sunAmount);
+        // emissivo (janelas, postes) não depende do sol
+        material.baseColor = vec4(base * sunTerm + base * emissive, 1.0);
     }
 }

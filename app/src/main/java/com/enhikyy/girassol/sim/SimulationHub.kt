@@ -39,7 +39,7 @@ import java.util.concurrent.Executors
 data class HubStatus(
     val loaded: Boolean = false,
     val running: Boolean = false,
-    val targetTps: Int = 8,
+    val targetTps: Int = SimulationHub.DEFAULT_TPS,
     val effectiveTps: Double = 0.0,
     val thermalStatus: Int = 0,
     val thermalCapped: Boolean = false,
@@ -60,7 +60,13 @@ data class HubStatus(
 object SimulationHub {
     private const val TAG = "GirassolHub"
     const val SNAPSHOT_EVERY_TICKS = 240L
-    val SPEEDS = listOf(2, 8, 30)
+    /** v3.9: 1x = 1 tick/s (1 hora simulada ≈ 20 s). O mundo abre sempre vivo em 1x. */
+    val SPEEDS = listOf(1, 2, 8, 30)
+    const val DEFAULT_TPS = 1
+    private const val PREFS = "girassol_hub"
+    private const val KEY_SPEED = "speed_tps"
+    private const val MAX_WORLD_SPEECH = 400
+    private const val MAX_LIVE_SAMPLES = 240
 
     private val simDispatcher = Executors.newSingleThreadExecutor { r ->
         Thread(r, "girassol-worldcore").apply { isDaemon = true; priority = Thread.NORM_PRIORITY - 1 }
@@ -91,6 +97,19 @@ object SimulationHub {
 
     @Volatile private var telemetry = TelemetryInput()
 
+    private val _worldSpeech = MutableStateFlow<List<WorldSpeech>>(emptyList())
+    /** v3.9: falas AUTÔNOMAS dos cidadãos na cena (não persistidas), espelhadas no Chat "Canal aberto". */
+    val worldSpeech: StateFlow<List<WorldSpeech>> = _worldSpeech.asStateFlow()
+    private val lastSeenSpeech = HashMap<String, Long>()
+    private var speechSerial = 0L
+    private var speechPrimed = false
+
+    private val _live = MutableStateFlow<List<LiveSample>>(emptyList())
+    /** v3.9: série viva amostrada a cada publicação do painel (sparklines desde o tick 1). */
+    val live: StateFlow<List<LiveSample>> = _live.asStateFlow()
+
+    private val aborted = java.util.Collections.synchronizedSet(HashSet<String>())
+
     /** Carrega (ou cria) o mundo uma única vez. Seguro para chamar de qualquer thread. */
     fun ensureLoaded(context: Context) {
         if (_status.value.loaded) return
@@ -98,17 +117,22 @@ object SimulationHub {
         scope.launch {
             if (_status.value.loaded) return@launch
             appContext = app
+            val saved = runCatching { app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(KEY_SPEED, DEFAULT_TPS) }.getOrDefault(DEFAULT_TPS)
+            _status.update { it.copy(targetTps = saved.coerceAtLeast(1)) }
             _hardware.value = runCatching { HardwareAutoTuner.detect(app) }.getOrNull()
-            NativeModules.load(app)
-            val parity = NativeModules.verifyParity()
-            Log.i(TAG, "paridade nativa: ${parity.message}")
-            com.enhikyy.girassol.perf.AdpfHints.init(app)
-            LocalLlmManager.init(app)
-            LocalLlmManager.setEnabled(NativeModules.toggles.value.localLlm)
+            safely("módulos nativos") { NativeModules.load(app) }
+            safely("paridade") { Log.i(TAG, "paridade nativa: ${NativeModules.verifyParity().message}") }
+            safely("ADPF") { com.enhikyy.girassol.perf.AdpfHints.init(app) }
+            safely("LLM") {
+                LocalLlmManager.init(app)
+                LocalLlmManager.setEnabled(NativeModules.toggles.value.localLlm)
+            }
             // v3.8: retoma (HTTP Range) downloads de Piper/Whisper interrompidos — só 8/12 GB
-            com.enhikyy.girassol.audio.VoicePacks.refresh(app, LocalLlmManager.profile)
-            com.enhikyy.girassol.audio.VoicePacks.resumeInterrupted(app, LocalLlmManager.profile).takeIf { it.isNotEmpty() }
-                ?.let { Log.i(TAG, "retomando downloads de voz: $it") }
+            safely("vozes") {
+                com.enhikyy.girassol.audio.VoicePacks.refresh(app, LocalLlmManager.profile)
+                com.enhikyy.girassol.audio.VoicePacks.resumeInterrupted(app, LocalLlmManager.profile).takeIf { it.isNotEmpty() }
+                    ?.let { Log.i(TAG, "retomando downloads de voz: $it") }
+            }
             // v3.6 "Adão e Eva": nenhum modelo de fábrica; o mundo nasce vazio e cada .gguf
             // importado pelo usuário cria exatamente 1 cidadão fundador (ver importFounder).
             ports = buildPorts(NativeModules.toggles.value)
@@ -127,11 +151,15 @@ object SimulationHub {
                 core.state.chat += m
                 if (m.id >= core.state.nextChatSerial) core.state.nextChatSerial = m.id + 1
             }
-            restoreFounders(app)
+            safely("fundadores") { restoreFounders(app) }
             if (restored == null) persistSnapshot()
             publish(force = true)
-            if (NativeModules.toggles.value.binauralAudio) AmbientAudioController.start()
-            if (NativeModules.toggles.value.voiceTts) com.enhikyy.girassol.audio.CitizenVoice.setEnabled(app, true)
+            safely("áudio") {
+                if (NativeModules.toggles.value.binauralAudio) AmbientAudioController.start()
+                if (NativeModules.toggles.value.voiceTts) com.enhikyy.girassol.audio.CitizenVoice.setEnabled(app, true)
+            }
+            // v3.9: o mundo nasce VIVO — o relógio anda desde o segundo zero, sem depender do serviço.
+            startLoopNow()
         }
     }
 
@@ -163,12 +191,20 @@ object SimulationHub {
     @Suppress("UNUSED_PARAMETER")
     fun onTrimMemory(level: Int) = Unit
 
+    /** Falhas de subsistemas opcionais (JNI, ADPF, vozes) nunca impedem o mundo de nascer. */
+    private inline fun safely(what: String, block: () -> Unit) {
+        try { block() } catch (t: Throwable) { Log.w(TAG, "$what indisponível: ${t.message}") }
+    }
+
     fun start() {
-        scope.launch {
-            if (!_status.value.loaded || loopJob?.isActive == true) return@launch
-            _status.update { it.copy(running = true) }
-            loopJob = scope.launch { runLoop() }
-        }
+        scope.launch { startLoopNow() }
+    }
+
+    /** Executa na thread do mundo. Idempotente. */
+    private fun startLoopNow() {
+        if (!_status.value.loaded || loopJob?.isActive == true) return
+        _status.update { it.copy(running = true) }
+        loopJob = scope.launch { runLoop() }
     }
 
     fun pause() {
@@ -182,7 +218,9 @@ object SimulationHub {
 
     fun setSpeed(tps: Int) {
         val cap = _hardware.value?.maxTicksPerSecond ?: 120
-        _status.update { it.copy(targetTps = tps.coerceIn(1, cap)) }
+        val v = tps.coerceIn(1, cap)
+        _status.update { it.copy(targetTps = v) }
+        appContext?.let { ctx -> runCatching { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt(KEY_SPEED, v).apply() } }
     }
 
     /** Status térmico do PowerManager (0..6) e memória disponível, quantizados. */
@@ -249,13 +287,49 @@ object SimulationHub {
         _render.value = WorldRenderSnapshot.of(core.state)
         if (_chat.value.size != core.state.chat.size || _chat.value.lastOrNull()?.id != core.state.chat.lastOrNull()?.id)
             _chat.value = core.state.chat.takeLast(500)
+        collectWorldSpeech()
         val now = System.nanoTime()
         if (force || now - lastDashboardNs > 900_000_000L) {
-            _dashboard.value = DashboardSnapshot.of(core.state)
+            val d = DashboardSnapshot.of(core.state)
+            _dashboard.value = d
+            sampleLive(d)
             lastDashboardNs = now
             AmbientAudioController.update(_dashboard.value, _render.value)
             LocalLlmManager.maybeReload()
         }
+    }
+
+    /** Detecta falas novas (WorldCore.speak) e as publica no feed do Chat. */
+    private fun collectWorldSpeech() {
+        val st = core.state
+        val fresh = ArrayList<WorldSpeech>()
+        for (c in st.aliveCitizens()) {
+            val t = c.lastSpeechTick
+            if (t < 0 || c.lastSpeech.isBlank()) continue
+            if (lastSeenSpeech[c.id] == t) continue
+            lastSeenSpeech[c.id] = t
+            if (!speechPrimed) continue // falas anteriores à abertura não viram mensagens novas
+            fresh += WorldSpeech(
+                key = ++speechSerial, tick = t, wallClockMs = System.currentTimeMillis(), citizenId = c.id, name = c.name,
+                text = c.lastSpeech, neural = c.intention?.viaNeural == true, thought = c.lastThought,
+                action = (c.intention?.action ?: c.lastAction)?.label
+            )
+        }
+        speechPrimed = true
+        if (fresh.isNotEmpty()) _worldSpeech.update { (it + fresh).takeLast(MAX_WORLD_SPEECH) }
+    }
+
+    private fun sampleLive(d: DashboardSnapshot) {
+        val alive = d.citizens.filter { it.alive }
+        val s = LiveSample(
+            tick = d.tick,
+            population = alive.size,
+            meanMood = if (alive.isEmpty()) 0.0 else alive.map { it.mood }.average(),
+            meanNeed = if (alive.isEmpty()) 0.0 else alive.map { it.meanNeed }.average(),
+            meanEnergy = if (alive.isEmpty()) 0.0 else alive.map { it.energy }.average(),
+            meanSocial = if (alive.isEmpty()) 0.0 else alive.map { it.social }.average()
+        )
+        _live.update { prev -> if (prev.lastOrNull()?.tick == s.tick) prev else (prev + s).takeLast(MAX_LIVE_SAMPLES) }
     }
 
     private fun persistSnapshot() {
@@ -448,12 +522,15 @@ object SimulationHub {
         for (c in responders) {
             val prompt = core.chatPromptFor(c.id, text) ?: continue
             _chatPending.update { it + c.id }
+            aborted.remove(c.id)
             LocalLlmManager.chatAsync(c.effectiveModelKey, c.id, prompt) { reply, engine ->
                 scope.launch {
+                    if (aborted.remove(c.id)) { _chatPending.update { it - c.id }; return@launch }
                     val finalText = reply ?: core.symbolicReply(c.id, text)
                     val finalEngine = if (reply != null) engine else "simbolico"
                     core.postCitizenReply(c.id, citizenId, finalText, finalEngine, System.currentTimeMillis())?.let { r ->
                         writer.submitChat(core.state.seed, listOf(r))
+                        lastSeenSpeech[c.id] = core.state.tick // a resposta já é bolha de chat; não duplica no feed
                         if (NativeModules.toggles.value.voiceTts) com.enhikyy.girassol.audio.CitizenVoice.speakChat(c.id, c.sex, finalText)
                     }
                     _chatPending.update { it - c.id }
@@ -461,6 +538,14 @@ object SimulationHub {
                 }
             }
         }
+    }
+
+    /** v3.9: botão Parar da cápsula — interrompe a inferência em curso e descarta as respostas pendentes. */
+    fun stopChat() {
+        val pending = _chatPending.value
+        aborted.addAll(pending)
+        _chatPending.value = emptySet()
+        runCatching { LocalLlmManager.abortGeneration() }
     }
 
     /** Pausa/ativa o modelo de um fundador (painel da aba Sistema). */

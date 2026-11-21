@@ -58,7 +58,9 @@ fun SectionCard(title: String, modifier: Modifier = Modifier, content: @Composab
 fun KeyValue(key: String, value: String, valueColor: Color = Lumon.Cream) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
         Text(key, style = MaterialTheme.typography.bodyMedium, color = Lumon.CreamDim, modifier = Modifier.weight(1f))
-        Text(value, style = MonoStyle, color = valueColor, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        // v3.9: sem reticências — valores longos quebram em até 3 linhas alinhadas à direita
+        Text(value, style = MonoStyle, color = valueColor, maxLines = 3, overflow = TextOverflow.Ellipsis,
+            textAlign = androidx.compose.ui.text.style.TextAlign.End, modifier = Modifier.padding(start = 8.dp).weight(1f, fill = false))
     }
 }
 
@@ -83,7 +85,7 @@ fun MetricTile(label: String, value: String, modifier: Modifier = Modifier, acce
             .background(Lumon.SurfaceHigh)
             .padding(horizontal = 10.dp, vertical = 8.dp)
     ) {
-        Text(label, style = MaterialTheme.typography.labelSmall, color = Lumon.CreamDim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(label, style = MaterialTheme.typography.labelSmall, color = Lumon.CreamDim, maxLines = 2, softWrap = true)
         Text(value, style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold), color = accent, maxLines = 1)
     }
 }

@@ -59,7 +59,7 @@ object Render3dTelemetry {
  */
 class FilamentCityRenderer(
     private val context: Context,
-    private val surfaceView: SurfaceView?,
+    private val surfaceView: android.view.View?,
     initialLevel: EffectLevel = EffectLevel.FULL
 ) {
     companion object {
@@ -163,7 +163,7 @@ class FilamentCityRenderer(
 
     /** Cria o Engine e os recursos; lança exceção se o dispositivo não suportar (ex.: sem GLES 3). */
     fun init() {
-        val sv = checkNotNull(surfaceView) { "init() exige SurfaceView; use initHeadless()" }
+        val sv = checkNotNull(surfaceView) { "init() exige SurfaceView/TextureView; use initHeadless()" }
         initCore()
         uiHelper.setRenderCallback(object : UiHelper.RendererCallback {
             override fun onNativeWindowChanged(surface: Surface) {
@@ -181,7 +181,12 @@ class FilamentCityRenderer(
                 updateProjection()
             }
         })
-        uiHelper.attachTo(sv)
+        // v3.9: TextureView compõe com a árvore de Views — o Liquid Glass consegue desfocar a cena 3D real
+        when (sv) {
+            is android.view.TextureView -> uiHelper.attachTo(sv)
+            is SurfaceView -> uiHelper.attachTo(sv)
+            else -> error("superfície não suportada: ${sv.javaClass.simpleName}")
+        }
         initialized = true
         Render3dTelemetry.set(Render3dStats(active = true, effectLevel = level.label))
     }
@@ -243,7 +248,7 @@ class FilamentCityRenderer(
         postMat = loadMaterial("materials/girassol_dehancer_post.filamat")
         concreteTex = PbrTextures.load(context, engine, PbrTextures.CONCRETE)
         carpetTex = PbrTextures.load(context, engine, PbrTextures.CARPET)
-        cityMi = cityMat.createInstance().apply { setParameter("tint", 1f, 1f, 1f, 1f); setParameter("emissiveBoost", 1.2f); bindDetail(this) }
+        cityMi = cityMat.createInstance().apply { setParameter("tint", 1f, 1f, 1f, 1f); setParameter("emissiveBoost", 1.2f); setParameter("sunDir", 0f, 1f, 0f); setParameter("sunAmount", 0f); bindDetail(this) }
         glowMi = glowMat.createInstance().apply { setParameter("size", 0.55f); setParameter("intensity", 1.0f) }
         agentMesh = CityMeshBuilder.citizenMesh()
         skinScratch = FloatArray(agentMesh.positions.size)
@@ -478,6 +483,7 @@ class FilamentCityRenderer(
         destroyRenderable(glowEntity); glowEntity = 0
         glowVb?.let { engine.destroyVertexBuffer(it) }; glowIb?.let { engine.destroyIndexBuffer(it) }
         val mesh = CityMeshBuilder.build(s.widthTiles, s.tiles, s.objects)
+            .merge(CityMeshBuilder.scenery(s.widthTiles, s.tiles))
         vertexCount = mesh.vertexCount
         val vb = colorVertexBuffer(mesh.positions, mesh.colors); val ib = indexBuffer(mesh.indices)
         cityVb = vb; cityIb = ib
@@ -520,7 +526,7 @@ class FilamentCityRenderer(
         camera.boundsW = s.widthTiles.toFloat()
         val key = s.widthTiles.toLong() * 1_000_003L + s.tiles.contentHashCode() * 31L + s.objects.size
         if (key != meshKey) {
-            if (meshKey == Long.MIN_VALUE) { camera.targetX = s.widthTiles / 2f; camera.targetZ = s.widthTiles / 2f; camera.distance = (s.widthTiles * 0.9f).coerceIn(18f, 110f) }
+            if (meshKey == Long.MIN_VALUE) camera.frameCity(s.widthTiles)
             meshKey = key
             rebuildCity(s)
         }
@@ -532,6 +538,8 @@ class FilamentCityRenderer(
             framedPopulation = true
         }
         night = s.night
+        dayTarget = SunCycle.dayFraction(s.tick)
+        if (dayPhase.isNaN()) dayPhase = dayTarget
         applyDayNight()
         val newTargets = HashMap<String, FloatArray>(s.agents.size * 2)
         val rm = engine.renderableManager
@@ -570,7 +578,28 @@ class FilamentCityRenderer(
         Render3dTelemetry.update { it.copy(vertices = vertexCount, citizens = agentEntities.size) }
     }
 
+    /** v3.9: fração do dia (0..1) suavizada por quadro — o sol anda contínuo mesmo a 1 tick/s. */
+    private var dayPhase = Float.NaN
+    private var dayTarget = 0.5f
+
+    /** Foco animado num cidadão (toque no balão, atalho da cápsula). */
+    fun focusCitizen(id: String): Boolean {
+        val p = visual[id] ?: lastSnapshot?.agents?.firstOrNull { it.id == id }?.let { floatArrayOf(it.fx, 0f, it.fz) } ?: return false
+        camera.focusOn(p[0], p[2], 14f)
+        return true
+    }
+
     private fun applyDayNight() {
+        if (!dayPhase.isNaN()) {
+            val sun = SunCycle.at(dayPhase)
+            cityMi.setParameter("tint", sun.tint[0], sun.tint[1], sun.tint[2], 1f)
+            cityMi.setParameter("emissiveBoost", sun.emissive)
+            cityMi.setParameter("sunDir", sun.dir[0], sun.dir[1], sun.dir[2])
+            cityMi.setParameter("sunAmount", sun.amount)
+            glowMi.setParameter("intensity", sun.glow)
+            renderer.setClearOptions(Renderer.ClearOptions().apply { clear = true; clearColor = doubleArrayOf(sun.sky[0].toDouble(), sun.sky[1].toDouble(), sun.sky[2].toDouble(), 1.0) })
+            return
+        }
         if (night) {
             // v3.6: emissivo noturno 6.0 → 1.4 e brilho 2.4 → 0.55 (janelas e postes acesos sem cegar)
             cityMi.setParameter("tint", 0.42f, 0.46f, 0.62f, 1f); cityMi.setParameter("emissiveBoost", NIGHT_EMISSIVE); glowMi.setParameter("intensity", 0.55f)
@@ -631,6 +660,13 @@ class FilamentCityRenderer(
             val pb = g.positions[g.flip]; g.flip = g.flip xor 1
             pb.clear(); pb.asFloatBuffer().put(skinScratch); pb.rewind()
             g.vb.setBufferAt(engine, 0, pb)
+        }
+        camera.animate(dt)
+        if (!dayPhase.isNaN()) {
+            var d = dayTarget - dayPhase
+            if (d > 0.5f) d -= 1f; if (d < -0.5f) d += 1f
+            dayPhase = (dayPhase + d * (dt * 1.5f).coerceAtMost(1f) + 1f) % 1f
+            applyDayNight()
         }
         val eye = camera.eye(); val tgt = camera.target()
         fCamera.lookAt(eye.x.toDouble(), eye.y.toDouble(), eye.z.toDouble(), tgt.x.toDouble(), tgt.y.toDouble(), tgt.z.toDouble(), 0.0, 1.0, 0.0)

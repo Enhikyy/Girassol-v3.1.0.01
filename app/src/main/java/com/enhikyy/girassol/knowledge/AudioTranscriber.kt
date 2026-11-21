@@ -180,6 +180,16 @@ object AudioTranscriber {
         return transcribePcm(rec, pcm, onProgress)
     }
 
+    /** v3.9: ditado da cápsula de comando (microfone → PCM 16 kHz). Whisper pt se instalado, senão SenseVoice. */
+    fun transcribeMic(context: Context, pcm: FloatArray): String {
+        val w = if (whisperAvailable(context)) whisperRecognizer(context) else null
+        val rec = w ?: recognizer(context)
+        lastBackend = if (w != null) "Whisper tiny (pt)" else "SenseVoice-Small"
+        return transcribePcm(rec, pcm).replace('\n', ' ').trim()
+    }
+
+    fun micAvailable(context: Context): Boolean = whisperAvailable(context) || modelAvailable(context)
+
     /** Transcreve PCM mono 16 kHz em janelas de 25 s (o Whisper aceita até 30 s). */
     fun transcribePcm(rec: OfflineRecognizer, pcm: FloatArray, onProgress: (Float) -> Unit = {}): String {
         if (pcm.isEmpty()) return ""

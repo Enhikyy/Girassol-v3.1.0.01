@@ -494,6 +494,11 @@ object LocalLlmManager : NeuralDeliberationPort {
     @Volatile var memoryBreakerOpen = false
         private set
 
+    /** v3.9: botão Parar do Chat — interrompe o token loop atual (o mundo e o modelo continuam carregados). */
+    fun abortGeneration() {
+        if (ready) runCatching { LlmNativeBridge.nativeLlmAbort() }
+    }
+
     /**
      * Chamado pelo MemoryGuard (RAM anônima acima do limite, lowMemory real ou
      * TRIM_MEMORY_RUNNING_CRITICAL). Aborta a geração e libera o contexto; o mundo segue.

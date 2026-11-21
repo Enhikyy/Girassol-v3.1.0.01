@@ -11,7 +11,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.FilterChip
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.draw.clip
+import com.enhikyy.girassol.sim.SimClock
+import com.enhikyy.girassol.ui.components.GlassPill
+import com.enhikyy.girassol.ui.glass.GlassTone
+import com.enhikyy.girassol.ui.glass.liquidGlass
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
@@ -74,11 +80,15 @@ fun SystemScreen() {
     var bench by remember { mutableStateOf("") }
     var benchRunning by remember { mutableStateOf(false) }
 
-    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp).testTag("system_list"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp).testTag("system_list"),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 8.dp, bottom = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item { WorldEngineCard() }
+        item { TelemetryCard() }
+        item { KnowledgeLibraryPanel(dash) }
+        item { MeshSyncPanel(dash) }
         item {
             SectionCard("Execução contínua") {
-                KeyValue("Estado", if (status.running) "rodando" else "pausado")
-                KeyValue("Ticks/s alvo · efetivo", "${status.targetTps} · ${status.effectiveTps.f(1)}")
                 KeyValue("Estado térmico", thermalLabel(status.thermalStatus) + if (status.thermalCapped) " (limitado)" else "")
                 KeyValue("Perfil do aparelho", LocalLlmManager.profile.label + " · " + LocalLlmManager.profile.description)
                 KeyValue("Pool de modelos (llama_model)", "${llm.poolResident}/${llm.poolCapacity} residentes · ${llm.poolHits} trocas só de contexto · ${llm.poolColdLoads} cargas · ${llm.poolEvictions} despejos")
@@ -86,12 +96,6 @@ fun SystemScreen() {
                     "${llm.dynamicBudgetMb}/${llm.budgetMb} MB · reserva ${llm.budgetReserveMb} MB (Filament + gráfico + WAL + folga) · fonte ${llm.budgetSource}" +
                         if (llm.pressureEvictions > 0) " · ${llm.pressureEvictions} despejos por pressão" else "")
                 if (llm.poolKeys.isNotEmpty()) KeyValue("Residentes", llm.poolKeys.joinToString(", "))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    SimulationHub.SPEEDS.forEach { s ->
-                        FilterChip(selected = status.targetTps == s, onClick = { SimulationHub.setSpeed(s) }, label = { Text("${s}x") },
-                            shape = com.enhikyy.girassol.ui.components.Shapes.Capsule, modifier = Modifier.testTag("speed_$s"))
-                    }
-                }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = { GirassolContinuousService.start(context) }, modifier = Modifier.weight(1f),
                         colors = ButtonDefaults.buttonColors(containerColor = Lumon.Sunflower, contentColor = Lumon.Background)) { Text("Iniciar serviço") }
@@ -203,7 +207,6 @@ fun SystemScreen() {
                 Button(onClick = { confirmReset = true }, colors = ButtonDefaults.buttonColors(containerColor = Lumon.Danger)) { Text("Reiniciar mundo") }
             }
         }
-        item { Spacer(Modifier.padding(8.dp)) }
     }
 
     if (confirmReset) {
@@ -292,4 +295,85 @@ fun FounderModelsPanel() {
 private object LlmQuantPolicyRam {
     fun estimateMb(bytes: Long, p: com.enhikyy.girassol.llm.LlmQuantPolicy.DeviceProfile): Long =
         com.enhikyy.girassol.llm.LlmQuantPolicy.activeRamEstimate(bytes, p.nCtx, p.kvType) / (1024 * 1024)
+}
+
+/** v3.9 — Motor do mundo: relógio simulado, estado e pílulas de velocidade (1x | 2x | 8x | 30x). */
+@Composable
+fun WorldEngineCard() {
+    val status by SimulationHub.status.collectAsStateWithLifecycle()
+    val snap by SimulationHub.render.collectAsStateWithLifecycle()
+    val hw by SimulationHub.hardware.collectAsStateWithLifecycle()
+    SectionCard("Motor do mundo", Modifier.testTag("world_engine")) {
+        val tick = snap?.tick ?: 0L
+        Text("${SimClock.label(tick)} · ${SimClock.period(tick)}", style = MaterialTheme.typography.titleMedium, color = Lumon.Sunflower,
+            modifier = Modifier.testTag("engine_clock"))
+        Text((if (status.running) "Rodando" else "Pausado") + " · ${status.effectiveTps.f(1)} ticks/s (alvo ${status.targetTps}) · tick $tick",
+            style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim, modifier = Modifier.testTag("engine_status"))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            SimulationHub.SPEEDS.forEach { s ->
+                GlassPill("${s}x", status.targetTps == s, "speed_$s", Modifier.weight(1f)) { SimulationHub.setSpeed(s); if (!status.running) SimulationHub.start() }
+            }
+        }
+        val cap = hw?.maxTicksPerSecond
+        if (cap != null && cap < SimulationHub.SPEEDS.last()) Text("Este aparelho limita o mundo a $cap ticks/s.", style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
+        OutlinedButton(onClick = { if (status.running) SimulationHub.pause() else SimulationHub.start() }, shape = Shapes.Capsule,
+            modifier = Modifier.fillMaxWidth().testTag("engine_toggle")) { Text(if (status.running) "Pausar o mundo" else "Retomar o mundo") }
+    }
+}
+
+/** v3.9 — Telemetria em tempo real com barras de vidro: RAM, Filament, SQLite WAL e mmap por .gguf. */
+@Composable
+fun TelemetryCard() {
+    val context = LocalContext.current
+    val mem by com.enhikyy.girassol.system.MemoryGuard.state.collectAsStateWithLifecycle()
+    val models by LocalLlmManager.models.collectAsStateWithLifecycle()
+    var walBytes by remember { mutableStateOf(0L) }
+    var filamentBytes by remember { mutableStateOf(0L) }
+    var resident by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
+    androidx.compose.runtime.LaunchedEffect(models) {
+        while (true) {
+            withContext(Dispatchers.IO) {
+                walBytes = runCatching { java.io.File(context.getDatabasePath(com.enhikyy.girassol.data.GirassolDatabase.DB_NAME).path + "-wal").length() }.getOrDefault(0L)
+                filamentBytes = com.enhikyy.girassol.render3d.FilamentMemory.nativeBytes()
+                resident = com.enhikyy.girassol.system.MmapResidency.residentKb(models.map { it.path })
+            }
+            kotlinx.coroutines.delay(2_000)
+        }
+    }
+    SectionCard("Telemetria em tempo real", Modifier.testTag("telemetry_card")) {
+        val total = mem.sysTotalMb.coerceAtLeast(1)
+        val used = (mem.sysTotalMb - mem.sysAvailMb).coerceAtLeast(0)
+        GlassBar("RAM do aparelho", used.toDouble() / total, "$used / $total MB", "tele_ram")
+        val rssMb = if (mem.rssKb > 0) mem.rssKb / 1024 else 0
+        GlassBar("Este app (VmRSS)", rssMb.toDouble() / total, "$rssMb MB", "tele_rss")
+        val filMb = filamentBytes / (1024.0 * 1024.0)
+        GlassBar("Filament 3D (nativo)", (filMb / 256.0).coerceIn(0.0, 1.0), "${filMb.f(1)} MB", "tele_filament")
+        val walMb = walBytes / (1024.0 * 1024.0)
+        GlassBar("SQLite WAL", (walMb / 64.0).coerceIn(0.0, 1.0), "${walMb.f(2)} MB", "tele_wal")
+        if (models.isEmpty()) Text("Nenhum .gguf importado: sem páginas mmap de modelos.", style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
+        for (m in models) {
+            val resMb = (resident[m.path] ?: 0L) / 1024.0
+            val fileMb = m.bytes / (1024.0 * 1024.0)
+            GlassBar("mmap · ${m.displayName}", if (fileMb > 0) (resMb / fileMb).coerceIn(0.0, 1.0) else 0.0,
+                "${resMb.f(0)} / ${fileMb.f(0)} MB", "tele_mmap_${m.key}")
+        }
+    }
+}
+
+@Composable
+private fun GlassBar(label: String, value: Double, trailing: String, tag: String) {
+    Column(Modifier.fillMaxWidth().testTag(tag)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(label, style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim, maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text(trailing, style = MonoStyle, color = Lumon.Cream, maxLines = 1)
+        }
+        androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth().padding(top = 4.dp).height(10.dp)
+            .liquidGlass(Shapes.Capsule, tone = GlassTone.CLEAR, elevation = 0.dp, backdrop = false)) {
+            val v = value.toFloat().coerceIn(0f, 1f)
+            val color = when { v > 0.85f -> Lumon.Danger; v > 0.65f -> Lumon.Sunflower; else -> Lumon.Teal }
+            androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth(v.coerceAtLeast(0.02f)).height(10.dp)
+                .clip(Shapes.Capsule).background(androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(color.copy(alpha = 0.55f), color))))
+        }
+    }
 }

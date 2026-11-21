@@ -26,13 +26,65 @@ class OrbitCamera(
     var targetX: Float = 0f,
     var targetZ: Float = 0f,
     var yaw: Float = 0.78f,
-    var pitch: Float = 0.82f,
+    var pitch: Float = DEFAULT_PITCH,
     var distance: Float = 42f,
     val fovDeg: Float = 42f
 ) {
+    companion object {
+        /** v3.9: perspectiva isométrica elevada de ~42° para baixo (estilo Cities: Skylines 2). */
+        val DEFAULT_PITCH = Math.toRadians(42.0).toFloat()
+        /** Arfagem mínima (~24°): a câmera nunca desce ao nível das ruas nem atravessa o terreno. */
+        val MIN_PITCH = Math.toRadians(24.0).toFloat()
+        val MAX_PITCH = Math.toRadians(82.0).toFloat()
+        const val MIN_EYE_HEIGHT = 2.5f
+    }
+
     val minDistance = 6f
     val maxDistance = 140f
     var boundsW: Float = Float.MAX_VALUE
+
+    // foco animado (toque num balão / atalho da cápsula): molas críticas por quadro
+    private var goalX = Float.NaN
+    private var goalZ = Float.NaN
+    private var goalDistance = Float.NaN
+
+    /** Agenda um voo suave até (x, z) com a distância indicada. */
+    fun focusOn(x: Float, z: Float, dist: Float = 16f) {
+        goalX = x.coerceIn(0f, boundsW); goalZ = z.coerceIn(0f, boundsW)
+        goalDistance = dist.coerceIn(minDistance, maxDistance)
+    }
+
+    val animating: Boolean get() = !goalX.isNaN()
+
+    /** Avança a animação de foco; retorna true enquanto ainda está se movendo. */
+    fun animate(dtSeconds: Float): Boolean {
+        if (goalX.isNaN()) return false
+        val k = (dtSeconds * 5.5f).coerceIn(0f, 1f)
+        targetX += (goalX - targetX) * k
+        targetZ += (goalZ - targetZ) * k
+        distance += (goalDistance - distance) * k
+        if (kotlin.math.abs(goalX - targetX) < 0.01f && kotlin.math.abs(goalZ - targetZ) < 0.01f && kotlin.math.abs(goalDistance - distance) < 0.02f) {
+            targetX = goalX; targetZ = goalZ; distance = goalDistance
+            goalX = Float.NaN; goalZ = Float.NaN; goalDistance = Float.NaN
+        }
+        enforceLimits()
+        return true
+    }
+
+    /** Mantém o olho acima do terreno e a arfagem dentro dos limites. */
+    fun enforceLimits() {
+        pitch = pitch.coerceIn(MIN_PITCH, MAX_PITCH)
+        distance = distance.coerceIn(minDistance, maxDistance)
+        if (distance * sin(pitch) < MIN_EYE_HEIGHT) pitch = kotlin.math.asin((MIN_EYE_HEIGHT / distance).coerceAtMost(1f)).coerceAtMost(MAX_PITCH)
+    }
+
+    /** Enquadramento inicial: centro da cidade, olho elevado olhando para baixo. */
+    fun frameCity(widthTiles: Int) {
+        targetX = widthTiles / 2f; targetZ = widthTiles / 2f
+        yaw = 0.78f; pitch = DEFAULT_PITCH
+        distance = (widthTiles * 0.9f).coerceIn(18f, 110f)
+        enforceLimits()
+    }
 
     fun target() = V3(targetX, 0f, targetZ)
 
@@ -52,8 +104,12 @@ class OrbitCamera(
     fun orbit(dxPx: Float, dyPx: Float, viewH: Float) {
         val k = 3.2f / viewH.coerceAtLeast(1f)
         yaw -= dxPx * k
-        pitch = (pitch + dyPx * k).coerceIn(0.18f, 1.45f)
+        pitch = (pitch + dyPx * k).coerceIn(MIN_PITCH, MAX_PITCH)
+        cancelFocus()
+        enforceLimits()
     }
+
+    private fun cancelFocus() { goalX = Float.NaN; goalZ = Float.NaN; goalDistance = Float.NaN }
 
     /** Dois dedos: desloca o alvo no plano do chão, proporcional à distância. */
     fun pan(dxPx: Float, dyPx: Float, viewH: Float) {
@@ -63,11 +119,14 @@ class OrbitCamera(
         val d = r * (-dxPx * k) + fwdGround * (dyPx * k)
         targetX = (targetX + d.x).coerceIn(0f, boundsW)
         targetZ = (targetZ + d.z).coerceIn(0f, boundsW)
+        cancelFocus()
     }
 
     fun zoom(factor: Float) {
         if (factor <= 0f) return
         distance = (distance / factor).coerceIn(minDistance, maxDistance)
+        cancelFocus()
+        enforceLimits()
     }
 
     fun rotate(degrees: Float) { yaw -= Math.toRadians(degrees.toDouble()).toFloat() }

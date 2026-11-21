@@ -16,6 +16,9 @@ material {
     shadingModel : unlit,
     vertexDomain : device,
     requires : [ uv0 ],
+    // v3.9: o triângulo de tela cheia já entrega UV de RenderTarget (origem embaixo, como o GL).
+    // Com o padrão flipUV:true do matc a cena saía DE CABEÇA PARA BAIXO nas GPUs reais.
+    flipUV : false,
     depthWrite : false,
     depthCulling : false,
     culling : none,

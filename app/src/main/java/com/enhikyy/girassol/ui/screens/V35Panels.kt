@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -98,6 +99,17 @@ fun KnowledgeLibraryPanel(dash: DashboardSnapshot?) {
         }
         v?.compressedSpeechSample?.take(3)?.forEach { Text("› $it", style = MonoStyle, color = Lumon.CreamDim, maxLines = 2, overflow = TextOverflow.Ellipsis) }
     }
+}
+
+/** v3.9: atalho do "+" da cápsula de comando — mesmo fluxo da Biblioteca. */
+@Composable
+fun rememberDocumentIngester(onResult: (String) -> Unit): () -> Unit {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch { onResult(LibraryIngest.ingest(context, uri) { p -> onResult(p) }) }
+    }
+    return { picker.launch(LibraryIngest.MIME_TYPES) }
 }
 
 /** Processo 19 — MeshSync LAN (NSD/UDP + HMAC-SHA256 + WifiLock temporizado). */
@@ -191,14 +203,29 @@ fun ThemesPanel() {
         KeyValue("Tema ativo", current.label)
         KeyValue("Menor contraste texto/vidro", "${minRatio.f(2)}:1 ${if (minRatio >= Wcag.AA_NORMAL) "(AA)" else "(abaixo de AA)"}",
             if (minRatio >= Wcag.AA_NORMAL) Lumon.Ok else Lumon.Danger)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            NativeThemes.ALL.forEach { t ->
-                val sel = t.key == current.key
-                Box(Modifier.size(width = 96.dp, height = 40.dp).clip(RoundedCornerShape(10.dp)).background(Color(t.background.toInt()))
-                    .border(if (sel) 2.dp else 1.dp, Color(t.primary.toInt()), RoundedCornerShape(10.dp))
-                    .clickable { ThemeController.select(context, t) }.padding(6.dp), contentAlignment = Alignment.Center) {
-                    Text(t.label, style = MaterialTheme.typography.labelSmall, color = Color(t.text.toInt()), maxLines = 2, overflow = TextOverflow.Ellipsis)
+        ThemeGrid(context)
+    }
+}
+
+/** v3.9: grade responsiva de 2 colunas com os 15 temas — nomes inteiros, sem truncamento. */
+@Composable
+fun ThemeGrid(context: android.content.Context = LocalContext.current) {
+    val current = ThemeController.palette
+    Column(Modifier.fillMaxWidth().testTag("theme_grid"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        NativeThemes.ALL.chunked(2).forEach { row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                row.forEach { t ->
+                    val sel = t.key == current.key
+                    Row(Modifier.weight(1f).heightIn(min = 48.dp).clip(RoundedCornerShape(14.dp)).background(Color(t.background.toInt()))
+                        .border(if (sel) 2.dp else 1.dp, Color(t.primary.toInt()).copy(alpha = if (sel) 1f else 0.55f), RoundedCornerShape(14.dp))
+                        .clickable { ThemeController.select(context, t) }.padding(horizontal = 10.dp, vertical = 8.dp)
+                        .testTag("theme_${t.key}"), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(14.dp).clip(RoundedCornerShape(7.dp)).background(Color(t.primary.toInt())))
+                        Text(t.label, style = MaterialTheme.typography.labelMedium, color = Color(t.text.toInt()), softWrap = true,
+                            modifier = Modifier.padding(start = 8.dp))
+                    }
                 }
+                if (row.size == 1) Box(Modifier.weight(1f))
             }
         }
     }

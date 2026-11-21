@@ -62,10 +62,21 @@ import com.enhikyy.girassol.ui.components.Shapes
 import com.enhikyy.girassol.ui.screens.ChatScreen
 import com.enhikyy.girassol.ui.screens.CitizenDetailView
 import com.enhikyy.girassol.ui.screens.EvolutionScreen
-import com.enhikyy.girassol.ui.screens.KnowledgeLibraryPanel
-import com.enhikyy.girassol.ui.screens.MeshSyncPanel
 import com.enhikyy.girassol.ui.screens.SystemScreen
-import com.enhikyy.girassol.ui.screens.ThemesPanel
+import com.enhikyy.girassol.ui.screens.ThemeGrid
+import com.enhikyy.girassol.render3d.WorldFocus
+import com.enhikyy.girassol.ui.glass.GlassHost
+import com.enhikyy.girassol.ui.glass.GlassMotion
+import com.enhikyy.girassol.ui.glass.GlassTone
+import com.enhikyy.girassol.ui.glass.liquidGlass
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import com.enhikyy.girassol.ui.screens.WorldScreen
 import com.enhikyy.girassol.ui.theme.GirassolTheme
 import com.enhikyy.girassol.ui.theme.Lumon
@@ -85,7 +96,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        SimulationHub.ensureLoaded(this)
+        SimulationHub.ensureLoaded(this)   // v3.9: já inicia o relógio a 1x (fim do mundo congelado no tick 0)
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -99,38 +110,21 @@ class MainActivity : ComponentActivity() {
 private fun GirassolApp() {
     var tab by rememberSaveable { mutableStateOf(Tab.CHAT) }
     var selectedCitizen by rememberSaveable { mutableStateOf<String?>(null) }
-    val drawer = rememberDrawerState(DrawerValue.Closed)
-    val scope = rememberCoroutineScope()
-    val openMenu: () -> Unit = { scope.launch { drawer.open() } }
-    val dash by SimulationHub.dashboard.collectAsStateWithLifecycle()
+    var drawerOpen by rememberSaveable { mutableStateOf(false) }
+    val openMenu: () -> Unit = { drawerOpen = true }
 
-    ModalNavigationDrawer(
-        drawerState = drawer,
-        gesturesEnabled = drawer.isOpen || tab != Tab.BIOSFERA,
-        drawerContent = {
-            ModalDrawerSheet(
-                drawerShape = Shapes.Card, drawerContainerColor = Lumon.Background,
-                modifier = Modifier.fillMaxHeight().width(330.dp).testTag("main_drawer")
-            ) {
-                LazyColumn(Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    item { Text("GIRASSOL", style = MaterialTheme.typography.titleLarge, color = Lumon.Sunflower, modifier = Modifier.padding(8.dp)) }
-                    item { ThemesPanel() }
-                    item { KnowledgeLibraryPanel(dash) }
-                    item { MeshSyncPanel(dash) }
-                    item { Box(Modifier.size(24.dp)) }
-                }
-            }
-        }
-    ) {
-        Box(Modifier.fillMaxSize().background(Lumon.Background)) {
+    // v3.9: as telas são o "fundo" do vidro; navegação flutuante e gaveta refratam o conteúdo real.
+    GlassHost(
+        modifier = Modifier.fillMaxSize().background(Lumon.Background),
+        background = {
             when (tab) {
                 Tab.BIOSFERA -> WorldScreen(onOpenCitizen = { selectedCitizen = it }, onOpenMenu = openMenu)
                 else -> Column(Modifier.fillMaxSize().statusBarsPadding()) {
                     TabHeader(tab.label, openMenu)
                     Box(Modifier.fillMaxSize().navigationBarsPadding().padding(bottom = 84.dp)) {
                         when (tab) {
-                            Tab.CHAT -> ChatScreen(onOpenCitizen = { selectedCitizen = it })
+                            Tab.CHAT -> ChatScreen(onOpenCitizen = { selectedCitizen = it },
+                                onFocusCitizen = { id -> tab = Tab.BIOSFERA; selectedCitizen = null; id?.let(WorldFocus::focus) })
                             Tab.EVOLUCAO -> EvolutionScreen(onOpenCitizen = { selectedCitizen = it })
                             Tab.SISTEMA -> SystemScreen()
                             Tab.BIOSFERA -> Unit
@@ -145,7 +139,50 @@ private fun GirassolApp() {
                     CitizenDetailView(sel) { selectedCitizen = null }
                 }
             }
-            FloatingNavBar(tab, { tab = it; selectedCitizen = null }, Modifier.align(Alignment.BottomCenter))
+        }
+    ) {
+        FloatingNavBar(tab, { tab = it; selectedCitizen = null; drawerOpen = false }, Modifier.align(Alignment.BottomCenter))
+        GlassDrawer(drawerOpen, onClose = { drawerOpen = false }) { t -> tab = t; selectedCitizen = null; drawerOpen = false }
+    }
+}
+
+/** Gaveta Liquid Glass: navegação limpa + seletor dos 15 temas nativos (grade de 2 colunas). */
+@Composable
+private fun GlassDrawer(open: Boolean, onClose: () -> Unit, onNavigate: (Tab) -> Unit) {
+    val progress by animateFloatAsState(if (open) 1f else 0f, GlassMotion.spec(), label = "drawer")
+    if (progress <= 0.001f && !open) return
+    if (open) BackHandler(onBack = onClose)
+    Box(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f * progress))
+            .pointerInput(Unit) { detectTapGestures { onClose() } }.testTag("drawer_scrim"))
+        BoxWithConstraints(Modifier.fillMaxHeight()) {
+            val w = minOf(340.dp, maxWidth * 0.86f)
+            Column(
+                Modifier.fillMaxHeight().width(w)
+                    .graphicsLayer { translationX = -(1f - progress) * w.toPx() }
+                    .statusBarsPadding().navigationBarsPadding().padding(start = 8.dp, top = 8.dp, bottom = 8.dp)
+                    .liquidGlass(Shapes.Card, tone = GlassTone.DENSE, elevation = 24.dp)
+                    .padding(horizontal = 14.dp, vertical = 12.dp)
+                    .verticalScroll(rememberScrollState())
+                    .testTag("main_drawer"),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("GIRASSOL", style = MaterialTheme.typography.titleLarge, color = Lumon.Sunflower, modifier = Modifier.padding(4.dp))
+                for (t in Tab.entries) {
+                    Row(
+                        Modifier.fillMaxWidth().clip(Shapes.Capsule).clickable(role = Role.Button) { onNavigate(t) }
+                            .padding(horizontal = 12.dp, vertical = 10.dp).testTag("drawer_tab_${t.name}"),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(t.icon, contentDescription = null, tint = Lumon.Cream, modifier = Modifier.size(22.dp))
+                        Text(t.label, style = MaterialTheme.typography.titleSmall, color = Lumon.Cream)
+                    }
+                }
+                Text("Temas", style = MaterialTheme.typography.labelLarge, color = Lumon.CreamDim, modifier = Modifier.padding(top = 6.dp, start = 4.dp))
+                ThemeGrid()
+                Text("Biblioteca de Conhecimento e MeshSync LAN ficam na aba Sistema.", style = MaterialTheme.typography.bodySmall,
+                    color = Lumon.CreamDim, modifier = Modifier.padding(4.dp))
+            }
         }
     }
 }
@@ -165,16 +202,16 @@ private fun TabHeader(title: String, onMenu: () -> Unit) {
 private fun FloatingNavBar(current: Tab, onSelect: (Tab) -> Unit, modifier: Modifier) {
     Row(
         modifier.navigationBarsPadding().padding(horizontal = 18.dp, vertical = 10.dp).fillMaxWidth()
-            .clip(Shapes.Capsule).background(Lumon.Glass)
-            .border(1.dp, Lumon.Outline, Shapes.Capsule)
+            .liquidGlass(Shapes.Capsule, tone = GlassTone.REGULAR, elevation = 22.dp)
             .padding(horizontal = 6.dp, vertical = 6.dp).testTag("floating_nav"),
         horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically
     ) {
         for (t in Tab.entries) {
             val sel = t == current
+            val selAnim by animateFloatAsState(if (sel) 1f else 0f, GlassMotion.spec(), label = "tab")
             Column(
                 Modifier.weight(1f).clip(Shapes.Capsule)
-                    .background(if (sel) Lumon.Sunflower.copy(alpha = 0.16f) else Lumon.Glass.copy(alpha = 0f))
+                    .background(Lumon.Sunflower.copy(alpha = 0.18f * selAnim))
                     .clickable(role = Role.Tab) { onSelect(t) }
                     .semantics { selected = sel; contentDescription = "aba ${t.label}" }
                     .testTag("tab_${t.name}")

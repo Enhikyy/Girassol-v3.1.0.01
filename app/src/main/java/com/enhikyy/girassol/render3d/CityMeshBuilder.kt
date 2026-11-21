@@ -22,6 +22,13 @@ class CityMesh(val positions: FloatArray, val colors: FloatArray, val indices: I
         if (vertexCount == 0) return V3(0f, 0f, 0f) to V3(1f, 1f, 1f)
         return V3(minX, minY, minZ) to V3(maxX, maxY, maxZ)
     }
+
+    /** Concatena duas malhas (índices de [o] deslocados). */
+    fun merge(o: CityMesh): CityMesh {
+        if (o.vertexCount == 0) return this
+        val base = vertexCount
+        return CityMesh(positions + o.positions, colors + o.colors, indices + IntArray(o.indices.size) { o.indices[it] + base })
+    }
 }
 
 /** Sprites de brilho (halation): 4 vértices por sprite com o mesmo centro; uv = canto; cor.a = tamanho. */
@@ -147,6 +154,57 @@ object CityMeshBuilder {
         return b.mesh()
     }
 
+    /**
+     * v3.9 — cenário: terreno contínuo em Y=0 além da grade (sem vazio preto nas bordas),
+     * árvores estilizadas nos gramados e no entorno e postes de luz nas calçadas/ruas
+     * (cabeça emissiva onde ficam os sprites de halation). Malha separada da cidade.
+     */
+    fun scenery(width: Int, tiles: IntArray, margin: Int = 36): CityMesh {
+        val b = Buf()
+        val w = width.toFloat(); val m = margin.toFloat()
+        val up = V3(0f, 1f, 0f)
+        val earth = lin(0.26f, 0.29f, 0.17f)
+        val earthCol = floatArrayOf(earth[0] * shade(up), earth[1] * shade(up), earth[2] * shade(up), 0f)
+        // anel de terreno em volta da cidade, levemente abaixo para evitar z-fighting
+        val y = -0.015f
+        b.quad(V3(-m, y, -m), V3(-m, y, 0f), V3(w + m, y, 0f), V3(w + m, y, -m), earthCol)
+        b.quad(V3(-m, y, w), V3(-m, y, w + m), V3(w + m, y, w + m), V3(w + m, y, w), earthCol)
+        b.quad(V3(-m, y, 0f), V3(-m, y, w), V3(0f, y, w), V3(0f, y, 0f), earthCol)
+        b.quad(V3(w, y, 0f), V3(w, y, w), V3(w + m, y, w), V3(w + m, y, 0f), earthCol)
+        val types = TileType.values()
+        // árvores nos gramados da cidade
+        for (z in 0 until width) for (x in 0 until width) {
+            val t = types[tiles[z * width + x].coerceIn(0, types.size - 1)]
+            if (t == TileType.GRAMA && hash(x, z, 23) % 6 == 0) tree(b, x + 0.5f, z + 0.5f, 0.8f + (hash(x, z, 29) % 4) * 0.12f, hash(x, z, 31))
+            if (t == TileType.CALCADA && (x * 7 + z * 3) % 9 == 0) lamp(b, x + 0.5f, z + 0.5f)
+            if (t == TileType.RUA && (x + z) % 4 == 0) lamp(b, x + 0.08f, z + 0.08f)
+        }
+        // bosque no entorno (determinístico)
+        var k = 0
+        for (gz in -margin until width + margin step 3) for (gx in -margin until width + margin step 3) {
+            val inside = gx in -1..width && gz in -1..width
+            if (inside || hash(gx, gz, 41) % 3 != 0 || k > 420) continue
+            val jx = (hash(gx, gz, 43) % 100) / 100f * 2f; val jz = (hash(gx, gz, 47) % 100) / 100f * 2f
+            tree(b, gx + jx, gz + jz, 1.0f + (hash(gx, gz, 53) % 5) * 0.18f, hash(gx, gz, 59)); k++
+        }
+        return b.mesh()
+    }
+
+    private fun tree(b: Buf, cx: Float, cz: Float, s: Float, h: Int) {
+        val trunk = lin(0.30f, 0.21f, 0.14f)
+        val greens = arrayOf(lin(0.22f, 0.40f, 0.20f), lin(0.28f, 0.46f, 0.22f), lin(0.18f, 0.34f, 0.24f))
+        val leaf = greens[h % greens.size]
+        box(b, cx - 0.06f * s, cz - 0.06f * s, cx + 0.06f * s, cz + 0.06f * s, 0f, 0.55f * s, trunk, 0.6f)
+        box(b, cx - 0.36f * s, cz - 0.36f * s, cx + 0.36f * s, cz + 0.36f * s, 0.45f * s, 1.05f * s, leaf, 0.75f)
+        box(b, cx - 0.22f * s, cz - 0.22f * s, cx + 0.22f * s, cz + 0.22f * s, 1.05f * s, 1.45f * s, leaf, 0.9f)
+    }
+
+    private fun lamp(b: Buf, cx: Float, cz: Float) {
+        val pole = lin(0.20f, 0.20f, 0.21f)
+        box(b, cx - 0.035f, cz - 0.035f, cx + 0.035f, cz + 0.035f, 0f, 2.05f, pole, 0.7f)
+        box(b, cx - 0.09f, cz - 0.09f, cx + 0.09f, cz + 0.09f, 2.0f, 2.14f, lin(1.0f, 0.78f, 0.48f, 1f), 1f)
+    }
+
     /** Cor do papel de parede amarelo-envelhecido, do carpete úmido e das luminárias fluorescentes. */
     private val WALLPAPER = lin(0.80f, 0.74f, 0.46f)
     private val CARPET_DAMP = lin(0.55f, 0.50f, 0.30f)
@@ -185,7 +243,8 @@ object CityMeshBuilder {
         val types = TileType.values()
         for (z in 0 until width) for (x in 0 until width) {
             val t = types[tiles[z * width + x].coerceIn(0, types.size - 1)]
-            if (t == TileType.RUA && (x + z) % 4 == 0) centers.add(floatArrayOf(x + 0.5f, 2.1f, z + 0.5f, 1.0f, 0.62f, 0.32f, 1.6f))
+            if (t == TileType.RUA && (x + z) % 4 == 0) centers.add(floatArrayOf(x + 0.08f, 2.1f, z + 0.08f, 1.0f, 0.62f, 0.32f, 1.6f))
+            if (t == TileType.CALCADA && (x * 7 + z * 3) % 9 == 0) centers.add(floatArrayOf(x + 0.5f, 2.1f, z + 0.5f, 1.0f, 0.66f, 0.36f, 1.2f))
             if (t == TileType.PRACA && hash(x, z, 5) % 3 == 0) centers.add(floatArrayOf(x + 0.5f, 1.6f, z + 0.5f, 1.0f, 0.72f, 0.42f, 1.2f))
             if (t == TileType.EDIFICIO && hash(x, z, 13) % 4 == 0) centers.add(floatArrayOf(x + 1.0f, buildingHeight(x, z) * 0.55f, z + 1.0f, 1.0f, 0.42f, 0.22f, 1.3f))
         }

@@ -69,7 +69,7 @@ class Render3dMathTest {
         repeat(50) { cam.zoom(0.5f) }
         assertEquals(cam.maxDistance, cam.distance, 1e-4f)
         repeat(100) { cam.orbit(0f, 500f, h) }
-        assertTrue(cam.pitch <= 1.45f)
+        assertTrue(cam.pitch <= OrbitCamera.MAX_PITCH + 1e-4f)
         repeat(100) { cam.pan(5000f, 5000f, h) }
         assertTrue(cam.targetX in 0f..48f && cam.targetZ in 0f..48f)
     }

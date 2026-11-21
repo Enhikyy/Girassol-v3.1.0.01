@@ -2,7 +2,6 @@ package com.enhikyy.girassol.render3d
 
 import android.graphics.Bitmap
 import android.util.Log
-import android.view.SurfaceView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -38,6 +37,9 @@ import com.enhikyy.girassol.core.world.WorldRenderSnapshot
 import kotlinx.coroutines.delay
 import java.util.SplittableRandom
 
+/** Pedido de foco de câmera; [nonce] diferencia toques repetidos no mesmo cidadão. */
+data class FocusRequest(val citizenId: String, val nonce: Long = System.nanoTime())
+
 /** Posições em pixels (coordenadas da área do mundo) dos cidadãos visíveis — usado pelos balões e pelos testes de instrumentação. */
 object WorldPickRegistry {
     @Volatile var mode: String = "2D"
@@ -56,7 +58,8 @@ fun Filament3DView(
     onFailure: (String) -> Unit,
     onProjected: (Map<String, Offset>) -> Unit,
     modifier: Modifier = Modifier,
-    level: EffectLevel = EffectLevel.FULL
+    level: EffectLevel = EffectLevel.FULL,
+    focus: FocusRequest? = null
 ) {
     var renderer by remember { mutableStateOf<FilamentCityRenderer?>(null) }
     var activeLevel by remember { mutableStateOf(level) }
@@ -82,6 +85,8 @@ fun Filament3DView(
     }
 
     LaunchedEffect(snapshot, renderer) { renderer?.update(snapshot) }
+    // v3.9: voo de câmera até o cidadão (toque no balão ou atalho da cápsula de comando)
+    LaunchedEffect(focus, renderer) { val f = focus ?: return@LaunchedEffect; renderer?.focusCitizen(f.citizenId) }
     // Projeção dos cidadãos (balões de fala e testes): 10×/s, só depois que a superfície tem tamanho real.
     LaunchedEffect(renderer) {
         val r = renderer ?: return@LaunchedEffect
@@ -97,7 +102,7 @@ fun Filament3DView(
                 WorldPickRegistry.positions = out
                 onProjected(out)
             }
-            delay(100)
+            delay(33)
         }
     }
 
@@ -105,7 +110,9 @@ fun Filament3DView(
         AndroidView(
             modifier = Modifier.fillMaxSize().testTag("world_viewport_3d"),
             factory = { ctx ->
-                SurfaceView(ctx).also { sv ->
+                // v3.9: TextureView (compõe com a árvore de Views → o Liquid Glass desfoca a cena 3D real)
+                android.view.TextureView(ctx).also { sv ->
+                    sv.isOpaque = true
                     val r = FilamentCityRenderer(ctx, sv, level)
                     try {
                         // Sentinela: se o driver abortar o processo durante a compilação dos
@@ -191,4 +198,11 @@ private fun grainBitmap(n: Int, seed: Long): ImageBitmap {
         px[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
     }
     return Bitmap.createBitmap(px, n, n, Bitmap.Config.ARGB_8888).asImageBitmap()
+}
+
+/** v3.9 — pedidos globais de foco de câmera (balões, Chat, cápsula). Consumido pela Biosfera 3D/2D. */
+object WorldFocus {
+    private val _request = kotlinx.coroutines.flow.MutableStateFlow<FocusRequest?>(null)
+    val request: kotlinx.coroutines.flow.StateFlow<FocusRequest?> = _request
+    fun focus(citizenId: String) { _request.value = FocusRequest(citizenId) }
 }
