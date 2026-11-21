@@ -82,7 +82,7 @@ class GeaDeterministicEnginesTest {
 
         val record = coordinator.runCycle(core)
         assertFalse(record.decision.promoted)
-        assertTrue(record.decision.reason.contains("evidência"))
+        assertTrue(record.decision.reason.contains("ausentes"))
     }
 
     @Test
