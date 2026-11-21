@@ -91,6 +91,10 @@ fun EvolutionContent(
     memoriesOf: suspend (String) -> List<String> = { emptyList() }
 ) {
     val g = d.generation
+    // v3.9: largura medida FORA da LazyColumn (BoxWithConstraints dentro de item subcomposto
+    // dispara "performMeasureAndLayout called during measure layout" no emulador).
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+    val treeWidth = (maxWidth.value - 24f - 36f).coerceAtLeast(120f)
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp).testTag("evolution_list"),
         contentPadding = PaddingValues(top = 8.dp, bottom = 20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -116,7 +120,7 @@ fun EvolutionContent(
             }
         }
         item {
-            SectionCard("Árvore geracional", Modifier.testTag("evo_tree")) { LineageTree(g) }
+            SectionCard("Árvore geracional", Modifier.testTag("evo_tree")) { LineageTree(g, treeWidth) }
         }
         item {
             SectionCard("Economia e cliodinâmica", Modifier.testTag("evo_econ_chart")) { EconomyChart(g.history, live) }
@@ -157,6 +161,7 @@ fun EvolutionContent(
         }
         item { Collapsible("Sociedade, economia e instituições", "evo_society") { SocietySections(d) } }
         item { Collapsible("Mente coletiva e RSI", "evo_mind") { MindSections(d) } }
+    }
     }
 }
 
@@ -324,15 +329,15 @@ private fun EconomyChart(h: List<EvolutionSample>, live: List<LiveSample>) {
 
 /** g0 → g1 → g2…: grade responsiva de cartões por geração com conectores vetoriais por trás. */
 @Composable
-private fun LineageTree(g: GenerationView) {
+private fun LineageTree(g: GenerationView, widthDp: Float) {
     val nodes = g.lineage
     if (nodes.isEmpty()) { Text("Importe um .gguf para criar o primeiro fundador (g0).", style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim); return }
     val showGhost = g.status == ReproductionMerit.Status.AGUARDANDO || g.status == ReproductionMerit.Status.PRONTO
     val ghostLabel = if (g.status == ReproductionMerit.Status.PRONTO) "g${g.nextGeneration} pronto"
         else "g${g.nextGeneration} · ${if (g.etaTicks >= 0) "~${g.etaDays.f(1)} dias" else "evoluindo"}"
     val edge = Lumon.Outline; val ghostC = Lumon.Teal
-    BoxWithConstraints(Modifier.fillMaxWidth().testTag("lineage_tree")) {
-        val lay = remember(nodes, maxWidth, showGhost) { LineageLayout.compute(nodes, maxWidth.value, showGhost) }
+    Box(Modifier.fillMaxWidth().testTag("lineage_tree")) {
+        val lay = remember(nodes, widthDp, showGhost) { LineageLayout.compute(nodes, widthDp, showGhost) }
         Box(Modifier.fillMaxWidth().height(lay.heightDp.dp)) {
             Canvas(Modifier.matchParentSize()) {
                 val k = density

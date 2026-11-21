@@ -355,7 +355,12 @@ private fun Iso2DView(
         if (viewport != size) viewport = size
         if (zoom <= 0f) {
             zoom = maxOf(size.width / terrain.width, size.height / terrain.height)
-            pan = Offset((size.width - terrain.width * zoom) / 2f, (size.height - terrain.height * zoom) / 2f)
+            // enquadra o centro da população (o "cover" corta as pontas do losango em telas retrato)
+            val pts = s.agents.map { IsoRenderer.pointCenter(it.fx, it.fz, w) }
+            val ccx = if (pts.isEmpty()) terrain.width / 2f else pts.map { it.first }.average().toFloat()
+            val ccy = if (pts.isEmpty()) terrain.height / 2f else pts.map { it.second }.average().toFloat()
+            viewport = size
+            pan = clampPan(Offset(size.width / 2f - ccx * zoom, size.height * 0.48f - ccy * zoom), zoom)
         }
         withTransform({ translate(pan.x, pan.y); scale(zoom, zoom, Offset.Zero) }) {
             drawImage(terrain, filterQuality = FilterQuality.High)
@@ -372,6 +377,7 @@ private fun Iso2DView(
         // avatares em espaço de tela: legíveis em qualquer zoom (raio mínimo de 7 dp + nome)
         val minR = with(density) { 7.dp.toPx() }
         val out = HashMap<String, Offset>(s.agents.size * 2)
+        val pickable = HashMap<String, Offset>(s.agents.size * 2)
         for (a in s.agents) {
             val (cx, cy) = IsoRenderer.pointCenter(a.fx, a.fz, w)
             val c = Offset(pan.x + cx * zoom, pan.y + (cy - 3f) * zoom)
@@ -387,10 +393,12 @@ private fun Iso2DView(
                 cornerRadius = androidx.compose.ui.geometry.CornerRadius(layout.size.height / 2f))
             drawText(layout, topLeft = tl)
             val p = Offset(c.x, c.y - r)
+            // só registra como tocável o que não fica sob o HUD (topo) nem sob a cápsula (base)
             if (p.x in 0f..size.width && p.y in 0f..size.height) out[a.id] = p
+            if (p.x in 0f..size.width && p.y in size.height * 0.16f..size.height * 0.78f) pickable[a.id] = p
         }
         WorldPickRegistry.mode = "2D"
-        WorldPickRegistry.positions = out
+        WorldPickRegistry.positions = pickable
         if (out != lastOut2d) { lastOut2d = out; onProjected(out) }
     }
 }
