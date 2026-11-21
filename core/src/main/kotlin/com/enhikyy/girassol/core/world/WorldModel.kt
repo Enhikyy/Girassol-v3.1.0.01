@@ -19,7 +19,7 @@ import com.enhikyy.girassol.core.forge.LoraSample
 import kotlinx.serialization.Serializable
 
 /** Versão das regras do mundo. Eventos de versões anteriores mantêm suas regras históricas. */
-const val CURRENT_RULES_VERSION = 11
+const val CURRENT_RULES_VERSION = 12
 
 @Serializable
 enum class DistrictType(val label: String) {
@@ -117,7 +117,11 @@ data class Intention(
     val viaReflex: Boolean,
     val claimUsed: String? = null,
     val claimVerified: Boolean = true,
-    val viaNeural: Boolean = false
+    val viaNeural: Boolean = false,
+    /** Síntese aferente (Anokhin): necessidades projetadas e motivação no momento da decisão. */
+    val expectedNeeds: List<Double> = emptyList(),
+    val needsAtDecision: List<Double> = emptyList(),
+    val memoryUtilityAtDecision: Double = 0.0
 )
 
 @Serializable
@@ -200,7 +204,13 @@ data class Citizen(
     /** Fitness média dos pais no nascimento (−1 = fundador) e se a superação já foi avaliada. */
     var parentsFitnessAtBirth: Double = -1.0,
     var superacaoEvaluated: Boolean = false,
-    var superacao: Boolean = false
+    var superacao: Boolean = false,
+    /** Aceitador de Resultados da Ação (Anokhin): último descompasso, valência e plasticidade. */
+    var acceptorMismatch: Double = 0.0,
+    var acceptorValence: Double = 0.0,
+    var acceptorPlasticity: Double = 1.0,
+    var acceptorConfirmations: Int = 0,
+    var acceptorViolations: Int = 0
 ) {
     fun ageDays(tick: Long): Double = (tick - birthTick).toDouble() / TICKS_PER_DAY
     fun trait(name: String): Double = genome.expressTrait(name)
@@ -328,7 +338,16 @@ data class WorldState(
     var aabbCorrections: Long = 0L,
     var orcaAdjustedSteps: Long = 0L,
     var superacoes: Int = 0,
-    var tiesMerges: Int = 0
+    var tiesMerges: Int = 0,
+    /** v3.5: estado persistente do CMA-ES do núcleo evolutivo (null até o 1º ciclo RSI). */
+    var cmaEs: com.enhikyy.girassol.core.rsi.CmaEsState? = null,
+    /** v3.5: biblioteca de conhecimento (Processo 19) e léxico comprimido emergente. */
+    val knowledge: com.enhikyy.girassol.core.knowledge.KnowledgeShelf = com.enhikyy.girassol.core.knowledge.KnowledgeShelf(),
+    val lexicon: com.enhikyy.girassol.core.knowledge.EmergentLexicon = com.enhikyy.girassol.core.knowledge.EmergentLexicon(),
+    var acceptorMeanMismatch: Double = 0.0,
+    /** Cidadãos recebidos/enviados por MeshSync LAN. */
+    var migrantsIn: Int = 0,
+    var migrantsOut: Int = 0
 ) {
     val widthTiles: Int get() = districtsPerSide * districtSize
     fun tileAt(x: Int, z: Int): TileType = TileType.entries[tiles[z * widthTiles + x]]

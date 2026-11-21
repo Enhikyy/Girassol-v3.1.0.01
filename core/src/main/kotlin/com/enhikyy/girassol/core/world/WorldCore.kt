@@ -8,6 +8,10 @@ import com.enhikyy.girassol.core.biology.SemanticCollapseGuard
 import com.enhikyy.girassol.core.biology.SkillMasteryState
 import com.enhikyy.girassol.core.biology.VoyagerProceduralSkill
 import com.enhikyy.girassol.core.cognition.ActiveInferencePianoOrchestrator
+import com.enhikyy.girassol.core.cognition.AnokhinFunctionalSystem
+import com.enhikyy.girassol.core.knowledge.KnowledgeDocument
+import com.enhikyy.girassol.core.knowledge.ParsedDocument
+import com.enhikyy.girassol.core.mesh.MeshSyncProtocol
 import com.enhikyy.girassol.core.cognition.AllostaticThermalCoupling
 import com.enhikyy.girassol.core.cognition.CoreSelfAnchor
 import com.enhikyy.girassol.core.cognition.DeliberationContext
@@ -60,6 +64,8 @@ import kotlin.math.sqrt
 import kotlin.random.Random
 
 const val FOOD = "ALIMENTO"
+/** Conta-fronteira do MeshSync: saldos de migrantes entram/saem por aqui (soma zero preservada). */
+const val MESH_BORDER = "MESH_BORDER"
 const val MATERIAL = "MATERIAL"
 const val CREDIT = "CREDITO"
 
@@ -228,12 +234,107 @@ class WorldCore(
         return homes.minWith(compareBy<SmartObject> { counts[it.id] ?: 0 }.thenBy { it.id })
     }
 
+    // ===================================================================== Anokhin
+
+    /** Aceitador de Resultados da Ação: compara o modelo da síntese aferente com a aferência de retorno. */
+    private fun acceptResult(c: Citizen, it: Intention, success: Boolean): AnokhinFunctionalSystem.Comparison? {
+        if (it.expectedNeeds.size != AnokhinFunctionalSystem.NEEDS || it.needsAtDecision.size != AnokhinFunctionalSystem.NEEDS) return null
+        val obtained = Need.entries.map { n -> c.needs.getValue(n) }.toDoubleArray()
+        val out = ports.acceptor.compare(it.expectedNeeds.toDoubleArray(), it.forecastSuccess, it.memoryUtilityAtDecision,
+            it.needsAtDecision.toDoubleArray(), obtained, success)
+        val cmp = AnokhinFunctionalSystem.Comparison(out[0], out[1], if (out[3] >= 0.5) 0.0 else out[0], out[2], out[3] >= 0.5)
+        c.acceptorMismatch = cmp.mismatch
+        c.acceptorValence = cmp.valence
+        c.acceptorPlasticity = cmp.plasticity
+        if (cmp.confirmed) c.acceptorConfirmations++ else c.acceptorViolations++
+        // a surpresa entra no appraisal: descompasso negativo eleva excitação e cortisol
+        if (!cmp.confirmed) {
+            c.emotion.arousal = (c.emotion.arousal + 0.15 * cmp.surprise).coerceIn(0.0, 1.0)
+            if (cmp.valence < 0.0) c.cortisol = (c.cortisol + 0.05 * cmp.surprise).coerceIn(0.0, 1.0)
+            else c.dopamine = (c.dopamine + 0.05 * cmp.surprise).coerceIn(0.0, 1.0)
+        }
+        state.acceptorMeanMismatch = 0.98 * state.acceptorMeanMismatch + 0.02 * cmp.mismatch
+        return cmp
+    }
+
+    // ===================================================================== Biblioteca (Processo 19)
+
+    /** Ingestão documental: entra no mundo via evento canônico `CONHECIMENTO` (hash na cadeia). */
+    fun ingestKnowledge(doc: ParsedDocument): KnowledgeDocument? {
+        val rec = state.knowledge.add(doc, state.tick) ?: return null
+        emit("CONHECIMENTO", null, "doc=${rec.id};formato=${rec.format};sha256=${rec.sha256};trechos=${rec.chunks};chars=${rec.chars}")
+        return rec
+    }
+
+    private fun readKnowledge(c: Citizen, action: ActionType) {
+        if (state.knowledge.chunks.isEmpty()) return
+        val weakest = c.skills.values.minWith(compareBy<SkillMasteryState> { s -> s.masteryProb }.thenBy { s -> s.skillId }).skillId
+        val query = "$weakest ${c.lastThought} ${action.label}"
+        val chunk = state.knowledge.nearest(query, 1).firstOrNull() ?: return
+        chunk.reads++
+        state.knowledge.documents.firstOrNull { d -> d.id == chunk.docId }?.let { d -> d.reads++ }
+        val title = state.knowledge.title(chunk.docId)
+        val excerpt = chunk.text.take(160)
+        state.lexicon.observe(excerpt)
+        val content = "Leu em $title: $excerpt"
+        if (c.memories.none { m -> m.layer == MemoryLayer.SEMANTIC && m.content == content }) {
+            c.memories += AssociativeMemoryNode(c.nextMemoryId++, c.id, MemoryLayer.SEMANTIC, content,
+                linkedSetOf("LIVRO", chunk.docId), linkedSetOf(), salience = 0.6, confidence = 0.8, sourceEventId = state.eventSeq,
+                sourceAgentId = null, createdTick = state.tick, verifiedByWorldCore = true, qUtility = 0.2).also { m -> m.bits = chunk.bits.copyOf() }
+        }
+        c.skills[weakest] = c.skills.getValue(weakest).updateFromPractice(true, state.tick, c.trait("aptidao"))
+        emit("LEITURA", c.id, "doc=${chunk.docId};trecho=${chunk.ordinal}")
+    }
+
+    /** Memórias episódicas de maior utilidade (alimentam o LoRA on-device no ciclo de sono). */
+    fun topUtilityEpisodes(limit: Int = 48): List<Pair<String, Double>> =
+        state.aliveCitizens().flatMap { c -> c.memories.filter { m -> m.layer == MemoryLayer.EPISODIC && m.verifiedByWorldCore }
+            .map { m -> "${c.name}: ${m.content}" to m.qUtility } }
+            .sortedWith(compareByDescending<Pair<String, Double>> { p -> p.second }.thenBy { p -> p.first })
+            .distinctBy { p -> p.first }.take(limit)
+
+    // ===================================================================== MeshSync: migração
+
+    /** Retira o cidadão deste mundo e devolve o pacote assinado para outro aparelho. */
+    fun emigrate(id: String, deviceId: String): MeshSyncProtocol.MigrationPacket? {
+        val c = state.citizen(id)?.takeIf { it.alive } ?: return null
+        val wallet = state.ledger.resourceTypes().associateWith { r -> state.ledger.getBalance(c.id, r) }.filterValues { v -> v > 0.0 }
+        val snapshot = c.copy(intention = null, path = mutableListOf())
+        val packet = MeshSyncProtocol.MigrationPacket(deviceId, state.seed, state.tick, snapshot, wallet, MeshSyncProtocol.citizenDigest(snapshot, wallet))
+        c.intention?.targetObjectId?.let { state.board.releaseReservation(it, c.id) }
+        state.board.releaseAllFor(c.id)
+        c.alive = false
+        c.deathTick = state.tick
+        c.deathCause = "migrou"
+        c.intention = null
+        c.path.clear()
+        val h = emit("EMIGRACAO", c.id, "destino=$deviceId;sha256=${packet.sha256}")
+        state.ledger.transferAll(c.id, MESH_BORDER, state.tick, h)
+        state.migrantsOut++
+        return packet
+    }
+
+    /** Admite um migrante (novo id local, sem colisões; preserva a idade e o saldo). */
+    fun admitMigrant(p: MeshSyncProtocol.MigrationPacket): Citizen {
+        val src = p.citizen
+        val newId = "C${state.nextCitizenSerial++}"
+        val home = leastOccupiedHome()
+        val age = (p.originTick - src.birthTick).coerceAtLeast(0L)
+        val c = src.copy(id = newId, birthTick = state.tick - age, x = home.tileX, z = home.tileZ, homeObjectId = home.id,
+            social = DunbarSocialNetwork(newId), intention = null, path = mutableListOf(), actionTicksRemaining = 0,
+            alive = true, deathTick = -1L, deathCause = null)
+        state.citizens += c
+        val h = emit("IMIGRACAO", newId, "origem=${p.originDevice};nome=${src.name};sha256=${p.sha256}")
+        for ((res, q) in p.wallet.toSortedMap()) state.ledger.transfer(MESH_BORDER, newId, res, q, state.tick, h, allowNegativeSource = true)
+        state.migrantsIn++
+        return c
+    }
+
     // ===================================================================== eventos
 
     fun emit(type: String, actorId: String?, payload: String): String {
         val seq = ++state.eventSeq
-        val body = "$seq|${state.tick}|$CURRENT_RULES_VERSION|$type|${actorId ?: "-"}|$payload|${state.lastEventHash}"
-        val hash = Sha256.hex(body)
+        val hash = WorldStateHashChain.computeHash(seq, state.tick, CURRENT_RULES_VERSION, type, actorId, payload, state.lastEventHash)
         val ev = CanonicalEvent(seq, state.tick, CURRENT_RULES_VERSION, type, actorId, payload, state.lastEventHash, hash)
         state.lastEventHash = hash
         if (!shadow) {
@@ -596,7 +697,8 @@ class WorldCore(
         val forecast = action.skill?.let { c.skills[it]?.executionSuccessProbability(0.35, geneticAptitude = c.trait("aptidao")) } ?: 0.9
         return Candidate(
             Intention(action, objId, tx, tz, state.tick, -efe, forecast, false, false, claim,
-                belief?.verifiedByExperience ?: true),
+                belief?.verifiedByExperience ?: true,
+                expectedNeeds = projected.toList(), needsAtDecision = needsNow.toList(), memoryUtilityAtDecision = memQ),
             efe, projected, travel
         )
     }
@@ -734,7 +836,7 @@ class WorldCore(
         val tx = next % w + 0.5
         val tz = next / w + 0.5
         val d = Vec2(tx - c.px, tz - c.pz)
-        val speed = c.locomotion.coerceIn(0.75, 1.0)
+        val speed = c.locomotion.coerceIn(0.75, 1.0) * state.policy.locomotionSpeedScale
         val len = d.length()
         return if (len <= speed) d else d * (speed / len)
     }
@@ -746,7 +848,7 @@ class WorldCore(
         for (c in alive) if (c.path.isEmpty()) { c.vx = 0.0; c.vz = 0.0 }
         if (moving.isEmpty()) return
         val agents = moving.map { c ->
-            OrcaAgent(Vec2(c.px, c.pz), Vec2(c.vx, c.vz), preferredVelocity(c), CrowdNavigation.AGENT_RADIUS, c.locomotion.coerceIn(0.75, 1.0))
+            OrcaAgent(Vec2(c.px, c.pz), Vec2(c.vx, c.vz), preferredVelocity(c), CrowdNavigation.AGENT_RADIUS, c.locomotion.coerceIn(0.75, 1.0) * state.policy.locomotionSpeedScale)
         }
         val v = CrowdNavigation.stepRvo2OrcaVelocities(agents)
         moving.forEachIndexed { i, c ->
@@ -936,6 +1038,10 @@ class WorldCore(
             }
         }
 
+        // Aceitador de Resultados da Ação (Anokhin): aferência de retorno × modelo esperado,
+        // ANTES de qualquer atualização de plasticidade ou surpresa.
+        val acceptance = acceptResult(c, it, success)
+        val plasticity = acceptance?.plasticity ?: 1.0
         val reward = (c.meanNeed() - before) * 6.0 + (if (success) 0.1 else -0.2)
         c.lastReward = reward.coerceIn(-1.0, 1.0)
         if (success) { c.consecutiveFailures = 0; c.successes++ } else { c.consecutiveFailures++; c.failures++ }
@@ -947,18 +1053,22 @@ class WorldCore(
             content = "${it.action.label}${obj?.let { o -> " em ${o.type.label} ${o.id}" } ?: ""}: ${if (success) "sucesso" else "falha"} $detail".trim(),
             tags = linkedSetOf(it.action.name, obj?.type?.name ?: "LIVRE", if (success) "sucesso" else "falha"),
             entityIds = obj?.let { o -> linkedSetOf(o.id) } ?: linkedSetOf(),
-            salience = abs(c.lastReward).coerceIn(0.1, 1.0), confidence = 1.0,
+            salience = max(abs(c.lastReward), acceptance?.surprise ?: 0.0).coerceIn(0.1, 1.0), confidence = 1.0,
             sourceEventId = state.eventSeq, sourceAgentId = null, createdTick = state.tick,
             verifiedByWorldCore = true
         )
         c.memories.lastOrNull { m -> it.action.name in m.tags }?.let { prev -> node.linkedMemoryIds += prev.id; prev.linkedMemoryIds += node.id }
-        node.updateMemRlUtility(c.lastReward, state.policy.memRlLearningRate * (0.7 + 0.6 * c.dopamine))
+        node.tdPredictionError = acceptance?.mismatch ?: 0.0
+        node.updateMemRlUtility(c.lastReward, (state.policy.memRlLearningRate * (0.7 + 0.6 * c.dopamine) * plasticity).coerceAtMost(0.9))
         node.bits = EpisodicIndex.simHash(node.features())
         EpisodicIndex.hawkesExcite(node, state.tick, node.salience)
         c.memories += node
         PersonalAdapter.train(c.personalAdapter, LoraFeatures.of(it.action, state.tick), c.lastReward.toFloat())
         // reflexo Tsetlin aprende se a ação proposta trouxe recompensa positiva
         c.reflex.trainStep(reflexFeatures(c, it.action), c.lastReward > 0.0)
+        // descompasso grande: reforço extra do reflexo (plasticidade sináptica dependente de surpresa)
+        if (plasticity >= 1.5) c.reflex.trainStep(reflexFeatures(c, it.action), c.lastReward > 0.0)
+        if ((it.action == ActionType.ESTUDAR || it.action == ActionType.PESQUISAR) && success) readKnowledge(c, it.action)
         // consolidação hipocampal durante o sono
         if (it.action == ActionType.DESCANSAR && state.isNight() && c.lastSleepConsolidationDay != state.day()) {
             sleepConsolidate(c)
@@ -1034,6 +1144,7 @@ class WorldCore(
         c.lastSpeechTick = state.tick
         rememberSpeech(c, text)
         state.speechesEmitted++
+        state.lexicon.observe(text)
     }
 
     private fun rememberSpeech(c: Citizen, text: String) {
@@ -1199,6 +1310,9 @@ class WorldCore(
         resolveStaleStressEvents()
         if (!shadow) runLoraSleepCycle()
         evaluateSuperacao(alive)
+        state.lexicon.consolidate(state.tick, alive.maxWithOrNull(compareBy<Citizen> { it.recentSpeeches.size }.thenByDescending { it.id })?.id)?.let { e ->
+            emit("LEXICO", e.coinerId, "glifo=${e.glyph};frase=${e.phrase}")
+        }
         // Reprodução determinística com genética diploide, Baldwin, TIES-Merging e simbiogênese
         reproduction(alive)
         // Heider: equilíbrio estrutural em tríades dos laços mais fortes

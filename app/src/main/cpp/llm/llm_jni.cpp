@@ -106,13 +106,14 @@ Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeSemanticTemperature
 JNIEXPORT jobjectArray JNICALL
 Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmGenerate(
     JNIEnv* env, jobject, jstring sysStr, jstring prefixStr, jstring userStr, jstring grammarStr, jstring keysCsv,
-    jstring slotKey, jfloat temperature, jint seed, jint maxTokens
+    jstring slotKey, jfloat temperature, jint seed, jint maxTokens, jstring larkStr
 ) {
     girassol::llm::LlmRequest req;
     req.system = readStr(env, sysStr);
     req.worldPrefix = readStr(env, prefixStr);
     req.user = readStr(env, userStr);
     req.grammar = readStr(env, grammarStr);
+    req.larkGrammar = readStr(env, larkStr);
     const std::string keys = readStr(env, keysCsv);
     size_t start = 0;
     while (start < keys.size()) {
@@ -129,7 +130,7 @@ Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmGenerate(
     const auto r = gLlm.generate(req);
     return toArray(env, {sanitizeUtf8(r.text), r.error, std::to_string(r.promptTokens), std::to_string(r.genTokens),
                          std::to_string(r.millis), std::to_string(r.tokensPerSecond), std::to_string(r.genTokensPerSecond),
-                         std::to_string(r.reusedTokens), std::to_string(r.forcedTokens), r.slotRestored ? "1" : "0"});
+                         std::to_string(r.reusedTokens), std::to_string(r.forcedTokens), r.slotRestored ? "1" : "0", r.grammarBackend});
 }
 
 JNIEXPORT jdoubleArray JNICALL
@@ -145,6 +146,54 @@ Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmBench(JNIEnv* en
 JNIEXPORT jstring JNICALL
 Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmSystemInfo(JNIEnv* env, jobject) {
     const std::string s = sanitizeUtf8(girassol::llm::LlmEngine::systemInfo());
+    return env->NewStringUTF(s.c_str());
+}
+
+// --- v3.5: LoRA on-device ---------------------------------------------------------------
+JNIEXPORT jstring JNICALL
+Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmTrainLora(
+        JNIEnv* env, jobject, jobjectArray texts, jstring adapterPath, jint rank, jfloat alpha, jint epochs,
+        jfloat lr, jint topK, jint maxTokens, jint threads) {
+    std::vector<std::string> v;
+    const jsize n = texts ? env->GetArrayLength(texts) : 0;
+    for (jsize i = 0; i < n; ++i) {
+        auto js = static_cast<jstring>(env->GetObjectArrayElement(texts, i));
+        v.push_back(readStr(env, js));
+        if (js) env->DeleteLocalRef(js);
+    }
+    girassol::llm::LoraTrainConfig c;
+    c.adapterPath = readStr(env, adapterPath);
+    c.rank = rank; c.alpha = alpha; c.epochs = epochs; c.lr = lr; c.topK = topK; c.maxTokens = maxTokens; c.nThreads = threads;
+    gLlm.trainLora(v, c);
+    const std::string s = sanitizeUtf8(gLlm.loraStatus());
+    return env->NewStringUTF(s.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmApplyLora(JNIEnv* env, jobject, jstring path, jfloat scale) {
+    std::string err;
+    gLlm.applyLora(readStr(env, path), scale, &err);
+    const std::string s = sanitizeUtf8(err);
+    return env->NewStringUTF(s.c_str());
+}
+
+JNIEXPORT void JNICALL
+Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmClearLora(JNIEnv*, jobject) { gLlm.clearLora(); }
+
+JNIEXPORT jstring JNICALL
+Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmLoraStatus(JNIEnv* env, jobject) {
+    const std::string s = sanitizeUtf8(gLlm.loraStatus());
+    return env->NewStringUTF(s.c_str());
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmHasLlguidance(JNIEnv*, jobject) {
+    return girassol::llm::LlmEngine::hasLlguidance() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmModelInfo(JNIEnv* env, jobject) {
+    const std::string s = sanitizeUtf8(gLlm.modelFtype() + "|" + std::to_string(gLlm.headDim()));
     return env->NewStringUTF(s.c_str());
 }
 

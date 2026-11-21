@@ -120,7 +120,7 @@ target_link_libraries(girassol_core PRIVATE log dl android aaudio)
 # ---------------------------------------------------------------- motor LLM (único)
 # libgirassol_llm.so liga dinamicamente a libllama.so; o Kotlin escolhe (HWCAP) qual
 # libggml-cpu-*.so carregar via ggml_backend_load() antes do primeiro modelo.
-add_library(girassol_llm SHARED llm/llm_jni.cpp llm/llm_engine.cpp)
+add_library(girassol_llm SHARED llm/llm_jni.cpp llm/llm_engine.cpp llm/lora_ondevice.cpp llm/llg_sampler.cpp)
 target_include_directories(girassol_llm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(girassol_llm PRIVATE -Wall -Wextra -O2 ${GIRASSOL_HARDEN_COMPILE})
 target_link_options(girassol_llm PRIVATE ${GIRASSOL_HARDEN_LINK})
@@ -132,5 +132,21 @@ if(GIRASSOL_HAS_LLAMA)
     add_dependencies(girassol_llm ${GIRASSOL_CPU_VARIANTS})
     if(TARGET girassol_ggml_backends)
         add_dependencies(girassol_llm girassol_ggml_backends)
+    endif()
+    # ------------------------------------------------------------ llguidance (opcional)
+    # Equivalente Girassol de -DLLAMA_LLGUIDANCE=ON (a lib `common` do llama.cpp fica
+    # desligada). O Gradle (tarefa buildLlguidance, -Pgirassol.llguidance=auto|on|off) compila
+    # o crate Rust para aarch64-linux-android com o rustup do CI e passa o diretório aqui.
+    # Sem o crate (ou se o cargo falhar em modo auto) o motor usa a GBNF estrita.
+    set(GIRASSOL_LLGUIDANCE_DIR "" CACHE PATH "Diretório com libllguidance.a + llguidance.h")
+    if(GIRASSOL_LLGUIDANCE_DIR AND EXISTS "${GIRASSOL_LLGUIDANCE_DIR}/libllguidance.a" AND EXISTS "${GIRASSOL_LLGUIDANCE_DIR}/llguidance.h")
+        add_library(girassol_llguidance STATIC IMPORTED)
+        set_target_properties(girassol_llguidance PROPERTIES IMPORTED_LOCATION "${GIRASSOL_LLGUIDANCE_DIR}/libllguidance.a")
+        target_include_directories(girassol_llm PRIVATE "${GIRASSOL_LLGUIDANCE_DIR}")
+        target_compile_definitions(girassol_llm PRIVATE GIRASSOL_USE_LLGUIDANCE=1)
+        target_link_libraries(girassol_llm PRIVATE girassol_llguidance)
+        message(STATUS "Girassol: llguidance ativo (${GIRASSOL_LLGUIDANCE_DIR})")
+    else()
+        message(STATUS "Girassol: llguidance ausente — gramática GBNF estrita (fallback)")
     endif()
 endif()

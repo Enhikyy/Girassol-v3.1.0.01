@@ -56,7 +56,16 @@ data class LlmStats(
     val slotRestores: Int = 0,
     val lastTemperature: Float = 0f,
     val quantAdvice: String = "",
-    val idleUnloads: Int = 0
+    val idleUnloads: Int = 0,
+    /** v3.5: tipo real dos pesos (llama_model_ftype) e head_dim do modelo carregado. */
+    val weightType: String = "",
+    val headDim: Int = 0,
+    /** v3.5: JSON de status do adaptador LoRA on-device (ciclos, NLL held-out, aceito). */
+    val loraStatus: String = "",
+    val loraCycles: Int = 0,
+    val loraActive: Boolean = false,
+    /** "llguidance" ou "gbnf" (fallback estrito). */
+    val grammarBackend: String = ""
 )
 
 /**
@@ -76,14 +85,34 @@ object LlmQuantPolicy {
     fun lazyFor(totalMemBytes: Long): Boolean = totalMemBytes <= LOW_RAM_BYTES
     fun kvName(t: Int): String = when (t) { KV_Q8_0 -> "q8_0"; KV_Q4_0 -> "q4_0"; else -> "f16" }
 
-    /** Classifica o tipo de pesos pelo nome/descrição do GGUF. */
-    fun weightAdvice(description: String): String {
-        val d = description.uppercase()
+    /**
+     * Classifica o tipo de pesos. [ftype] vem do próprio GGUF (llama_model_ftype) e tem
+     * prioridade; o nome do arquivo é só um palpite secundário — qualquer .gguf válido é aceito.
+     */
+    fun weightAdvice(description: String, ftype: String = "", fp16Cpu: Boolean = false): String {
+        val d = (ftype.ifBlank { description }).uppercase()
         return when {
-            Regex("Q4_0|Q8_0").containsMatchIn(d) -> "pesos Q4_0/Q8_0: compatível KleidiAI"
-            Regex("Q4_K|Q5_K|Q6_K|Q3_K|Q2_K|IQ").containsMatchIn(d) -> "pesos K-quant: prefira Q4_0/Q8_0 para KleidiAI"
-            Regex("F16|F32|BF16").containsMatchIn(d) -> "pesos float: prefira Q4_0/Q8_0"
+            Regex("Q4_0|Q8_0").containsMatchIn(d) -> "pesos ${ftype.ifBlank { "Q4_0/Q8_0" }}: compatível KleidiAI"
+            Regex("Q4_K|Q5_K|Q6_K|Q3_K|Q2_K|IQ").containsMatchIn(d) -> "pesos K-quant: funciona; Q4_0/Q8_0 é mais rápido com KleidiAI"
+            Regex("BF16").containsMatchIn(d) -> "pesos BF16: aceito (convertido em tempo de execução); F16 é mais rápido em ARM"
+            Regex("F16|FP16").containsMatchIn(d) ->
+                if (fp16Cpu) "pesos F16 (FP16): aceleração nativa ARMv8.2 fp16 ativa" else "pesos F16 (FP16): CPU sem fp16 nativo, usa conversão"
+            Regex("F32").containsMatchIn(d) -> "pesos F32: aceito; prefira F16 ou Q8_0 para economizar RAM"
             else -> "tipo de pesos não identificado"
+        }
+    }
+
+    /**
+     * Orçamento de RAM do modelo escalado pela RAM física: 4 GB → 1,6 GB (modelo rápido
+     * Q4_0 ou F16 de ~350M); ≥ 6 GB → até 2,6 GB (modelo profundo de ~2,2 GB);
+     * ≥ 8 GB → até 3,2 GB.
+     */
+    fun budgetFor(totalMemBytes: Long): Long {
+        val gb = 1024L * 1024 * 1024
+        return when {
+            totalMemBytes >= 7L * gb + gb / 2 -> minOf(3_200L * 1024 * 1024, (totalMemBytes * 0.45).toLong())
+            totalMemBytes >= 5L * gb + gb / 2 -> minOf(2_600L * 1024 * 1024, (totalMemBytes * 0.45).toLong())
+            else -> minOf(1_600L * 1024 * 1024, (totalMemBytes * 0.40).toLong())
         }
     }
 }
@@ -102,9 +131,14 @@ object LocalLlmManager : NeuralDeliberationPort {
     private const val MAX_TOKENS = 96
     private const val MAX_INFLIGHT = 2
     private const val MIN_FREE_AFTER_LOAD = 600L * 1024 * 1024
-    private const val HARD_CAP = 1_600L * 1024 * 1024
     private const val MAX_SLOTS = 24
     private const val T_BASE = 0.7f
+    private const val LORA_RANK = 8
+    private const val LORA_ALPHA = 16f
+    private const val LORA_EPOCHS = 4
+    private const val LORA_LR = 2e-3f
+    private const val LORA_TOP_K = 8
+    private const val LORA_MAX_TOKENS = 768
 
     private val worker = Executors.newSingleThreadExecutor { r ->
         Thread(r, "girassol-llm").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
@@ -162,11 +196,57 @@ object LocalLlmManager : NeuralDeliberationPort {
         }
     }
 
-    /** min(1,6 GB, 40 % da RAM física): garante folga para o mundo e o Filament em aparelhos de 4 GB. */
+    /** Orçamento escalado pela RAM (ver [LlmQuantPolicy.budgetFor]). */
     fun memoryBudget(context: Context): Long {
         val am = context.getSystemService(ActivityManager::class.java)
         val mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
-        return minOf(HARD_CAP, (mi.totalMem * 0.40).toLong())
+        return LlmQuantPolicy.budgetFor(mi.totalMem)
+    }
+
+    /** Arquivo do adaptador LoRA on-device associado a um modelo (um por modelo). */
+    fun adapterFileFor(context: Context, model: File): File =
+        File(File(context.filesDir, "lora").apply { mkdirs() }, model.name.removeSuffix(".gguf") + ".lora.gguf")
+
+    /** Modelo atualmente escolhido (caminho absoluto) ou null. */
+    fun currentModelPath(context: Context): String? =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("model", null)
+
+    /** Seleciona um GGUF já presente no aparelho (modelo rápido embutido, profundo do asset pack ou importado). */
+    fun selectModel(context: Context, file: File): String {
+        if (!file.exists()) return "Modelo não encontrado: ${file.name}"
+        val budget = memoryBudget(context)
+        if (file.length() > budget) return "Modelo de ${file.length() / 1048576} MB excede o orçamento de ${budget / 1048576} MB deste aparelho"
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("model", file.absolutePath).apply()
+        loadAsync(file)
+        return "Selecionado: ${file.name}"
+    }
+
+    /**
+     * Sharp-Wave Ripple Replay → LoRA real: treina um ciclo sobre os textos das memórias
+     * episódicas de maior utilidade. O adaptador só é aplicado (llama_set_adapters_lora) se o
+     * NLL real em held-out cair; roda na thread do LLM, entre gerações.
+     */
+    fun trainLoraAsync(texts: List<String>, onDone: (String) -> Unit = {}) {
+        val ctx = appContext ?: return
+        if (!ready || thermalPaused || memoryBreakerOpen || texts.size < 2) return
+        val modelPath = currentModelPath(ctx) ?: return
+        val adapter = adapterFileFor(ctx, File(modelPath))
+        worker.execute {
+            if (!ready) return@execute
+            val threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 4)
+            val json = runCatching {
+                LlmNativeBridge.nativeLlmTrainLora(texts.toTypedArray(), adapter.absolutePath, LORA_RANK, LORA_ALPHA,
+                    LORA_EPOCHS, LORA_LR, LORA_TOP_K, LORA_MAX_TOKENS, threads)
+            }.getOrElse { "{\"error\":\"${it.javaClass.simpleName}\"}" }
+            publishLora(json)
+            onDone(json)
+        }
+    }
+
+    private fun publishLora(json: String) {
+        val cycles = Regex("\"cycles\":(\\d+)").find(json)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        val active = json.contains("\"active\":true")
+        _stats.update { it.copy(loraStatus = json, loraCycles = cycles, loraActive = active) }
     }
 
     fun setEnabled(on: Boolean) {
@@ -273,7 +353,7 @@ object LocalLlmManager : NeuralDeliberationPort {
         }
         val budget = memoryBudget(context)
         if (size > budget) return "Modelo de ${size / 1048576} MB excede o orçamento de ${budget / 1048576} MB para este aparelho"
-        val dir = File(context.filesDir, "models").apply { mkdirs() }
+        val dir = File(context.filesDir, "models/importados").apply { mkdirs() }
         val safeName = name.replace(Regex("[^A-Za-z0-9._-]"), "_").let { if (it.endsWith(".gguf", true)) it else "$it.gguf" }
         val target = File(dir, safeName)
         val tmp = File(dir, "$safeName.part")
@@ -284,7 +364,8 @@ object LocalLlmManager : NeuralDeliberationPort {
             tmp.outputStream().use { out -> out.write(magic); ins.copyTo(out, 1 shl 16) }
         } ?: return "Não foi possível abrir o arquivo"
         if (tmp.length() > budget) { tmp.delete(); return "Modelo excede o orçamento de RAM" }
-        dir.listFiles()?.filter { it.name != tmp.name }?.forEach { it.delete() } // mantém um único modelo
+        dir.listFiles()?.filter { it.name != tmp.name }?.forEach { it.delete() } // um único importado; embutidos ficam
+        adapterFileFor(context, target).delete() // adaptador LoRA antigo não vale para o novo modelo
         tmp.renameTo(target)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("model", target.absolutePath).apply()
         loadAsync(target)
@@ -295,7 +376,7 @@ object LocalLlmManager : NeuralDeliberationPort {
         worker.execute {
             runCatching { LlmNativeBridge.nativeLlmUnload() }
             ready = false
-            File(context.filesDir, "models").listFiles()?.forEach { it.delete() }
+            File(context.filesDir, "models/importados").listFiles()?.forEach { it.delete() }
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove("model").apply()
             _stats.update { LlmStats(status = LlmStatus.NO_MODEL, budgetMb = it.budgetMb) }
         }
@@ -326,6 +407,15 @@ object LocalLlmManager : NeuralDeliberationPort {
                 return@execute
             }
             val desc = runCatching { LlmNativeBridge.nativeLlmDescribe() }.getOrDefault("")
+            val info = runCatching { LlmNativeBridge.nativeLlmModelInfo() }.getOrDefault("").split('|')
+            val ftype = info.getOrElse(0) { "" }
+            val headDim = info.getOrNull(1)?.toIntOrNull() ?: 0
+            val adapter = adapterFileFor(ctx, file)
+            if (adapter.exists()) {
+                val e = runCatching { LlmNativeBridge.nativeLlmApplyLora(adapter.absolutePath, 1f) }.getOrElse { it.message ?: "erro" }
+                if (e.isNotEmpty()) { Log.w(TAG, "adaptador LoRA descartado: $e"); adapter.delete() }
+            }
+            publishLora(runCatching { LlmNativeBridge.nativeLlmLoraStatus() }.getOrDefault(""))
             ready = true
             lastUse = System.currentTimeMillis()
             val parts = desc.split('|')
@@ -333,7 +423,8 @@ object LocalLlmManager : NeuralDeliberationPort {
                 it.copy(modelName = file.name, description = parts.getOrElse(0) { "" },
                     modelBytes = parts.getOrNull(1)?.toLongOrNull() ?: file.length(),
                     kvCache = parts.getOrNull(2)?.takeIf { c -> c.isNotBlank() } ?: LlmQuantPolicy.kvName(kvType),
-                    quantAdvice = LlmQuantPolicy.weightAdvice(file.name + " " + parts.getOrElse(0) { "" }),
+                    quantAdvice = LlmQuantPolicy.weightAdvice(file.name + " " + parts.getOrElse(0) { "" }, ftype, LlmNativeBridge.cpuFlags.fp16),
+                    weightType = ftype, headDim = headDim,
                     nativeHeapMb = android.os.Debug.getNativeHeapAllocatedSize() / 1048576.0)
             }
             refreshStatus()
@@ -370,7 +461,7 @@ object LocalLlmManager : NeuralDeliberationPort {
                     LlmNativeBridge.nativeSemanticTemperature(p.recentSpeeches.joinToString("\n"), T_BASE)
                 }.getOrDefault(T_BASE)
                 val r = LlmNativeBridge.nativeLlmGenerate(p.system, p.worldPrefix, p.user, p.grammar,
-                    p.jsonKeys.joinToString(","), request.agentId, temperature, (p.seed xor (p.seed ushr 32)).toInt(), MAX_TOKENS)
+                    p.jsonKeys.joinToString(","), request.agentId, temperature, (p.seed xor (p.seed ushr 32)).toInt(), MAX_TOKENS, p.larkGrammar)
                 lastUse = System.currentTimeMillis()
                 com.enhikyy.girassol.perf.AdpfHints.reportWork(System.nanoTime() - tStart)
                 val text = r[0]; val err = r[1]
@@ -392,6 +483,7 @@ object LocalLlmManager : NeuralDeliberationPort {
                         reusedTokens = it.reusedTokens + (r.getOrNull(7)?.toLongOrNull() ?: 0),
                         forcedTokens = it.forcedTokens + (r.getOrNull(8)?.toLongOrNull() ?: 0),
                         slotRestores = it.slotRestores + if (r.getOrNull(9) == "1") 1 else 0,
+                        grammarBackend = r.getOrNull(10) ?: it.grammarBackend,
                         nativeHeapMb = android.os.Debug.getNativeHeapAllocatedSize() / 1048576.0)
                 }
             } catch (t: Throwable) {

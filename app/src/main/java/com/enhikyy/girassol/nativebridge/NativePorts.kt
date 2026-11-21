@@ -42,6 +42,18 @@ object NativeLoraTrainer : LoraTrainerPort {
     }
 }
 
+/** Aceitador de Resultados da Ação em C++ (cognitive/anokhin_functional_system.hpp). */
+object NativeActionAcceptor : com.enhikyy.girassol.core.ports.ActionAcceptorPort {
+    override val backend = "cpp-anokhin"
+    override fun compare(projected: DoubleArray, forecast: Double, memUtility: Double, atDecision: DoubleArray, obtained: DoubleArray, success: Boolean): DoubleArray {
+        val packed = DoubleArray(21)
+        projected.copyInto(packed, 0); atDecision.copyInto(packed, 6); obtained.copyInto(packed, 12)
+        packed[18] = forecast; packed[19] = memUtility; packed[20] = if (success) 1.0 else 0.0
+        return GeaNativeBridge.nativeAnokhinCompare(packed)
+            ?: com.enhikyy.girassol.core.ports.KotlinActionAcceptor.compare(projected, forecast, memUtility, atDecision, obtained, success)
+    }
+}
+
 data class ModuleToggles(
     val nativeNavigation: Boolean = true,
     val nativeLora: Boolean = true,
@@ -58,7 +70,11 @@ data class ParityStatus(
     val loraSignature: String = "-",
     val message: String = "não verificado",
     val memoryOk: Boolean = false,
-    val memorySignature: String = "-"
+    val memorySignature: String = "-",
+    val anokhinOk: Boolean = false,
+    val cmaEsOk: Boolean = false,
+    val anokhinSignature: String = "-",
+    val cmaEsSignature: String = "-"
 )
 
 /**
@@ -111,11 +127,15 @@ object NativeModules {
             val mem = GeaNativeBridge.nativeBinaryMemorySignature()
             val memOk = mem == com.enhikyy.girassol.core.memory.EpisodicIndex.PARITY_GOLDEN &&
                 mem == com.enhikyy.girassol.core.memory.EpisodicIndex.paritySignature()
+            val ano = GeaNativeBridge.nativeAnokhinSignature()
+            val cma = GeaNativeBridge.nativeCmaEsSignature()
+            val anoOk = ano == ParityVectors.ANOKHIN_GOLDEN && ano == com.enhikyy.girassol.core.cognition.AnokhinFunctionalSystem.paritySignature()
+            val cmaOk = cma == ParityVectors.CMA_ES_GOLDEN && cma == com.enhikyy.girassol.core.rsi.CmaEs.paritySignature()
             ParityStatus(true, navOk, loraOk, "%016x".format(nav), "%016x".format(lora),
                 when {
-                    navOk && loraOk && memOk -> "OK: navegação, LoRA e memória binária C++ idênticos ao Kotlin"
-                    else -> "DIVERGENTE (nav=$navOk, lora=$loraOk, memoria=$memOk): usando Kotlin"
-                }, memOk, "%016x".format(mem))
+                    navOk && loraOk && memOk && anoOk && cmaOk -> "OK: navegação, LoRA, memória binária, Anokhin e CMA-ES C++ idênticos ao Kotlin"
+                    else -> "DIVERGENTE (nav=$navOk, lora=$loraOk, memoria=$memOk, anokhin=$anoOk, cma=$cmaOk): usando Kotlin onde diverge"
+                }, memOk, "%016x".format(mem), anoOk, cmaOk, "%016x".format(ano), "%016x".format(cma))
         }.getOrElse { ParityStatus(true, false, false, "-", "-", "erro: ${it.message}") }
         _parity.value = status
         return status
@@ -123,6 +143,9 @@ object NativeModules {
 
     fun pathfinder(): PathfinderPort =
         if (_toggles.value.nativeNavigation && _parity.value.navOk) NativePathfinder else com.enhikyy.girassol.core.ports.KotlinPathfinder
+
+    fun actionAcceptor(): com.enhikyy.girassol.core.ports.ActionAcceptorPort =
+        if (_parity.value.anokhinOk) NativeActionAcceptor else com.enhikyy.girassol.core.ports.KotlinActionAcceptor
 
     fun loraTrainer(): LoraTrainerPort =
         if (_toggles.value.nativeLora && _parity.value.loraOk) NativeLoraTrainer else com.enhikyy.girassol.core.forge.KotlinLoraTrainer

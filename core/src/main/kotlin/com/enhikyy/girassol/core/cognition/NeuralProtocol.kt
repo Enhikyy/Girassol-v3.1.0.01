@@ -37,6 +37,23 @@ object NeuralProtocol {
         }
     }
 
+    /**
+     * Gramática equivalente na sintaxe Lark do llguidance (-DLLAMA_LLGUIDANCE / GIRASSOL_LLGUIDANCE).
+     * Se o crate não estiver no build ou o llguidance recusar a gramática, o motor usa a GBNF
+     * estrita de [grammar] — as duas aceitam exatamente a mesma linguagem.
+     */
+    fun larkGrammar(actions: List<String>): String {
+        require(actions.isNotEmpty()) { "gramática sem ações" }
+        val alts = actions.distinct().joinToString(" | ") { "\"\\\"$it\\\"\"" }
+        return buildString {
+            appendLine("start: \"{\" ws \"\\\"acao\\\":\" ws acao \",\" ws \"\\\"pensamento\\\":\" ws texto \",\" ws \"\\\"fala\\\":\" ws texto ws \"}\"")
+            appendLine("acao: $alts")
+            appendLine("texto: \"\\\"\" TEXTO \"\\\"\"")
+            appendLine("TEXTO: /${TEXT_CLASS}{1,$MAX_TEXT}/")
+            appendLine("ws: \" \"?")
+        }
+    }
+
     fun build(
         name: String,
         identity: String,
@@ -60,7 +77,7 @@ object NeuralProtocol {
             append(".")
         }
         return NeuralPrompt(system, user, grammar(options.map { it.first.name }), IMMUTABLE_WORLD_PREFIX, JSON_KEYS,
-            recentSpeeches.takeLast(6), seed)
+            recentSpeeches.takeLast(6), seed, larkGrammar(options.map { it.first.name }))
     }
 
     data class Parsed(val action: String, val thought: String, val speech: String)

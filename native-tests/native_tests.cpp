@@ -21,6 +21,8 @@
 #include "llm/semantic_entropy.hpp"
 #include <filesystem>
 #include "navigation/grid_astar.hpp"
+#include "cognitive/anokhin_functional_system.hpp"
+#include "evolution/cma_es.hpp"
 #include <cstring>
 
 static int gFailures = 0;
@@ -183,6 +185,77 @@ static void llmTest() {
         std::filesystem::remove_all(slotDir);
     }
 
+    // --- v3.5: llguidance (opcional) com fallback GBNF -----------------------------------
+    {
+        girassol::llm::LlmEngine eg;
+        CHECK(eg.load(path, 2, 1024, &err), "carrega para llguidance");
+        girassol::llm::LlmRequest q;
+        q.system = "Cidade de Girassol."; q.user = "Escolha."; q.grammar = kGrammar; q.maxTokens = 400;
+        q.jsonKeys = {"acao", "pensamento", "fala"};
+        q.larkGrammar =
+            "start: \"{\" ws \"\\\"acao\\\":\" ws acao \",\" ws \"\\\"pensamento\\\":\" ws texto \",\" ws \"\\\"fala\\\":\" ws texto ws \"}\"\n"
+            "acao: \"\\\"COMER\\\"\" | \"\\\"DORMIR\\\"\"\n"
+            "texto: \"\\\"\" TEXTO \"\\\"\"\n"
+            "TEXTO: /[a-zA-Z0-9 ,.!?]{1,40}/\n"
+            "ws: \" \"?\n";
+        const auto r = eg.generate(q);
+        std::printf("gramática: backend=%s saída=%s erro=%s\n", r.grammarBackend.c_str(), r.text.c_str(), r.error.c_str());
+        if (girassol::llm::LlmEngine::hasLlguidance()) {
+            CHECK(r.grammarBackend == "llguidance", "llguidance aceita a gramática Lark");
+            const bool acaoOk = r.text.find("\"COMER\"") != std::string::npos || r.text.find("\"DORMIR\"") != std::string::npos;
+            CHECK(r.ok && r.text.front() == '{' && r.text.back() == '}' && acaoOk &&
+                      r.text.find("\"fala\":") != std::string::npos,
+                  "llguidance produz JSON completo restrito às ações");
+        } else {
+            CHECK(r.grammarBackend == "gbnf" && r.ok, "sem llguidance: fallback automático para GBNF estrita");
+        }
+        q.larkGrammar = "start: ((";  // inválida → GBNF
+        const auto r2 = eg.generate(q);
+        CHECK(r2.grammarBackend == "gbnf" && r2.ok, "gramática Lark inválida cai na GBNF estrita");
+        eg.unload();
+    }
+
+    // --- v3.5: LoRA on-device (treino incremental no sono + validação real held-out) ---
+    {
+        girassol::llm::LlmEngine el;
+        CHECK(el.load(path, 2, 512, &err), "carrega para LoRA");
+        std::printf("head_dim=%d ftype=%s\n", el.headDim(), el.modelFtype().c_str());
+        CHECK(el.headDim() > 0, "head_dim calculado a partir dos metadados GGUF");
+        std::vector<std::string> mem;
+        for (int i = 0; i < 12; ++i)
+            mem.push_back("Once upon a time there was a little girl named Lily. Lily went to the garden and saw a big red flower. "
+                          "She was very happy and said hello to the flower every day.");
+        const std::string ad = (std::filesystem::temp_directory_path() / "girassol_lora_test.gguf").string();
+        std::filesystem::remove(ad);
+        girassol::llm::LoraTrainConfig lc;
+        lc.adapterPath = ad; lc.epochs = 6; lc.lr = 5e-3f; lc.maxTokens = 512;
+        const auto lr = el.trainLora(mem, lc);
+        std::printf("lora: ok=%d aceito=%d alvo=%s treino %.4f→%.4f held %.4f→%.4f (%d/%d tok, %.0f ms) %s\n", lr.ok, lr.accepted,
+                    lr.target.c_str(), lr.trainNllBefore, lr.trainNllAfter, lr.heldNllBase, lr.heldNllAdapted, lr.trainTokens,
+                    lr.heldTokens, lr.millis, lr.error.c_str());
+        CHECK(lr.ok, ("ciclo LoRA executa: " + lr.error).c_str());
+        CHECK(lr.trainNllAfter < lr.trainNllBefore, "gradiente esparso reduz o NLL de treino");
+        CHECK(std::fabs(lr.heldNllAdapted - lr.heldNllBase) > 1e-6, "adaptador gravado altera a inferência real do llama.cpp");
+        CHECK(lr.accepted && std::filesystem::exists(ad), "adaptador aceito pelo held-out real e persistido em GGUF");
+        CHECK(el.loraStatus().find("\"active\":true") != std::string::npos, "adaptador aplicado com llama_set_adapters_lora");
+        const auto g = el.generate("x", "y", kGrammar, 24);
+        CHECK(g.ok, "geração com adaptador ativo");
+        girassol::llm::LoraWeights w;
+        std::string e2;
+        CHECK(girassol::llm::OnDeviceLoraTrainer::readAdapterGguf(ad, w, &e2) && w.valid() && w.cycles == 1, "adaptador relido para retomar o treino");
+        el.clearLora();
+        CHECK(el.loraStatus().find("\"active\":false") != std::string::npos, "adaptador removido");
+        el.unload();
+        girassol::llm::LlmEngine el2;
+        CHECK(el2.load(path, 2, 512, &err), "recarrega");
+        CHECK(el2.applyLora(ad, 1.0f, &e2), ("aplica adaptador salvo: " + e2).c_str());
+        const auto lr2 = el2.trainLora(mem, lc);
+        std::printf("lora ciclo 2: ok=%d aceito=%d ciclo=%d held %.4f→%.4f %s\n", lr2.ok, lr2.accepted, lr2.cycle, lr2.heldNllBase, lr2.heldNllAdapted, lr2.error.c_str());
+        CHECK(lr2.ok && lr2.cycle >= 1, "segundo ciclo incremental retoma os pesos anteriores");
+        el2.unload();
+        std::filesystem::remove(ad);
+    }
+
     // benchmark tokens/s (pp + tg), mesmo caminho usado pelo botão da aba Sistema
     girassol::llm::LlmEngine eb;
     CHECK(eb.load(path, 2, 512, &err), "recarrega para benchmark");
@@ -254,6 +327,35 @@ int main() {
     std::printf("assinatura_paridade_tsetlin=0x%016llx\n", static_cast<unsigned long long>(sig));
     // Valor dourado também verificado em core/src/test/.../TsetlinParityTest.kt
     CHECK(sig == 0x28e9517335a66aeaULL, "paridade bit a bit com KotlinTsetlinMachine");
+
+    // v3.5 — valores dourados também em core/.../ports/ParityVectors.kt (ANOKHIN_GOLDEN, CMA_ES_GOLDEN)
+    const uint64_t ano = girassol::anokhin::paritySignature();
+    std::printf("assinatura_anokhin=0x%016llx\n", static_cast<unsigned long long>(ano));
+    CHECK(ano == 0x7dda1d25ba4aeda8ULL, "paridade bit a bit do Aceitador de Resultados da Ação (Anokhin)");
+    const uint64_t cmaSig = girassol::cma::paritySignature();
+    std::printf("assinatura_cma_es=0x%016llx\n", static_cast<unsigned long long>(cmaSig));
+    CHECK(cmaSig == 0xac4a8adbac61d5ceULL, "paridade bit a bit do CMA-ES");
+    {
+        // CMA-ES converge na elipsoide deslocada (sanidade numérica do Jacobi + passo σ)
+        auto s = girassol::cma::State::initial(std::vector<double>(6, 0.5), 0.2, 8);
+        girassol::SplitMix64 rng(7ULL);
+        for (int g = 0; g < 120; ++g) {
+            auto xs = girassol::cma::ask(s, rng);
+            std::vector<double> costs(xs.size());
+            for (size_t k = 0; k < xs.size(); ++k) { double f = 0; for (int i = 0; i < 6; ++i) { double d = xs[k][i] - 0.2 - 0.1 * i; f += (1.0 + i) * d * d; } costs[k] = f; }
+            girassol::cma::tell(s, costs);
+        }
+        CHECK(s.bestCost < 1e-4, "CMA-ES converge (custo < 1e-4 em 120 gerações)");
+        std::printf("cma_es melhor custo=%.3e sigma=%.3e\n", s.bestCost, s.sigma);
+    }
+    {
+        double proj[6] = {0.5, 0.5, 0.5, 0.5, 0.5, 0.5}, at[6] = {0.2, 0.9, 0.9, 0.9, 0.9, 0.9}, out[4];
+        girassol::anokhin::evaluate(proj, 0.98, 0.0, at, proj, true, out);
+        CHECK(out[3] == 1.0 && out[2] == 1.0, "aceitador confirma resultado idêntico ao esperado");
+        double worse[6] = {0.1, 0.5, 0.5, 0.5, 0.5, 0.5};
+        girassol::anokhin::evaluate(proj, 0.9, 0.0, at, worse, false, out);
+        CHECK(out[3] == 0.0 && out[1] < 0.0 && out[2] > 1.5, "descompasso negativo eleva plasticidade");
+    }
 
     auto caps = girassol::hw::probeSoc();
     std::printf("hardware: %s\n", caps.toCompactString().c_str());

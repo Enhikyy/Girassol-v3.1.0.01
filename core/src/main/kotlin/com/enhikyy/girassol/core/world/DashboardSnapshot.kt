@@ -70,8 +70,32 @@ data class MindView(
     val neuralDecisionsApplied: Long = 0,
     val speechesEmitted: Long = 0,
     val meanMood: Double = 0.0,
-    val v34: V34View = V34View()
+    val v34: V34View = V34View(),
+    val v35: V35View = V35View()
 )
+
+/** Telemetria v3.5: Anokhin, CMA-ES, Biblioteca/Léxico, MeshSync. */
+data class V35View(
+    val acceptorMeanMismatch: Double = 0.0,
+    val acceptorConfirmations: Int = 0,
+    val acceptorViolations: Int = 0,
+    val cmaGeneration: Int = 0,
+    val cmaSigma: Double = 0.0,
+    val cmaBestCost: Double = 0.0,
+    val locomotionSpeedScale: Double = 1.0,
+    val documents: List<KnowledgeDocumentView> = emptyList(),
+    val knowledgeChunks: Int = 0,
+    val lexicon: List<LexiconView> = emptyList(),
+    val lexiconCompression: Double = 0.0,
+    val compressedSpeechSample: List<String> = emptyList(),
+    val migrantsIn: Int = 0,
+    val migrantsOut: Int = 0,
+    val eventSeq: Long = 0,
+    val lastEventHash: String = GENESIS_HASH
+)
+
+data class KnowledgeDocumentView(val id: String, val title: String, val format: String, val chunks: Int, val reads: Int, val sha256: String)
+data class LexiconView(val glyph: String, val phrase: String, val uses: Int, val coiner: String?)
 
 /** Telemetria dos motores v3.4 (memória 2 estágios, ORCA, CfC hormonal, genética). */
 data class V34View(
@@ -152,6 +176,26 @@ data class DashboardSnapshot(
                     meanDopamine = if (alive.isEmpty()) 0.0 else alive.sumOf { it.dopamine } / alive.size,
                     meanLocomotion = if (alive.isEmpty()) 1.0 else alive.sumOf { it.locomotion } / alive.size,
                     binaryIndexBytes = alive.sumOf { c -> c.memories.count { it.bits != null } * 32L }
+                ),
+                v35 = V35View(
+                    acceptorMeanMismatch = state.acceptorMeanMismatch,
+                    acceptorConfirmations = alive.sumOf { it.acceptorConfirmations },
+                    acceptorViolations = alive.sumOf { it.acceptorViolations },
+                    cmaGeneration = state.cmaEs?.generation ?: 0,
+                    cmaSigma = state.cmaEs?.sigma ?: 0.0,
+                    cmaBestCost = state.cmaEs?.bestCost?.takeIf { it < 1e300 } ?: 0.0,
+                    locomotionSpeedScale = state.policy.locomotionSpeedScale,
+                    documents = state.knowledge.documents.map { KnowledgeDocumentView(it.id, it.title, it.format.name, it.chunks, it.reads, it.sha256) },
+                    knowledgeChunks = state.knowledge.chunks.size,
+                    lexicon = state.lexicon.entries.sortedByDescending { it.uses }.take(24).map { e ->
+                        LexiconView(e.glyph, e.phrase, e.uses, e.coinerId?.let { id -> state.citizen(id)?.name ?: id })
+                    },
+                    lexiconCompression = state.lexicon.compressionRatio(),
+                    compressedSpeechSample = alive.map { it.lastSpeech }.filter { it.isNotBlank() }.take(4).map { state.lexicon.compress(it) },
+                    migrantsIn = state.migrantsIn,
+                    migrantsOut = state.migrantsOut,
+                    eventSeq = state.eventSeq,
+                    lastEventHash = state.lastEventHash
                 )
             )
             return DashboardSnapshot(state.tick, citizens, society, mind)

@@ -9,6 +9,7 @@ import com.enhikyy.girassol.core.world.RsiLedgerRecord
 import com.enhikyy.girassol.core.world.StressEventRecord
 import com.enhikyy.girassol.core.world.WorldSnapshotCodec
 import com.enhikyy.girassol.core.world.WorldState
+import com.enhikyy.girassol.core.world.WorldStateHashChain
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -133,6 +134,25 @@ class PersistenceWriter(private val context: Context) {
     fun countRows(table: String): Long = runCatching {
         db.readableDatabase.rawQuery("SELECT COUNT(*) FROM $table", null).use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
     }.getOrDefault(0L)
+
+    /**
+     * Verifica a cadeia SHA-256 gravada no SQLite WAL (últimos [limit] eventos): recalcula cada
+     * `event_hash`, confere o encadeamento `prev_hash` e a cabeça contra o estado vivo.
+     */
+    fun verifyHashChain(limit: Int = 5000, liveHeadHash: String? = null, liveSeq: Long? = null): WorldStateHashChain.Report = runCatching {
+        val rows = ArrayList<CanonicalEvent>()
+        db.readableDatabase.rawQuery(
+            "SELECT seq, world_tick, rules_version, event_type, actor_id, payload, prev_hash, event_hash FROM " +
+                "(SELECT * FROM canonical_events ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC", arrayOf(limit.toString())
+        ).use { c ->
+            while (c.moveToNext()) rows += CanonicalEvent(c.getLong(0), c.getLong(1), c.getInt(2), c.getString(3),
+                if (c.isNull(4)) null else c.getString(4), c.getString(5), c.getString(6), c.getString(7))
+        }
+        val r = WorldStateHashChain.verify(rows)
+        if (r.ok && liveHeadHash != null && rows.isNotEmpty() && rows.last().seq == liveSeq && r.headHash != liveHeadHash)
+            r.copy(ok = false, firstBadSeq = liveSeq, reason = "cabeça gravada ≠ lastEventHash vivo")
+        else r
+    }.getOrElse { WorldStateHashChain.Report(false, 0, null, "erro: ${it.message}", "") }
 
     fun flushBlocking() {
         val latch = java.util.concurrent.CountDownLatch(1)

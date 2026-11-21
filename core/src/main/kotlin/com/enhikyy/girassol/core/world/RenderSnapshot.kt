@@ -7,7 +7,13 @@ data class AgentView(
     val speech: String = "", val speechAgeTicks: Long = Long.MAX_VALUE, val neural: Boolean = false,
     /** Posição contínua (ORCA + resolveCircleAABB), em unidades de tile; centro do tile = x + 0.5. */
     val fx: Float = x + 0.5f, val fz: Float = z + 0.5f,
-    val cortisol: Float = 0.3f, val dopamine: Float = 0.5f
+    val cortisol: Float = 0.3f, val dopamine: Float = 0.5f,
+    /** v3.5: crescimento (0 = recém-nascido, 1 = adulto) e cinemática sincronizada. */
+    val maturity: Float = 1f,
+    val vx: Float = 0f, val vz: Float = 0f,
+    /** Digitando num terminal CRT (PESQUISAR/ESTUDAR executando no objeto). */
+    val typing: Boolean = false,
+    val ageDays: Float = 0f
 )
 
 data class ObjectView(val id: String, val type: SmartObjectType, val x: Int, val z: Int, val contaminated: Boolean, val occupancy: Int)
@@ -43,7 +49,11 @@ data class WorldRenderSnapshot(
                 agents = alive.map { AgentView(it.id, it.name, it.x, it.z, it.intention?.action, it.emotion.mood, it.meanNeed(), it.generation, it.lastThought,
                     it.lastSpeech, if (it.lastSpeechTick < 0) Long.MAX_VALUE else state.tick - it.lastSpeechTick, it.intention?.viaNeural == true,
                     if (it.px.isNaN()) it.x + 0.5f else it.px.toFloat(), if (it.pz.isNaN()) it.z + 0.5f else it.pz.toFloat(),
-                    it.cortisol.toFloat(), it.dopamine.toFloat()) },
+                    it.cortisol.toFloat(), it.dopamine.toFloat(),
+                    CitizenGrowth.maturity(it.ageDays(state.tick), it.parents.isEmpty()),
+                    it.vx.toFloat(), it.vz.toFloat(),
+                    (it.intention?.action == ActionType.PESQUISAR || it.intention?.action == ActionType.ESTUDAR) && it.path.isEmpty() && it.actionTicksRemaining > 0,
+                    it.ageDays(state.tick).toFloat()) },
                 trail = state.board.channelSnapshot(CH_TRAIL),
                 foodScent = state.board.channelSnapshot(CH_FOOD),
                 population = alive.size,

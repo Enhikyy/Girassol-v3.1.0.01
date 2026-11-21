@@ -10,6 +10,9 @@
 
 #if defined(GIRASSOL_HAS_LLAMA)
 #include "llama.h"
+#if defined(GIRASSOL_USE_LLGUIDANCE)
+#include "llg_sampler.hpp"
+#endif
 #if defined(GIRASSOL_GGML_BACKEND_DL)
 #include "ggml-backend.h"
 #endif
@@ -67,6 +70,14 @@ bool LlmEngine::available() {
 #endif
 }
 
+bool LlmEngine::hasLlguidance() {
+#if defined(GIRASSOL_HAS_LLAMA) && defined(GIRASSOL_USE_LLGUIDANCE)
+    return true;
+#else
+    return false;
+#endif
+}
+
 bool LlmEngine::loadCpuBackend(const std::string& library, std::string* err) {
     std::lock_guard<std::mutex> lock(gBackendMu);
 #if defined(GIRASSOL_HAS_LLAMA) && defined(GIRASSOL_GGML_BACKEND_DL)
@@ -110,15 +121,24 @@ std::string LlmEngine::runtimeConfig() const {
     std::lock_guard<std::mutex> lock(mu_);
     if (!ctx_) return "";
     return std::string("flash_attn=") + (flashApplied_ ? "1" : "auto") + " kv=" + kvName(kvApplied_) +
-           " ctx=" + std::to_string(cfg_.nCtx) + " slots=" + std::to_string(slots_.size());
+           (kvHeadDimFallback_ ? "(head_dim=" + std::to_string(headDim_) + "%32!=0)" : std::string()) +
+           " ctx=" + std::to_string(cfg_.nCtx) + " slots=" + std::to_string(slots_.size()) +
+           " lora=" + (adapter_ ? std::to_string(lora_.cycles) : std::string("0"));
 }
 
 void LlmEngine::unload() {
     std::lock_guard<std::mutex> lock(mu_);
 #if defined(GIRASSOL_HAS_LLAMA)
     if (ctx_) llama_free(ctx_);
+    if (adapter_) llama_adapter_lora_free(adapter_);
     if (model_) llama_model_free(model_);
 #endif
+    adapter_ = nullptr;
+    adapterScale_ = 0.0f;
+    adapterPath_.clear();
+    lora_ = LoraWeights{};
+    headDim_ = 0;
+    kvHeadDimFallback_ = false;
     ctx_ = nullptr;
     model_ = nullptr;
     modelBytes_ = 0;
@@ -180,8 +200,17 @@ bool LlmEngine::load(const std::string& path, const LlmLoadConfig& cfg, std::str
         cp.abort_callback_data = &abort_;
         return llama_init_from_model(model_, cp);
     };
+    modelPath_ = path;
     flashApplied_ = cfg.flashAttn;
     kvApplied_ = cfg.flashAttn ? cfg.kvType : KvCacheType::F16;
+    // Pré-checagem: KV quantizado (Q8_0/Q4_0, bloco de 32) exige head_dim múltiplo de 32.
+    // Modelos F16/FP16 pequenos (~350M) costumam ter head_dim 64, mas arquiteturas com
+    // head_dim 80/96/… ainda são comuns — nesse caso o KV fica em F16 desde o início.
+    headDim_ = OnDeviceLoraTrainer::headDim(model_);
+    if (kvApplied_ != KvCacheType::F16 && (headDim_ <= 0 || headDim_ % 32 != 0)) {
+        kvApplied_ = KvCacheType::F16;
+        kvHeadDimFallback_ = true;
+    }
     ctx_ = makeCtx(flashApplied_, kvApplied_);
     if (!ctx_ && flashApplied_ && kvApplied_ != KvCacheType::F16) {
         // KV quantizado exige head_dim múltiplo do bloco (32): mantém FA com KV F16
@@ -400,7 +429,18 @@ LlmResult LlmEngine::generate(const LlmRequest& req) {
 
     // --- amostrador: GBNF → temperatura semântica → semente ---------------------------
     llama_sampler* chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    llama_sampler* gram = req.grammar.empty() ? nullptr : llama_sampler_init_grammar(vocab, req.grammar.c_str(), "root");
+    llama_sampler* gram = nullptr;
+#if defined(GIRASSOL_USE_LLGUIDANCE)
+    // llguidance (Rust) quando compilado; se recusar a gramática cai na GBNF estrita
+    if (!req.larkGrammar.empty()) {
+        gram = girassol_llg_sampler_init(vocab, "lark", req.larkGrammar.c_str());
+        if (gram) res.grammarBackend = "llguidance";
+    }
+#endif
+    if (!gram && !req.grammar.empty()) {
+        gram = llama_sampler_init_grammar(vocab, req.grammar.c_str(), "root");
+        if (gram) res.grammarBackend = "gbnf";
+    }
     if (!req.grammar.empty() && gram == nullptr) {
         llama_sampler_free(chain);
         res.error = "gramática GBNF inválida";
@@ -455,7 +495,8 @@ LlmResult LlmEngine::generate(const LlmRequest& req) {
         res.error = abort_.load() ? "abortado" : "decode do prompt falhou";
         return res;
     }
-    bool ffActive = ff && injectForced(forced);
+    // fast-forward só com GBNF: o llguidance já calcula os tokens forçados na própria máscara
+    bool ffActive = ff && res.grammarBackend != "llguidance" && injectForced(forced);
     if (ffActive) out = forced;
     size_t nextKey = 1;
     int quotes = 0;
@@ -492,6 +533,10 @@ LlmResult LlmEngine::generate(const LlmRequest& req) {
             }
         }
     }
+#if defined(GIRASSOL_USE_LLGUIDANCE)
+    if (res.grammarBackend == "llguidance" && girassol_llg_sampler_failed(gram) && res.error.empty())
+        res.error = "llguidance: matcher em erro (saída descartada)";
+#endif
     llama_sampler_free(chain);
 
     // KV mantém só o prefixo estável (mundo + identidade) → próximo pedido reaproveita.
@@ -556,6 +601,135 @@ LlmBench LlmEngine::bench(int32_t nPrompt, int32_t nGen) {
     b.error = "compilado sem llama.cpp";
 #endif
     return b;
+}
+
+LoraTrainReport LlmEngine::trainLora(const std::vector<std::string>& texts, const LoraTrainConfig& cfg) {
+    LoraTrainReport rep;
+#if defined(GIRASSOL_HAS_LLAMA)
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!model_ || !ctx_) { rep.error = "modelo não carregado"; return rep; }
+    if (cfg.adapterPath.empty()) { rep.error = "caminho do adaptador vazio"; return rep; }
+    if (!lora_.valid() && std::filesystem::exists(cfg.adapterPath)) {
+        std::string e;
+        LoraWeights w;
+        if (OnDeviceLoraTrainer::readAdapterGguf(cfg.adapterPath, w, &e)) lora_ = std::move(w);
+    }
+    rep = OnDeviceLoraTrainer::train(model_, modelPath_, texts, cfg, lora_);
+    if (rep.accepted) {
+        llama_adapter_lora* ad = llama_adapter_lora_init(model_, cfg.adapterPath.c_str());
+        if (ad) {
+            float sc = 1.0f;
+            if (llama_set_adapters_lora(ctx_, &ad, 1, &sc) == 0) {
+                if (adapter_) llama_adapter_lora_free(adapter_);
+                adapter_ = ad;
+                adapterScale_ = sc;
+                adapterPath_ = cfg.adapterPath;
+            } else {
+                llama_adapter_lora_free(ad);
+                rep.error = "llama_set_adapters_lora falhou";
+            }
+        } else {
+            rep.error = "llama_adapter_lora_init falhou";
+        }
+        // o KV e os slots foram calculados sem o adaptador novo: invalida tudo
+        llama_memory_clear(llama_get_memory(ctx_), true);
+        cached_.clear();
+        for (auto& [k, sl] : slots_) { (void)k; std::error_code ec; std::filesystem::remove(sl.file, ec); }
+        slots_.clear();
+        lru_.clear();
+    }
+    lastLora_ = rep;
+#else
+    (void)texts; (void)cfg;
+    rep.error = "compilado sem llama.cpp";
+#endif
+    return rep;
+}
+
+bool LlmEngine::applyLora(const std::string& adapterPath, float scale, std::string* err) {
+#if defined(GIRASSOL_HAS_LLAMA)
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!model_ || !ctx_) { if (err) *err = "modelo não carregado"; return false; }
+    llama_adapter_lora* ad = llama_adapter_lora_init(model_, adapterPath.c_str());
+    if (!ad) { if (err) *err = "adaptador incompatível com o modelo"; return false; }
+    if (llama_set_adapters_lora(ctx_, &ad, 1, &scale) != 0) {
+        llama_adapter_lora_free(ad);
+        if (err) *err = "llama_set_adapters_lora falhou";
+        return false;
+    }
+    if (adapter_) llama_adapter_lora_free(adapter_);
+    adapter_ = ad;
+    adapterScale_ = scale;
+    adapterPath_ = adapterPath;
+    LoraWeights w;
+    std::string e;
+    if (OnDeviceLoraTrainer::readAdapterGguf(adapterPath, w, &e)) lora_ = std::move(w);
+    llama_memory_clear(llama_get_memory(ctx_), true);
+    cached_.clear();
+    for (auto& [k, sl] : slots_) { (void)k; std::error_code ec; std::filesystem::remove(sl.file, ec); }
+    slots_.clear();
+    lru_.clear();
+    return true;
+#else
+    (void)adapterPath; (void)scale;
+    if (err) *err = "compilado sem llama.cpp";
+    return false;
+#endif
+}
+
+void LlmEngine::clearLora() {
+#if defined(GIRASSOL_HAS_LLAMA)
+    std::lock_guard<std::mutex> lock(mu_);
+    if (ctx_) llama_set_adapters_lora(ctx_, nullptr, 0, nullptr);
+    if (adapter_) llama_adapter_lora_free(adapter_);
+    adapter_ = nullptr;
+    adapterScale_ = 0.0f;
+    adapterPath_.clear();
+    if (ctx_) llama_memory_clear(llama_get_memory(ctx_), true);
+    cached_.clear();
+    slots_.clear();
+    lru_.clear();
+#endif
+}
+
+std::string LlmEngine::loraStatus() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    const LoraTrainReport& r = lastLora_;
+    char buf[512];
+    std::snprintf(buf, sizeof(buf),
+                  "{\"active\":%s,\"cycles\":%d,\"rank\":%d,\"target\":\"%s\",\"lastOk\":%s,\"lastAccepted\":%s,"
+                  "\"trainTokens\":%d,\"heldTokens\":%d,\"trainNllBefore\":%.5f,\"trainNllAfter\":%.5f,"
+                  "\"heldNllBase\":%.5f,\"heldNllAdapted\":%.5f,\"millis\":%.1f,\"error\":\"%s\"}",
+                  adapter_ ? "true" : "false", lora_.cycles, lora_.rank, lora_.target.c_str(), r.ok ? "true" : "false",
+                  r.accepted ? "true" : "false", r.trainTokens, r.heldTokens, r.trainNllBefore, r.trainNllAfter, r.heldNllBase,
+                  r.heldNllAdapted, r.millis, r.error.c_str());
+    return buf;
+}
+
+int32_t LlmEngine::headDim() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return headDim_;
+}
+
+std::string LlmEngine::modelFtype() const {
+#if defined(GIRASSOL_HAS_LLAMA)
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!model_) return "";
+    const int ft = static_cast<int>(llama_model_ftype(model_)) & ~1024;  // 1024 = LLAMA_FTYPE_GUESSED
+    switch (ft) {
+        case 0: return "F32";
+        case 1: return "F16";
+        case 2: return "Q4_0";
+        case 7: return "Q8_0";
+        case 15: return "Q4_K_M";
+        case 17: return "Q5_K_M";
+        case 18: return "Q6_K";
+        case 32: return "BF16";
+        default: return "ftype=" + std::to_string(ft);
+    }
+#else
+    return "";
+#endif
 }
 
 std::string LlmEngine::systemInfo() {

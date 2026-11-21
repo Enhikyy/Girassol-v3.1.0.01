@@ -20,8 +20,11 @@
 #include <unordered_map>
 #include <vector>
 
+#include "lora_ondevice.hpp"
+
 struct llama_model;
 struct llama_context;
+struct llama_adapter_lora;
 
 namespace girassol::llm {
 
@@ -41,6 +44,7 @@ struct LlmRequest {
     std::string worldPrefix;      // parte do system idêntica para todos (pode ser "")
     std::string user;
     std::string grammar;
+    std::string larkGrammar;      // v3.5: mesma linguagem em Lark (llguidance, opcional)
     std::vector<std::string> jsonKeys;  // ordem dos campos para o fast-forward ("" = sem)
     std::string slotKey;          // id do cidadão para o slot persistente ("" = sem)
     float temperature = 0.0f;     // ≤ 0 → greedy
@@ -57,6 +61,7 @@ struct LlmResult {
     int32_t reusedTokens = 0;     // tokens do prompt servidos pelo KV-cache/slot
     int32_t forcedTokens = 0;     // tokens injetados pelo fast-forward
     bool slotRestored = false;
+    std::string grammarBackend;   // "llguidance" | "gbnf" | ""
     double millis = 0.0;
     double tokensPerSecond = 0.0;     // (prompt + geração) / tempo total
     double genTokensPerSecond = 0.0;  // somente decodificação token a token
@@ -76,6 +81,7 @@ public:
     LlmEngine() = default;
     ~LlmEngine();
     static bool available();
+    static bool hasLlguidance();
     // Carrega um backend de CPU dinâmico pelo nome (ex.: libggml-cpu-android_armv8.2_2.so).
     // Em builds estáticos (testes de host) devolve true sem fazer nada.
     static bool loadCpuBackend(const std::string& library, std::string* err);
@@ -101,6 +107,16 @@ public:
     std::string runtimeConfig() const;
     size_t slotCount() const;
 
+    // v3.5 — LoRA on-device (Sharp-Wave Ripple Replay): treina um ciclo sobre os textos
+    // episódicos de maior utilidade e, se o NLL real em held-out melhorar, aplica o adaptador.
+    LoraTrainReport trainLora(const std::vector<std::string>& texts, const LoraTrainConfig& cfg);
+    bool applyLora(const std::string& adapterPath, float scale, std::string* err);
+    void clearLora();
+    std::string loraStatus() const;
+    // head_dim do modelo carregado e se o KV quantizado foi recusado por head_dim % 32 != 0.
+    int32_t headDim() const;
+    std::string modelFtype() const;
+
 private:
     std::vector<int32_t> tokenize(const std::string& text, bool addSpecial) const;
     std::vector<int32_t> forcedTokens(const std::string& text) const;
@@ -125,6 +141,14 @@ private:
     std::unordered_map<std::string, Slot> slots_;
     std::list<std::string> lru_;   // frente = mais recente
     std::unordered_map<std::string, int32_t> pieceToToken_;
+    std::string modelPath_;
+    llama_adapter_lora* adapter_ = nullptr;
+    float adapterScale_ = 0.0f;
+    std::string adapterPath_;
+    LoraWeights lora_;
+    LoraTrainReport lastLora_;
+    int32_t headDim_ = 0;
+    bool kvHeadDimFallback_ = false;
 };
 
 }  // namespace girassol::llm

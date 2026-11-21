@@ -15,6 +15,10 @@ import com.enhikyy.girassol.core.world.TileType
 object ParityVectors {
     const val NAV_GOLDEN: Long = 0x30cd3f41edf40ac4L  // v3.4: A* + clearance do DistrictNavMesh
     const val LORA_GOLDEN: Long = -1349069367639751732L // 0xed47248ecc78c3cc
+    /** v3.5: Aceitador de Resultados da Ação (Anokhin), 128 casos SplitMix64(1935). */
+    const val ANOKHIN_GOLDEN: Long = 0x7dda1d25ba4aeda8L
+    /** v3.5: CMA-ES n=6, λ=8, 30 gerações, SplitMix64(2001). */
+    const val CMA_ES_GOLDEN: Long = -0x53b57524539e2a32L // 0xac4a8adbac61d5ce
 
     const val NAV_W = 40
     const val NAV_QUERIES = 64

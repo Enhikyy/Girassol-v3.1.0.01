@@ -20,6 +20,7 @@ import com.enhikyy.girassol.data.SnapshotMeta
 import com.enhikyy.girassol.hardware.HardwareAutoTuner
 import com.enhikyy.girassol.hardware.HardwareProfile
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
@@ -119,6 +120,7 @@ object SimulationHub {
     private fun buildPorts(t: ModuleToggles) = CorePorts(
         pathfinder = NativeModules.pathfinder(),
         lora = NativeModules.loraTrainer(),
+        acceptor = NativeModules.actionAcceptor(),
         neural = if (t.localLlm) LocalLlmManager else null
     )
 
@@ -194,6 +196,14 @@ object SimulationHub {
             com.enhikyy.girassol.perf.AdpfHints.updateTarget((1_000_000_000L / tps.coerceAtLeast(1)))
             com.enhikyy.girassol.perf.AdpfHints.reportWork(System.nanoTime() - t0)
             writer.submitTickBatch(report.events, report.ledgerEntries)
+            // Sono (Sharp-Wave Ripple Replay) → treino LoRA real do modelo GGUF nas memórias
+            // episódicas de maior utilidade; roda na thread do LLM e não bloqueia o mundo.
+            if (report.events.any { it.type == "LORA_SONO" }) {
+                val texts = core.topUtilityEpisodes(48).map { it.first }
+                LocalLlmManager.trainLoraAsync(texts) { json ->
+                    _status.update { it.copy(lastMessage = "LoRA GGUF no sono: " + json.take(160)) }
+                }
+            }
             if (report.invariantViolations.isNotEmpty()) Log.w(TAG, "invariantes: ${report.invariantViolations}")
             if (rsi.isDue(core.state)) {
                 val rec = rsi.runCycle(core)
@@ -316,6 +326,52 @@ object SimulationHub {
         if (::writer.isInitialized) writer.searchMemories(text, owner) else emptyList()
 
     fun ftsModule(): String = if (::writer.isInitialized) writer.ftsModule() else "-"
+
+    /** Cadeia de auditoria SHA-256 no SQLite WAL (recalcula cada event_hash e o encadeamento). */
+    suspend fun verifyHashChain(): String {
+        if (!::writer.isInitialized || !_status.value.loaded) return "Mundo não carregado"
+        val head = withContext(simDispatcher) { core.state.lastEventHash to core.state.eventSeq }
+        writer.flushBlocking()
+        val r = withContext(Dispatchers.IO) { writer.verifyHashChain(liveHeadHash = head.first, liveSeq = head.second) }
+        return if (r.ok) "Cadeia SHA-256 íntegra: ${r.checked} eventos · cabeça ${r.headHash.take(12)}…"
+        else "Cadeia QUEBRADA em #${r.firstBadSeq}: ${r.reason}"
+    }
+
+    // ------------------------------------------------------------- Biblioteca (Processo 19)
+
+    /** Ingestão documental offline (TXT/EPUB/PDF/Parquet/áudio transcrito) → evento CONHECIMENTO. */
+    suspend fun ingestDocument(doc: com.enhikyy.girassol.core.knowledge.ParsedDocument): String = withContext(simDispatcher) {
+        if (!_status.value.loaded) return@withContext "Mundo não carregado"
+        val rec = core.ingestKnowledge(doc) ?: return@withContext "Documento já está na biblioteca (ou vazio)"
+        _status.update { it.copy(lastMessage = "Biblioteca: ${rec.title} (${rec.chunks} trechos)") }
+        publish(force = true)
+        "Ingerido: ${rec.title} · ${rec.format} · ${rec.chunks} trechos"
+    }
+
+    suspend fun topUtilityEpisodes(limit: Int): List<Pair<String, Double>> = withContext(simDispatcher) {
+        if (!_status.value.loaded) emptyList() else core.topUtilityEpisodes(limit)
+    }
+
+    // ------------------------------------------------------------- MeshSync LAN
+
+    suspend fun rawSnapshot(): Triple<ByteArray, Long, Long>? = withContext(simDispatcher) {
+        if (!_status.value.loaded) null else Triple(WorldSnapshotCodec.encodeRaw(core.state), core.state.seed, core.state.tick)
+    }
+
+    suspend fun emigrate(citizenId: String, deviceId: String) = withContext(simDispatcher) {
+        if (!_status.value.loaded) null else core.emigrate(citizenId, deviceId)?.also { publish(force = true) }
+    }
+
+    /** Desfaz uma emigração cujo envio falhou (o cidadão volta como imigrante do próprio aparelho). */
+    suspend fun admitMigrant(packet: com.enhikyy.girassol.core.mesh.MeshSyncProtocol.MigrationPacket): String = withContext(simDispatcher) {
+        if (!_status.value.loaded) return@withContext "Mundo não carregado"
+        val c = core.admitMigrant(packet)
+        _status.update { it.copy(lastMessage = "MeshSync: ${c.name} chegou de ${packet.originDevice}") }
+        publish(force = true)
+        "${c.name} admitido como ${c.id}"
+    }
+
+    fun aliveCitizenIds(): List<Pair<String, String>> = _dashboard.value?.citizens?.map { it.id to it.name } ?: emptyList()
 
     fun persistedEventCount(): Long = if (::writer.isInitialized) writer.countRows("canonical_events") else 0L
 

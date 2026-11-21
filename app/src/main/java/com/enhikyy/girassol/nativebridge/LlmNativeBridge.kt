@@ -124,13 +124,30 @@ object LlmNativeBridge {
     @JvmStatic external fun nativeSemanticTemperature(recentSpeeches: String, tBase: Float): Float
     /**
      * [texto, erro, promptTokens, genTokens, millis, tok/s total, tok/s geração,
-     *  tokens reaproveitados, tokens fast-forward, slot restaurado].
+     *  tokens reaproveitados, tokens fast-forward, slot restaurado, backend da gramática].
      */
     @JvmStatic external fun nativeLlmGenerate(
         system: String, worldPrefix: String, user: String, grammar: String, jsonKeysCsv: String,
-        slotKey: String, temperature: Float, seed: Int, maxTokens: Int
+        slotKey: String, temperature: Float, seed: Int, maxTokens: Int, larkGrammar: String
     ): Array<String>
     /** [pp tokens/s, tg tokens/s, nPrompt, nGen]; vazio se não houver modelo. */
     @JvmStatic external fun nativeLlmBench(nPrompt: Int, nGen: Int): DoubleArray
     @JvmStatic external fun nativeLlmSystemInfo(): String
+
+    /**
+     * v3.5 — treina um ciclo LoRA (rank r sobre blk.{L-1}.ffn_down) nos textos episódicos.
+     * Retorna o JSON de status (active, cycles, lastAccepted, NLLs, erro).
+     */
+    @JvmStatic external fun nativeLlmTrainLora(
+        texts: Array<String>, adapterPath: String, rank: Int, alpha: Float, epochs: Int,
+        lr: Float, topK: Int, maxTokens: Int, threads: Int
+    ): String
+    /** "" = sucesso; aplica via llama_adapter_lora_init + llama_set_adapters_lora. */
+    @JvmStatic external fun nativeLlmApplyLora(path: String, scale: Float): String
+    @JvmStatic external fun nativeLlmClearLora()
+    @JvmStatic external fun nativeLlmLoraStatus(): String
+    /** "ftype|head_dim" do modelo carregado (ex.: "F16|64"). */
+    @JvmStatic external fun nativeLlmModelInfo(): String
+    /** true se o build incluiu o crate llguidance (Rust); senão a GBNF estrita é usada. */
+    @JvmStatic external fun nativeLlmHasLlguidance(): Boolean
 }

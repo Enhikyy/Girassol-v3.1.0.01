@@ -9,6 +9,8 @@
 #include "../evolution/map_elites_aurora.hpp"
 #include "../navigation/grid_astar.hpp"
 #include "../memory/binary_episodic_index.hpp"
+#include "../cognitive/anokhin_functional_system.hpp"
+#include "../evolution/cma_es.hpp"
 #include "../audio/aaudio_engine.hpp"
 #include "../hardware/cpu_features.hpp"
 #include "../hardware/proc_memory.hpp"
@@ -240,6 +242,32 @@ Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeNavFindPathGrid(
 JNIEXPORT jlong JNICALL
 Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeBinaryMemorySignature(JNIEnv*, jobject) {
     return static_cast<jlong>(girassol::memory::paritySignature());
+}
+
+// ==================== 3b. ANOKHIN + CMA-ES (v3.5) ====================
+
+JNIEXPORT jlong JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeAnokhinSignature(JNIEnv*, jobject) {
+    return static_cast<jlong>(girassol::anokhin::paritySignature());
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeCmaEsSignature(JNIEnv*, jobject) {
+    return static_cast<jlong>(girassol::cma::paritySignature());
+}
+
+/** Aceitador de Resultados da Ação: in = projected[6] ‖ atDecision[6] ‖ obtained[6] ‖ {forecast, mem, success}. */
+JNIEXPORT jdoubleArray JNICALL
+Java_com_enhikyy_girassol_nativebridge_GeaNativeBridge_nativeAnokhinCompare(JNIEnv* env, jobject, jdoubleArray packed) {
+    using namespace girassol::anokhin;
+    if (!packed || env->GetArrayLength(packed) != 3 * NEEDS + 3) return nullptr;
+    double in[3 * NEEDS + 3];
+    env->GetDoubleArrayRegion(packed, 0, 3 * NEEDS + 3, in);
+    double out[4];
+    evaluate(in, in[3 * NEEDS], in[3 * NEEDS + 1], in + NEEDS, in + 2 * NEEDS, in[3 * NEEDS + 2] >= 0.5, out);
+    jdoubleArray r = env->NewDoubleArray(4);
+    env->SetDoubleArrayRegion(r, 0, 4, out);
+    return r;
 }
 
 // ==================== 4. ÁUDIO BINAURAL (AAudio) ====================

@@ -13,7 +13,9 @@ data class CognitivePolicyGenome(
     val memRlLearningRate: Double = 0.20,
     val actRDecayExponent: Double = 0.50,
     val thermalThrottleSensitivity: Double = 1.00,
-    val activeVpoRules: List<String> = emptyList()
+    val activeVpoRules: List<String> = emptyList(),
+    /** v3.5: escala da velocidade preferida RVO2/ORCA (locomoção), otimizada pelo CMA-ES. */
+    val locomotionSpeedScale: Double = 1.00
 ) {
     fun clamped(): CognitivePolicyGenome = copy(
         epistemicExplorationWeight = epistemicExplorationWeight.coerceIn(0.10, 1.50),
@@ -23,7 +25,8 @@ data class CognitivePolicyGenome(
         memRlLearningRate = memRlLearningRate.coerceIn(0.05, 0.50),
         actRDecayExponent = actRDecayExponent.coerceIn(0.20, 0.85),
         thermalThrottleSensitivity = thermalThrottleSensitivity.coerceIn(0.50, 3.00),
-        activeVpoRules = activeVpoRules.take(8)
+        activeVpoRules = activeVpoRules.take(8),
+        locomotionSpeedScale = locomotionSpeedScale.coerceIn(0.80, 1.20)
     )
 
     fun sha256Signature(): String {
@@ -36,7 +39,8 @@ data class CognitivePolicyGenome(
             "%.6f".fmt(memRlLearningRate),
             "%.6f".fmt(actRDecayExponent),
             "%.6f".fmt(thermalThrottleSensitivity),
-            activeVpoRules.joinToString("|")
+            activeVpoRules.joinToString("|"),
+            "%.6f".fmt(locomotionSpeedScale)
         ).joinToString(":")
         val digest = MessageDigest.getInstance("SHA-256").digest(payload.toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { "%02x".fmt(it) }

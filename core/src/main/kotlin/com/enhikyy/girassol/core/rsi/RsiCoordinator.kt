@@ -17,6 +17,9 @@ import com.enhikyy.girassol.core.world.WorldState
  */
 class RsiCoordinator(
     private val replayTicks: Int = 240,
+    /** CMA-ES: candidatos por geração e ticks de Shadow-Replay para ranqueá-los. */
+    private val cmaLambda: Int = 4,
+    private val cmaReplayTicks: Int = 60,
     private val gate: BoundedRsiPromotionGate = BoundedRsiPromotionGate(),
     private val deliberatorFactory: () -> Deliberator = { SymbolicLookaheadDeliberator() },
     private val portsFactory: () -> com.enhikyy.girassol.core.ports.CorePorts = { com.enhikyy.girassol.core.ports.CorePorts() }
@@ -51,13 +54,13 @@ class RsiCoordinator(
         )
     }
 
-    fun shadowReplay(snapshot: WorldState, genome: CognitivePolicyGenome): ShadowReplayMetrics {
+    fun shadowReplay(snapshot: WorldState, genome: CognitivePolicyGenome, ticks: Int = replayTicks): ShadowReplayMetrics {
         val copy = WorldSnapshotCodec.deepCopy(snapshot)
         copy.policy = genome
         copy.forecastWindow.clear(); copy.outcomeWindow.clear()
         val core = WorldCore(copy, portsFactory().forShadow().copy(deliberator = deliberatorFactory()), shadow = true)
         var fe = 0.0; var surv = 0.0; var div = 0.0; var delib = 0.0; var violations = 0
-        for (i in 0 until replayTicks) {
+        for (i in 0 until ticks) {
             val r = core.step(copy.telemetry)
             violations += r.invariantViolations.size
             fe += copy.metrics.meanFreeEnergy
@@ -65,7 +68,7 @@ class RsiCoordinator(
             div += copy.metrics.semanticEntropy
             delib += copy.metrics.deliberationsPer100Ticks
         }
-        val n = replayTicks.toDouble()
+        val n = ticks.toDouble()
         val brier = if (copy.forecastWindow.isEmpty()) 0.25 else copy.metrics.brierScore
         return ShadowReplayMetrics(fe / n, surv / n, brier, div / n, delib / n, violations)
     }
@@ -75,18 +78,51 @@ class RsiCoordinator(
         val state = core.state
         val proposal = propose(state)
         val baseline = state.policy
-        val candidate = proposal.applyTo(baseline)
         val snapshot = WorldSnapshotCodec.deepCopy(state)
+        // CMA-ES: uma geração por ciclo; os candidatos são ranqueados em Shadow-Replay curto e o
+        // melhor (fundido com a proposta tipada do REFLECTOR) disputa o BoundedRsiPromotionGate.
+        val cmaBest = cmaGeneration(state, snapshot, baseline)
+        val proposed = proposal.applyTo(baseline)
+        val candidate = cmaBest?.copy(activeVpoRules = proposed.activeVpoRules) ?: proposed
         val base = shadowReplay(snapshot, baseline)
         val cand = shadowReplay(snapshot, candidate)
         val decision = gate.evaluatePromotion(baseline, candidate, base, cand)
-        val record = RsiLedgerRecord(state.tick, proposal.proposerAgentId, proposal.rationale, decision,
+        val cmaNote = state.cmaEs?.let { " CMA-ES g=${it.generation} σ=${"%.4f".fmt(it.sigma)}." } ?: ""
+        val record = RsiLedgerRecord(state.tick, proposal.proposerAgentId, proposal.rationale + cmaNote, decision,
             base.brierScore, cand.brierScore, base.behavioralDiversityScore, cand.behavioralDiversityScore)
         state.rsiLedger += record
         if (state.rsiLedger.size > 200) state.rsiLedger.removeAt(0)
         if (decision.promoted) state.policy = candidate
+        state.cmaEs?.let { it.lastPromoted = decision.promoted }
         core.emit("RSI", proposal.proposerAgentId,
             "promovido=${decision.promoted};ganho=${"%.4f".fmt(decision.netFitnessGain)};base=${decision.baselineHash.take(12)};cand=${decision.candidateHash.take(12)}")
         return record
+    }
+
+    /** Custo minimizado pelo CMA-ES: −(mesmo escore do gate) + penalidades de invariantes e diversidade. */
+    fun cmaCost(m: ShadowReplayMetrics): Double {
+        val score = m.survivalEfficiency - 0.35 * m.meanFreeEnergy - 0.004 * m.llmCallsPer100Ticks
+        val diversityPenalty = if (m.behavioralDiversityScore < 0.35) (0.35 - m.behavioralDiversityScore) * 4.0 else 0.0
+        return -score + m.invariantsViolated.toDouble() + diversityPenalty + 2.0 * (m.brierScore - 0.25).coerceAtLeast(0.0)
+    }
+
+    /** Uma geração ask/tell do CMA-ES persistido no WorldState; retorna o melhor genoma da geração. */
+    fun cmaGeneration(state: WorldState, snapshot: WorldState, baseline: CognitivePolicyGenome): CognitivePolicyGenome? {
+        if (cmaLambda < 2) return null
+        val es = state.cmaEs?.takeIf { it.n == PolicySearchSpace.DIM && it.lambda == cmaLambda }
+            ?: CmaEsState.initial(PolicySearchSpace.encode(baseline), 0.12, cmaLambda)
+        // se a última geração não foi promovida, recentra a média na política vigente (âncora segura)
+        if (!es.lastPromoted && es.generation > 0) {
+            val anchor = PolicySearchSpace.encode(baseline)
+            for (i in anchor.indices) es.mean[i] = 0.5 * es.mean[i] + 0.5 * anchor[i]
+        }
+        val rng = StreamSeeds.rng(state.seed, "WORLD", state.tick, "cma-es")
+        val xs = CmaEs.ask(es, rng)
+        val genomes = xs.map { PolicySearchSpace.decode(it, baseline) }
+        val costs = DoubleArray(xs.size) { cmaCost(shadowReplay(snapshot, genomes[it], cmaReplayTicks)) }
+        val bestIdx = costs.indices.minWith(compareBy<Int> { costs[it] }.thenBy { it })
+        CmaEs.tell(es, costs)
+        state.cmaEs = es
+        return genomes[bestIdx]
     }
 }

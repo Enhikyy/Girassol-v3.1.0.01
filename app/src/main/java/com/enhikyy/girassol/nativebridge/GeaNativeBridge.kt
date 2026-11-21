@@ -80,6 +80,11 @@ object GeaNativeBridge {
     /** Assinatura dourada do SimHash bit[256] + Hamming (popcount) em C++. */
     @JvmStatic external fun nativeBinaryMemorySignature(): Long
 
+    /** v3.5: Aceitador de Resultados da Ação (Anokhin) e CMA-ES em C++20. */
+    @JvmStatic external fun nativeAnokhinSignature(): Long
+    @JvmStatic external fun nativeCmaEsSignature(): Long
+    @JvmStatic external fun nativeAnokhinCompare(packed: DoubleArray): DoubleArray?
+
     // ==================== 4. ÁUDIO BINAURAL (AAudio) ====================
     @JvmStatic external fun nativeAudioStart(): Boolean
     @JvmStatic external fun nativeAudioStop()

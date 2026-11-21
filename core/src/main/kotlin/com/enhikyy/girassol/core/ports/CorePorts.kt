@@ -44,7 +44,9 @@ data class NeuralPrompt(
     val worldPrefix: String = "",
     val jsonKeys: List<String> = emptyList(),
     val recentSpeeches: List<String> = emptyList(),
-    val seed: Long = 0L
+    val seed: Long = 0L,
+    /** v3.5: mesma gramática na sintaxe Lark do llguidance (usada só se o build incluir o crate). */
+    val larkGrammar: String = ""
 )
 
 /** Resultado validado pela gramática GBNF e pelo parser; vira evento canônico ao ser aplicado. */
@@ -70,11 +72,24 @@ interface NeuralDeliberationPort {
     fun drainResults(): List<NeuralDecision>
 }
 
+/** Aceitador de Resultados da Ação (Anokhin); saída = [mismatch, valence, plasticity, confirmed]. */
+interface ActionAcceptorPort {
+    val backend: String
+    fun compare(projected: DoubleArray, forecast: Double, memUtility: Double, atDecision: DoubleArray, obtained: DoubleArray, success: Boolean): DoubleArray
+}
+
+object KotlinActionAcceptor : ActionAcceptorPort {
+    override val backend = "kotlin-anokhin"
+    override fun compare(projected: DoubleArray, forecast: Double, memUtility: Double, atDecision: DoubleArray, obtained: DoubleArray, success: Boolean) =
+        com.enhikyy.girassol.core.cognition.AnokhinFunctionalSystem.kotlinCase(projected, forecast, memUtility, atDecision, obtained, success)
+}
+
 data class CorePorts(
     val deliberator: Deliberator = SymbolicLookaheadDeliberator(),
     val pathfinder: PathfinderPort = KotlinPathfinder,
     val lora: LoraTrainerPort = KotlinLoraTrainer,
-    val neural: NeuralDeliberationPort? = null
+    val neural: NeuralDeliberationPort? = null,
+    val acceptor: ActionAcceptorPort = KotlinActionAcceptor
 ) {
     /** Portas usadas em Shadow-Replay/sandbox: sem LLM (contrafactual puramente simbólico). */
     fun forShadow(): CorePorts = copy(neural = null)
