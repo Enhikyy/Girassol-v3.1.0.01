@@ -17,6 +17,7 @@ import com.enhikyy.girassol.sim.SimulationHub
 import com.google.android.filament.Box
 import com.google.android.filament.Camera
 import com.google.android.filament.ColorGrading
+import com.google.android.filament.Colors
 import com.google.android.filament.Engine
 import com.google.android.filament.EntityManager
 import com.google.android.filament.Filament
@@ -45,7 +46,6 @@ import java.nio.ByteOrder
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.math.cos
-import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
 
@@ -98,6 +98,12 @@ class FilamentCityRenderer(
             TimePhase.NIGHT -> PhaseLight(4.6f, 2f, floatArrayOf(0.62f, 0.72f, 1.0f), 6f, 12000f, 1.60f, 1.40f, 3.0f, 0.016f)
             TimePhase.INTERIOR -> PhaseLight(8.2f, 650f, floatArrayOf(1.0f, 0.98f, 0.94f), 300f, 0f, 0f, 0f, 0f, 0f)
         }
+
+        /** sRGB → linear (Colors.toLinear ACCURATE) antes de qualquer cor ir ao motor. */
+        fun linear(c: FloatArray): FloatArray = Colors.toLinear(Colors.Conversion.ACCURATE, c.copyOf(3))
+        private val LAMP_LINEAR by lazy { linear(floatArrayOf(1.0f, 0.72f, 0.42f)) }
+        /** Neblina neutra suave (sRGB). */
+        val FOG_SRGB = floatArrayOf(0.66f, 0.68f, 0.70f)
 
         /** Direção representativa do sol (para o céu procedural) por fase. */
         fun phaseSunDir(p: TimePhase): FloatArray = when (p) {
@@ -187,7 +193,9 @@ class FilamentCityRenderer(
     private var dayPhase = Float.NaN
     private var dayTarget = 0.5f
     private var phase = TimePhase.MORNING
-    private var cur = phaseLight(TimePhase.MORNING).let { floatArrayOf(it.ev100, it.sunLux, it.iblLux, it.lampLumens, it.windows, it.billboard, it.streetLamp, it.fogDensity) }
+    private var cur = phaseLight(TimePhase.MORNING).let { floatArrayOf(WorldExposure.DAY.ev100, WorldExposure.DAY.sunLux, WorldExposure.DAY.iblLux, it.lampLumens, it.windows, it.billboard, it.streetLamp, it.fogDensity) }
+    /** Câmera física interpolada: abertura f/N, obturador (s), ISO — aplicada com setExposure. */
+    private val camRig = WorldExposure.DAY.let { floatArrayOf(it.aperture, it.shutter, it.iso) }
     private var pose = CameraPose(V3(0f, 40f, 40f), V3(0f, 0f, 0f), 42f)
     private var cameraMode = CameraMode.ORBIT
     private var povId: String? = null
@@ -311,12 +319,26 @@ class FilamentCityRenderer(
         }
         renderViews()
         var out: ByteBuffer? = null
+        val done = java.util.concurrent.CountDownLatch(1)
         if (read) {
             out = ByteBuffer.allocateDirect(widthPx * heightPx * 4).order(ByteOrder.nativeOrder())
-            renderer.readPixels(0, 0, widthPx, heightPx, Texture.PixelBufferDescriptor(out, Texture.Format.RGBA, Texture.Type.UBYTE))
+            // o callback só dispara depois que o driver copiou os pixels (glReadPixels → PBO → fence)
+            renderer.readPixels(0, 0, widthPx, heightPx, Texture.PixelBufferDescriptor(out, Texture.Format.RGBA, Texture.Type.UBYTE,
+                1, 0, 0, 0, java.util.concurrent.Executor { it.run() }, Runnable { done.countDown() }))
         }
         renderer.endFrame()
         engine.flushAndWait()
+        if (read) {
+            // sincronização explícita: no SwiftShader o fence do readPixels pode demorar vários flushes;
+            // sem isto o quadro sai preto/velho
+            var spins = 0
+            while (!done.await(20, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                engine.flushAndWait()
+                // o backend GL só verifica fences concluídos no tick de um quadro: quadro vazio
+                if (spins % 5 == 4 && renderer.beginFrame(sc, System.nanoTime())) renderer.endFrame()
+                if (++spins > 250) { Log.w(TAG, "readPixels não concluiu em 5 s"); return null }
+            }
+        }
         capturedFrames++
         return out
     }
@@ -547,7 +569,7 @@ class FilamentCityRenderer(
             // os postes ficam só com emissivo + glow
             for (lamp in w.lamps.take(if (WorldGpu.softwareGl) 0 else 64)) {
                 val e = EntityManager.get().create()
-                LightManager.Builder(LightManager.Type.POINT).color(1.0f, 0.72f, 0.42f).intensity(0f)
+                LightManager.Builder(LightManager.Type.POINT).color(LAMP_LINEAR[0], LAMP_LINEAR[1], LAMP_LINEAR[2]).intensity(0f)
                     .position(lamp.x, lamp.y, lamp.z).falloff(16f).castShadows(false).build(engine, e)
                 scene.addEntity(e)
                 lampEntities += e
@@ -604,7 +626,7 @@ class FilamentCityRenderer(
         if (syncAssets) {
             val face = if (WorldGpu.softwareGl) minOf(64, profile().iblFaceSize) else profile().iblFaceSize
             WorldGpu.generateIbl(ph, phaseSunDir(ph), overcast, face, 48)?.let { d ->
-                runCatching { WorldGpu.uploadIbl(engine, d, phaseLight(ph).iblLux) }
+                runCatching { WorldGpu.uploadIbl(engine, d, WorldExposure.iblLuxFor(ph)) }
                     .onSuccess { ibls[ph] = it; Log.i(TAG, "captura: IBL ${ph.label} ${face}² + SH3") }
                     .onFailure { Log.w(TAG, "IBL ${ph.label} ${face}² falhou", it) }
             }
@@ -612,7 +634,7 @@ class FilamentCityRenderer(
         }
         // 32² síncrono (≈ poucos ms) para nunca renderizar sem luz ambiente; 256² chega em seguida
         WorldGpu.generateIbl(ph, phaseSunDir(ph), overcast, 32, 16)?.let { d ->
-            runCatching { WorldGpu.uploadIbl(engine, d, phaseLight(ph).iblLux) }
+            runCatching { WorldGpu.uploadIbl(engine, d, WorldExposure.iblLuxFor(ph)) }
                 .onSuccess { ibls[ph] = it }.onFailure { Log.w(TAG, "IBL ${ph.label} 32² falhou", it) }
         }
         val ex = worker ?: return
@@ -625,7 +647,7 @@ class FilamentCityRenderer(
                 iblPending.remove(ph)
                 if (!initialized || gen != generation) return@post
                 val old = ibls[ph]
-                val n = runCatching { WorldGpu.uploadIbl(engine, d, phaseLight(ph).iblLux) }
+                val n = runCatching { WorldGpu.uploadIbl(engine, d, WorldExposure.iblLuxFor(ph)) }
                     .getOrElse { Log.w(TAG, "IBL ${ph.label} ${face}² falhou", it); return@post }
                 ibls[ph] = n
                 if (activeIbl === old) applyIbl(n)
@@ -802,8 +824,16 @@ class FilamentCityRenderer(
         if (!ok) view.setRenderTarget(null)
     }
 
+    private var postBypass = false
+    /** Diagnóstico da captura: renderiza a cena direto na swapchain, sem a passada analógica. */
+    fun setPostBypass(b: Boolean) {
+        if (!initialized || !postActive || b == postBypass) return
+        postBypass = b
+        view.setRenderTarget(if (b) null else renderTarget)
+    }
+
     private fun renderViews() {
-        if (postActive) {
+        if (postActive && !postBypass) {
             postMi.setParameter("time", (System.nanoTime() - startNs) / 1e9f)
             renderer.render(view)
             renderer.render(postView)
@@ -846,7 +876,8 @@ class FilamentCityRenderer(
         view.setShadowType(if (l == EffectLevel.FULL) View.ShadowType.DPCF else View.ShadowType.PCF)
         view.setDithering(if (l.temporalDithering) View.Dithering.TEMPORAL else View.Dithering.NONE)
         view.setBloomOptions(View.BloomOptions().apply {
-            enabled = p.bloomEnabled; strength = p.bloomStrength; levels = p.bloomLevels; resolution = p.bloomResolution
+            // emulador/SwiftShader: sem bloom (sem cubemap de reflexo, NaN se propagariam pela cadeia)
+            enabled = p.bloomEnabled && !WorldGpu.softwareGl; strength = p.bloomStrength; levels = p.bloomLevels; resolution = p.bloomResolution
             threshold = true; highlight = p.effectiveBloomHighlight; lensFlare = false; starburst = false
         })
         view.setVignetteOptions(View.VignetteOptions().apply {
@@ -854,18 +885,29 @@ class FilamentCityRenderer(
         })
         applyFog(p)
         view.setDynamicResolutionOptions(View.DynamicResolutionOptions().apply { enabled = false; minScale = p.resolutionScale; maxScale = p.resolutionScale })
-        view.setColorGrading(if (l.colorGrading) grading(preset) else null)
+        view.setColorGrading(when {
+            WorldGpu.softwareGl -> simpleGrading()
+            l.colorGrading -> grading(preset)
+            else -> null
+        })
     }
+
+    private var simpleGradingObj: ColorGrading? = null
+    /** Emulador: só o tonemapper ACES legado, sem curvas/LUT de gradação 500T. */
+    private fun simpleGrading(): ColorGrading = simpleGradingObj ?: ColorGrading.Builder()
+        .toneMapper(ToneMapper.ACESLegacy()).build(engine).also { simpleGradingObj = it }
 
     private fun applyFog(p: CinematicProfile = profile()) {
         if (!level.postProcessing) return
+        // neblina só ao longe: começa a 45 m e nunca passa de 35 % — a malha urbana e o interior
+        // ficam nítidos perto da câmera (sem véu bege)
         view.setFogOptions(View.FogOptions().apply {
-            enabled = p.fog
-            distance = 18f; cutOffDistance = 1e6f; maximumOpacity = 0.82f
-            height = 0f; heightFalloff = 0.06f; density = cur[7]
-            inScatteringStart = 0f; inScatteringSize = if (phase == TimePhase.NIGHT) -1f else 40f
-            fogColorFromIbl = activeIbl != null
-            color = floatArrayOf(0.42f, 0.46f, 0.48f)
+            enabled = true
+            distance = 45.0f; cutOffDistance = 1e6f; maximumOpacity = 0.35f
+            height = 0f; heightFalloff = 1.5f; density = cur[7]
+            inScatteringStart = 0f; inScatteringSize = -1f
+            fogColorFromIbl = false
+            color = linear(FOG_SRGB)
         })
     }
 
@@ -1079,11 +1121,13 @@ class FilamentCityRenderer(
             Render3dTelemetry.update { it.copy(phase = ph.label) }
         }
         val pl = phaseLight(ph)
+        val ex = WorldExposure.setting(WorldExposure.band(if (dayPhase.isNaN()) 0.4f else dayPhase, preset))
         val kk = k.coerceIn(0f, 1f)
-        lerpTo(0, pl.ev100, kk); lerpTo(1, pl.sunLux, kk); lerpTo(2, pl.iblLux, kk); lerpTo(3, pl.lampLumens, kk)
+        lerpTo(0, ex.ev100, kk); lerpTo(1, ex.sunLux, kk); lerpTo(2, ex.iblLux, kk); lerpTo(3, pl.lampLumens, kk)
         lerpTo(4, pl.windows, kk); lerpTo(5, pl.billboard, kk); lerpTo(6, pl.streetLamp, kk); lerpTo(7, pl.fogDensity, kk)
-        // exposição física: f/1, ISO 100 → t = 2^−EV100
-        fCamera.setExposure(1f, 2.0.pow(-cur[0].toDouble()).toFloat(), 100f)
+        // câmera física sincronizada com a faixa de luz (Dia/Tarde, Entardecer, Noite, Interior)
+        camRig[0] += (ex.aperture - camRig[0]) * kk; camRig[1] += (ex.shutter - camRig[1]) * kk; camRig[2] += (ex.iso - camRig[2]) * kk
+        fCamera.setExposure(camRig[0], camRig[1], camRig[2])
         val lm = engine.lightManager
         if (sunEntity != 0) {
             val li = lm.getInstance(sunEntity)
@@ -1094,7 +1138,8 @@ class FilamentCityRenderer(
             }
             val n = sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2])
             lm.setDirection(li, -dir[0] / n, -dir[1] / n, -dir[2] / n)
-            lm.setColor(li, pl.sunColor[0], pl.sunColor[1], pl.sunColor[2])
+            val sc = linear(pl.sunColor)
+            lm.setColor(li, sc[0], sc[1], sc[2])
             lm.setIntensity(li, cur[1])
         }
         for (e in lampEntities) lm.setIntensity(lm.getInstance(e), cur[3])
@@ -1239,6 +1284,7 @@ class FilamentCityRenderer(
         engine.destroyMaterial(pbrMat); engine.destroyMaterial(glowMat); engine.destroyMaterial(shadowMat)
         engine.destroyTexture(texWhite); engine.destroyTexture(texBlack); engine.destroyTexture(texOrm); engine.destroyTexture(texNormal)
         for ((_, g) in gradings) engine.destroyColorGrading(g)
+        simpleGradingObj?.let { engine.destroyColorGrading(it) }; simpleGradingObj = null
         gradings.clear()
         swapChain?.let { engine.destroySwapChain(it) }; swapChain = null
         engine.destroyView(view); engine.destroyScene(scene); engine.destroyRenderer(renderer)

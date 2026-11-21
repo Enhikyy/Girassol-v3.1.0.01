@@ -507,12 +507,18 @@ fun balloonAlpha(ageTicks: Long, window: Long = SPEECH_BALLOON_TICKS): Float {
     return (1.0 - (ageTicks - fadeStart) / (window - fadeStart)).toFloat().coerceIn(0f, 1f)
 }
 
+/** Fundo do cartão/balão sobre a cena 3D: preto translúcido (alfa 0,84) + borda sutil. */
+internal val HudScrim = Color(0xFF07080A).copy(alpha = 0.84f)
+internal val HudEdge = Color.White.copy(alpha = 0.12f)
+
 @Composable
 private fun BalloonBody(b: BalloonItem, onTap: () -> Unit) {
     Column(
         Modifier.graphicsLayer { alpha = b.alpha }.widthIn(max = 220.dp)
             .liquidGlass(Shapes.Control, tone = GlassTone.REGULAR, elevation = 10.dp)
-            .border(1.dp, if (b.neural) Lumon.Halation.copy(alpha = 0.7f) else if (b.thought) Lumon.Violet.copy(alpha = 0.6f) else Color.Transparent, Shapes.Control)
+            // véu escuro ≥ 0,80: texto legível mesmo sobre o céu claro do pico da tarde
+            .background(HudScrim, Shapes.Control)
+            .border(1.dp, if (b.neural) Lumon.Halation.copy(alpha = 0.7f) else if (b.thought) Lumon.Violet.copy(alpha = 0.6f) else HudEdge, Shapes.Control)
             .clip(Shapes.Control)
             .clickable(role = androidx.compose.ui.semantics.Role.Button, onClickLabel = "focar em ${b.name}", onClick = onTap)
             .padding(horizontal = 12.dp, vertical = 7.dp)
@@ -547,6 +553,7 @@ private fun lerpMood(m: Double): Color {
 private fun AgentCard(a: AgentView, energy: Double?, social: Double?, place: String, onClose: () -> Unit, onPov: () -> Unit, onOpen: () -> Unit) {
     Column(
         Modifier.fillMaxWidth().liquidGlass(Shapes.Card, tone = GlassTone.DENSE, elevation = 18.dp)
+            .background(HudScrim, Shapes.Card).border(1.dp, HudEdge, Shapes.Card)
             .padding(horizontal = 18.dp, vertical = 14.dp).testTag("agent_card"),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {

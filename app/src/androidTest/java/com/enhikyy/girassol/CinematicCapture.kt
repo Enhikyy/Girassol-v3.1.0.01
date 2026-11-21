@@ -93,7 +93,22 @@ object CinematicCapture {
                     for (y in H - 1 downTo 0) { px.position(y * W * 4); px.get(row); flipped.put(row) }
                     flipped.flip(); bmp.copyPixelsFromBuffer(flipped)
                     File(frames, "f_%04d.png".format(n++)).outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                    seg.stills[i]?.let { name -> File(out, "$name.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) } }
+                    seg.stills[i]?.let { name ->
+                        File(out, "$name.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                        mark("CAPTURA_MEDIA $tag $name ${meanRgb(px)}")
+                        // diagnóstico: o mesmo quadro sem a passada analógica (dehancer) — isola cena × pós
+                        if (name == "01_biosfera_3d" || name == "11_interior_brutalista") {
+                            r.setPostBypass(true)
+                            r.captureFrame(0f, seg.day, read = true)?.let { raw ->
+                                mark("CAPTURA_MEDIA $tag ${name}_sem_pos ${meanRgb(raw)}")
+                                flipped.clear()
+                                for (y in H - 1 downTo 0) { raw.position(y * W * 4); raw.get(row); flipped.put(row) }
+                                flipped.flip(); bmp.copyPixelsFromBuffer(flipped)
+                                File(out, "diag_${name}_sem_pos.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                            }
+                            r.setPostBypass(false)
+                        }
+                    }
                 }
                 val ms = (System.currentTimeMillis() - ts) / seg.frames.coerceAtLeast(1)
                 Log.i(TAG, "[$tag] segmento ${seg.name}: ${seg.frames} quadros, ${ms} ms/quadro (${seg.preset.name}/${seg.camera.name}/dia ${seg.day})")
@@ -107,5 +122,14 @@ object CinematicCapture {
             WorldViewState.setPreset(WorldPreset.URBAN_OVERCAST); WorldViewState.setCamera(CameraMode.ORBIT); WorldViewState.setPovCitizen(null)
         }
         mark("CAPTURA_OK_$tag $n ${out.absolutePath}")
+    }
+
+    /** Média RGB (0–255) de um quadro RGBA8 — detecta quadros estourados/pretos no log. */
+    private fun meanRgb(px: ByteBuffer): String {
+        var r = 0L; var g = 0L; var b = 0L; var n = 0L
+        var i = 0
+        val lim = px.limit()
+        while (i + 3 < lim) { r += px.get(i).toInt() and 0xff; g += px.get(i + 1).toInt() and 0xff; b += px.get(i + 2).toInt() and 0xff; n++; i += 4 * 7 }
+        return if (n == 0L) "0 0 0" else "${r / n} ${g / n} ${b / n}"
     }
 }

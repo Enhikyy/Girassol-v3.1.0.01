@@ -61,6 +61,26 @@ class WorldV4Test {
     }
 
     @Test
+    fun physicalExposureIsSyncedAndLegibleInEveryBand() {
+        assertEquals(LightBand.DAY, WorldExposure.band(0.40f, WorldPreset.URBAN_OVERCAST))
+        assertEquals(LightBand.DAY, WorldExposure.band(0.62f, WorldPreset.URBAN_OVERCAST))
+        assertEquals(LightBand.DUSK, WorldExposure.band(0.74f, WorldPreset.URBAN_OVERCAST))
+        assertEquals(LightBand.NIGHT, WorldExposure.band(0.90f, WorldPreset.URBAN_OVERCAST))
+        assertEquals(LightBand.INTERIOR, WorldExposure.band(0.40f, WorldPreset.LUMON_INTERIOR))
+        // câmeras pedidas: f/16 1/125 ISO100, f/11 1/60 ISO100, f/4 1/30 ISO400
+        assertEquals(14.97f, WorldExposure.DAY.ev100, 0.02f)
+        assertEquals(12.83f, WorldExposure.DUSK.ev100, 0.02f)
+        assertEquals(6.91f, WorldExposure.NIGHT.ev100, 0.02f)
+        for (b in LightBand.values()) {
+            val e = WorldExposure.setting(b)
+            assertTrue("$b: luz nunca zera", e.sunLux > 0f && e.iblLux > 0f)
+            // difuso de albedo 0,5 entre 0,15 e 1,0 antes do tonemapping: nem preto nem estourado
+            assertTrue("$b: sol ${e.diffuseSun}", e.diffuseSun in 0.15f..1.0f)
+            assertTrue("$b: céu ${e.diffuseSky}", e.diffuseSky in 0.03f..1.0f)
+        }
+    }
+
+    @Test
     fun tangentFrameRoundTripsNormalAndTangent() {
         val cases = listOf(V3(0f, 1f, 0f) to V3(1f, 0f, 0f), V3(0f, 0f, 1f) to V3(1f, 0f, 0f), V3(-1f, 0f, 0f) to V3(0f, 0f, 1f),
             V3(0.3f, 0.8f, -0.52f).normalized() to TangentFrame.anyPerpendicular(V3(0.3f, 0.8f, -0.52f).normalized()))

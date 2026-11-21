@@ -56,7 +56,7 @@ internal object WorldGpu {
     @Volatile var allowIbl = true
     private val hwSampler = TextureSampler(TextureSampler.MinFilter.LINEAR_MIPMAP_LINEAR, TextureSampler.MagFilter.LINEAR,
         TextureSampler.WrapMode.REPEAT).apply { anisotropy = 8f }
-    private val swSampler = TextureSampler(TextureSampler.MinFilter.LINEAR_MIPMAP_LINEAR, TextureSampler.MagFilter.LINEAR,
+    private val swSampler = TextureSampler(TextureSampler.MinFilter.LINEAR, TextureSampler.MagFilter.LINEAR,
         TextureSampler.WrapMode.REPEAT)
     val repeatSampler: TextureSampler get() = if (softwareGl) swSampler else hwSampler
 
@@ -88,26 +88,52 @@ internal object WorldGpu {
         fun destroy(engine: Engine) { engine.destroyTexture(albedo); engine.destroyTexture(orm); engine.destroyTexture(normal); emissive?.let { engine.destroyTexture(it) } }
     }
 
-    /** Envia a superfície à GPU: albedo/emissivo sRGB com generateMipmaps; ORM/normal com a cadeia completa do C++. */
+    /**
+     * Buffers com envio em andamento: a referência forte só é solta no callback de liberação do
+     * PixelBufferDescriptor (equivalente Kotlin do shared_ptr capturado no callback em C++) — o
+     * driver nunca lê memória já coletada, mesmo que o envio seja assíncrono.
+     */
+    private val inFlight: MutableSet<ByteBuffer> = java.util.Collections.synchronizedSet(java.util.Collections.newSetFromMap(java.util.IdentityHashMap<ByteBuffer, Boolean>()))
+    private val directExecutor = java.util.concurrent.Executor { it.run() }
+
+    /** Descritor RGBA8 de 4 canais (alinhamento 4 — nunca RGB de 3 canais) que mantém [buf] vivo até o fim do envio. */
+    fun owned(buf: ByteBuffer, type: Texture.Type = Texture.Type.UBYTE): Texture.PixelBufferDescriptor {
+        inFlight.add(buf)
+        return Texture.PixelBufferDescriptor(buf, Texture.Format.RGBA, type, 4, 0, 0, 0, directExecutor, Runnable { inFlight.remove(buf) })
+    }
+
+    /** Buffers ainda não liberados pelo driver (diagnóstico/testes). */
+    val pendingUploads: Int get() = inFlight.size
+
+    /**
+     * Envia a superfície à GPU. GPU real: albedo/emissivo sRGB com generateMipmaps; ORM/normal com a
+     * cadeia completa do C++. Emulador/SwiftShader: todas as texturas com 1 nível, sem
+     * generateMipmaps na GPU (o tradutor GL do emulador cai na geração/envio de mips).
+     */
     fun upload(engine: Engine, d: SurfaceData, withEmissive: Boolean): SurfaceTextures {
+        if (softwareGl) {
+            fun single(buf: ByteBuffer, fmt: Texture.InternalFormat): Texture {
+                val t = Texture.Builder().width(d.size).height(d.size).levels(1).sampler(Texture.Sampler.SAMPLER_2D)
+                    .format(fmt).build(engine)
+                val bytes = d.size * d.size * 4
+                val dup = buf.duplicate().order(ByteOrder.nativeOrder()); dup.position(0); dup.limit(bytes)
+                t.setImage(engine, 0, owned(dup.slice().order(ByteOrder.nativeOrder())))
+                return t
+            }
+            return SurfaceTextures(single(d.albedo, Texture.InternalFormat.SRGB8_A8), single(d.orm, Texture.InternalFormat.RGBA8),
+                single(d.normal, Texture.InternalFormat.RGBA8), if (withEmissive) single(d.emissive, Texture.InternalFormat.SRGB8_A8) else null)
+        }
         val levels = ProceduralAssetsNative.mipLevels(d.size)
         fun srgbMipmapped(buf: ByteBuffer): Texture {
             val t = Texture.Builder().width(d.size).height(d.size).levels(levels).sampler(Texture.Sampler.SAMPLER_2D)
                 .format(Texture.InternalFormat.SRGB8_A8)
                 .usage(Texture.Usage.DEFAULT or Texture.Usage.GEN_MIPMAPPABLE).build(engine)
             buf.rewind()
-            t.setImage(engine, 0, Texture.PixelBufferDescriptor(buf, Texture.Format.RGBA, Texture.Type.UBYTE))
+            t.setImage(engine, 0, owned(buf))
             t.generateMipmaps(engine)
             return t
         }
         fun chain(buf: ByteBuffer): Texture {
-            if (softwareGl) {
-                val t = Texture.Builder().width(d.size).height(d.size).levels(levels).sampler(Texture.Sampler.SAMPLER_2D)
-                    .format(Texture.InternalFormat.RGBA8).usage(Texture.Usage.DEFAULT or Texture.Usage.GEN_MIPMAPPABLE).build(engine)
-                setLevel(engine, t, 0, d.size, 0, buf, 0, 4, Texture.Type.UBYTE)
-                t.generateMipmaps(engine)
-                return t
-            }
             val t = Texture.Builder().width(d.size).height(d.size).levels(levels).sampler(Texture.Sampler.SAMPLER_2D)
                 .format(Texture.InternalFormat.RGBA8).build(engine)
             var s = d.size
@@ -138,11 +164,11 @@ internal object WorldGpu {
             return d.slice().order(ByteOrder.nativeOrder())
         }
         if (level == 0) {
-            tex.setImage(engine, 0, 0, 0, z, size, size, 1, Texture.PixelBufferDescriptor(region(offset, rowBytes * size), Texture.Format.RGBA, type))
+            tex.setImage(engine, 0, 0, 0, z, size, size, 1, owned(region(offset, rowBytes * size), type))
             return
         }
         for (y in 0 until size) {
-            tex.setImage(engine, level, 0, y, z, size, 1, 1, Texture.PixelBufferDescriptor(region(offset + y * rowBytes, rowBytes), Texture.Format.RGBA, type))
+            tex.setImage(engine, level, 0, y, z, size, 1, 1, owned(region(offset + y * rowBytes, rowBytes), type))
         }
     }
 
