@@ -21,6 +21,8 @@ Implementação feita do zero a partir do documento consolidado "PROJETO GIRASSO
 
 ## Novidades da v3.6.0.00 (Adão e Eva)
 
+ > Auditoria de implementação e pendências das especificações GEA/v2.5: [`docs/IMPLEMENTATION_CROSSWALK_2026-11-21.md`](docs/IMPLEMENTATION_CROSSWALK_2026-11-21.md). O documento diferencia módulos ativos, parciais e propostas ainda não ligadas ao runtime.
+
 - Mundo começa com 0 cidadãos. Cada `.gguf` importado (F16, BF16, Q8_0, Q5_K, Q4_K_M, Q4_0…) cria exatamente
   um fundador g0 com nome e sexo escolhidos (`WorldCore.spawnFounder`, `SimulationHub.importFounder`). Nenhum
   modelo é embutido no APK; os modelos ficam no armazenamento privado e na tabela `registered_models`
@@ -35,6 +37,7 @@ Implementação feita do zero a partir do documento consolidado "PROJETO GIRASSO
 - Evolução: gráficos Canvas (Anokhin/Brier/CMA-ES com marcadores de promoção/LoRA, árvore g0→g1→g2 com nó do
   próximo nascimento, comuns/PSI/Gini/população), mérito individual e seções recolhíveis.
 - RAM: pesos em mmap não contam como heap; admissão por RAM ativa estimada (LFM2.5-230M-F16, 350M F16 e Q5_K
+- Dados: nova aba analítica com métricas e séries históricas do `DashboardSnapshot` real (população, comuns, PSI/Gini, cognição e estado coletivo), gráficos Canvas leves e filtros de 7/30 dias ou histórico completo; sem números de demonstração.
   aceitos em 3631 MB). Perfis 4/8/12 GB mudam `n_ctx` e o tipo de KV; um contexto residente por vez.
 - Anti-clarão Mali: ver `docs/RENDER_CALIBRATION.md`. Balões: no máximo 2, sem sobreposição, com fade-out.
 
