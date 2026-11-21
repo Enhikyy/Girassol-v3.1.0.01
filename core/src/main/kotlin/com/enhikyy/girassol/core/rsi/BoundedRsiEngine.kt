@@ -116,7 +116,7 @@ class BoundedRsiPromotionGate(
             invariantsViolated >= 0
 
     fun computeBrierScore(forecastOutcomePairs: List<Pair<Double, Boolean>>): Double {
-        if (forecastOutcomePairs.isEmpty()) return 0.0
+        if (forecastOutcomePairs.isEmpty()) return Double.NaN
         var sumSq = 0.0
         for ((prob, outcome) in forecastOutcomePairs) {
             val p = prob.coerceIn(0.0, 1.0)
