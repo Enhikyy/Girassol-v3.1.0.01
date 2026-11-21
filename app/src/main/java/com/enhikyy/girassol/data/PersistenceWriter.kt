@@ -164,6 +164,8 @@ class PersistenceWriter(private val context: Context) {
     fun ftsModule(): String = runCatching { EpisodicFts.module(db.writableDatabase) }.getOrDefault("-")
 
     fun countRows(table: String): Long = runCatching {
+        // O identificador vem do painel de diagnóstico; não interpolar nomes arbitrários em SQL.
+        require(table.matches(Regex("[A-Za-z_][A-Za-z0-9_]*"))) { "nome de tabela inválido: $table" }
         db.readableDatabase.rawQuery("SELECT COUNT(*) FROM $table", null).use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
     }.getOrDefault(0L)
 
@@ -189,7 +191,9 @@ class PersistenceWriter(private val context: Context) {
     fun flushBlocking() {
         val latch = java.util.concurrent.CountDownLatch(1)
         executor.execute { latch.countDown() }
-        latch.await(5, java.util.concurrent.TimeUnit.SECONDS)
+        if (!latch.await(5, java.util.concurrent.TimeUnit.SECONDS)) {
+            Log.w(TAG, "flushBlocking: escritor não drenou a fila em 5 s")
+        }
     }
 
     companion object {

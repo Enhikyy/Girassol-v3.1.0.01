@@ -62,25 +62,40 @@ object PocketTtsVoice {
         if (b.size < 44 || String(b, 0, 4) != "RIFF" || String(b, 8, 4) != "WAVE") return null
         val bb = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN)
         var p = 12; var ch = 1; var rate = 16000; var bits = 16; var fmt = 1
-        while (p + 8 <= b.size) {
-            val id = String(b, p, 4); val len = bb.getInt(p + 4)
-            if (id == "fmt ") { fmt = bb.getShort(p + 8).toInt(); ch = bb.getShort(p + 10).toInt(); rate = bb.getInt(p + 12); bits = bb.getShort(p + 22).toInt() }
+        var formatSeen = false
+        while (p.toLong() + 8L <= b.size.toLong()) {
+            val id = String(b, p, 4)
+            val len = bb.getInt(p + 4)
+            // Nunca use o tamanho declarado sem validar o limite do arquivo (evita overflow e OOB).
+            if (len < 0 || p.toLong() + 8L + len.toLong() > b.size.toLong()) return null
+            if (id == "fmt ") {
+                if (len < 16) return null
+                fmt = bb.getShort(p + 8).toInt()
+                ch = bb.getShort(p + 10).toInt()
+                rate = bb.getInt(p + 12)
+                bits = bb.getShort(p + 22).toInt()
+                // Este parser suporta exatamente PCM16 e IEEE float32 (mono ou multicanal).
+                if (ch !in 1..8 || rate !in 1..192_000 ||
+                    !((fmt == 1 && bits == 16) || (fmt == 3 && bits == 32))) return null
+                formatSeen = true
+            }
             if (id == "data") {
-                val end = minOf(b.size, p + 8 + len)
+                if (!formatSeen) return null
                 val frame = ch * bits / 8
-                val n = (end - p - 8) / frame
+                if (frame <= 0 || len % frame != 0) return null
+                val n = len / frame
                 val out = FloatArray(n)
                 for (i in 0 until n) {
                     var s = 0f
                     for (c in 0 until ch) {
                         val o = p + 8 + i * frame + c * bits / 8
-                        s += if (fmt == 3 && bits == 32) bb.getFloat(o) else bb.getShort(o) / 32768f
+                        s += if (fmt == 3) bb.getFloat(o) else bb.getShort(o) / 32768f
                     }
                     out[i] = s / ch
                 }
                 return out to rate
             }
-            p += 8 + len + (len and 1)
+            p = (p.toLong() + 8L + len.toLong() + (len and 1).toLong()).toInt()
         }
         return null
     }

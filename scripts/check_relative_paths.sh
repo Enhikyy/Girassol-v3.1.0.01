@@ -5,8 +5,14 @@
 # Uso: scripts/check_relative_paths.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# A ausência dos arquivos Gradle é válida em exportações CAP/CodeAssist.
+# Não deixe o status 2 de um glob sem correspondência abortar o script sob set -e.
 files=$(ls settings.gradle.kts build.gradle.kts app/build.gradle.kts core/build.gradle.kts \
-        pack_*/build.gradle.kts app/src/main/cpp/CMakeLists.txt native-tests/CMakeLists.txt gradle.properties 2>/dev/null)
+        pack_*/build.gradle.kts app/src/main/cpp/CMakeLists.txt native-tests/CMakeLists.txt gradle.properties 2>/dev/null || true)
+if [ -z "$files" ]; then
+  echo "ok: nenhum script Gradle presente (projeto CAP)"
+  exit 0
+fi
 pattern='(^|[^A-Za-z0-9_$.{])(/home/|/Users/|/root/|/opt/|/tmp/|/mnt/|/sdcard/|/storage/emulated|[A-Za-z]:[\\/](Users|Program|Android|dev|src))'
 fail=0
 for f in $files; do

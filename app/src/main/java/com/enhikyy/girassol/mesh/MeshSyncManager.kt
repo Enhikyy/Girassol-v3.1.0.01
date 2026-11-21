@@ -77,7 +77,9 @@ object MeshSyncManager {
     private var regListener: NsdManager.RegistrationListener? = null
     private var discListener: NsdManager.DiscoveryListener? = null
     private val main = Handler(Looper.getMainLooper())
-    private val lockTimeout = Runnable { log("WifiLock expirou (${LOCK_TIMEOUT_MS / 60000} min): malha encerrada"); stop() }
+    private val lockTimeout = object : Runnable {
+        override fun run() { log("WifiLock expirou (${LOCK_TIMEOUT_MS / 60000} min): malha encerrada"); stop() }
+    }
 
     private fun log(msg: String) {
         Log.i(TAG, msg)
@@ -140,29 +142,40 @@ object MeshSyncManager {
     }
 
     private suspend fun beaconLoop(id: String, port: Int) {
-        val sock = DatagramSocket(null).apply { reuseAddress = true; broadcast = true; bind(InetSocketAddress(MeshSyncProtocol.BEACON_PORT)) }
+        val sock = runCatching {
+            DatagramSocket(null).apply { reuseAddress = true; broadcast = true; bind(InetSocketAddress(MeshSyncProtocol.BEACON_PORT)) }
+        }.getOrElse {
+            log("beacon UDP indisponível (${it.message}); seguindo só com NSD")
+            return
+        }
         udp = sock
-        sock.soTimeout = BEACON_EVERY_MS.toInt()
-        val payload = MeshSyncProtocol.beacon(id, port, deviceName())
-        val bcast = InetAddress.getByName("255.255.255.255")
-        val buf = ByteArray(512)
-        var last = 0L
-        while (currentCoroutineContextActive()) {
-            val now = System.currentTimeMillis()
-            if (now - last >= BEACON_EVERY_MS) {
-                runCatching { sock.send(DatagramPacket(payload, payload.size, bcast, MeshSyncProtocol.BEACON_PORT)) }
-                last = now
+        try {
+            sock.soTimeout = BEACON_EVERY_MS.toInt()
+            val payload = MeshSyncProtocol.beacon(id, port, deviceName())
+            val bcast = InetAddress.getByName("255.255.255.255")
+            val buf = ByteArray(512)
+            var last = 0L
+            while (currentCoroutineContextActive()) {
+                val now = System.currentTimeMillis()
+                if (now - last >= BEACON_EVERY_MS) {
+                    runCatching { sock.send(DatagramPacket(payload, payload.size, bcast, MeshSyncProtocol.BEACON_PORT)) }
+                    last = now
+                }
+                val pk = DatagramPacket(buf, buf.size)
+                val got = runCatching { sock.receive(pk); true }.getOrDefault(false)
+                if (!got) { if (sock.isClosed) return; continue }
+                MeshSyncProtocol.parseBeacon(pk.data, pk.length)?.let { (pid, pport, pname) ->
+                    addPeer(MeshPeer(pid, pname, pk.address.hostAddress ?: return@let, pport, "udp", System.currentTimeMillis()))
+                }
             }
-            val pk = DatagramPacket(buf, buf.size)
-            val got = runCatching { sock.receive(pk); true }.getOrDefault(false)
-            if (!got) { if (sock.isClosed) return; continue }
-            MeshSyncProtocol.parseBeacon(pk.data, pk.length)?.let { (pid, pport, pname) ->
-                addPeer(MeshPeer(pid, pname, pk.address.hostAddress ?: return@let, pport, "udp", System.currentTimeMillis()))
-            }
+        } finally {
+            if (udp === sock) udp = null
+            sock.close()
         }
     }
 
-    private fun currentCoroutineContextActive() = udp?.isClosed == false
+    // O estado de execução encerra o laço sem depender do timeout do receive() no socket.
+    private fun currentCoroutineContextActive() = _state.value.running
 
     @Suppress("DEPRECATION")
     private fun registerNsd(context: Context, id: String, port: Int) {
