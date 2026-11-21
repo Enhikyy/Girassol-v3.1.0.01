@@ -28,6 +28,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AutoGraph
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.Memory
+import androidx.compose.material.icons.outlined.QueryStats
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material3.DrawerValue
@@ -62,6 +63,7 @@ import com.enhikyy.girassol.ui.components.Shapes
 import com.enhikyy.girassol.ui.screens.ChatScreen
 import com.enhikyy.girassol.ui.screens.CitizenDetailView
 import com.enhikyy.girassol.ui.screens.EvolutionScreen
+import com.enhikyy.girassol.ui.screens.DataScreen
 import com.enhikyy.girassol.ui.screens.KnowledgeLibraryPanel
 import com.enhikyy.girassol.ui.screens.MeshSyncPanel
 import com.enhikyy.girassol.ui.screens.SystemScreen
@@ -71,12 +73,13 @@ import com.enhikyy.girassol.ui.theme.GirassolTheme
 import com.enhikyy.girassol.ui.theme.Lumon
 import kotlinx.coroutines.launch
 
-/** v3.6: quatro abas, Chat como principal. */
+/** v3.6+: cinco abas, Chat como principal e Dados como painel analítico. */
 internal enum class Tab(val label: String, val icon: ImageVector) {
     CHAT("Chat", Icons.AutoMirrored.Outlined.Chat),
     BIOSFERA("Biosfera", Icons.Outlined.Public),
     EVOLUCAO("Evolução", Icons.Outlined.AutoGraph),
-    SISTEMA("Sistema", Icons.Outlined.Memory)
+    SISTEMA("Sistema", Icons.Outlined.Memory),
+    DADOS("Dados", Icons.Outlined.QueryStats)
 }
 
 class MainActivity : ComponentActivity() {
@@ -133,6 +136,7 @@ private fun GirassolApp() {
                             Tab.CHAT -> ChatScreen(onOpenCitizen = { selectedCitizen = it })
                             Tab.EVOLUCAO -> EvolutionScreen(onOpenCitizen = { selectedCitizen = it })
                             Tab.SISTEMA -> SystemScreen()
+                            Tab.DADOS -> DataScreen()
                             Tab.BIOSFERA -> Unit
                         }
                     }
