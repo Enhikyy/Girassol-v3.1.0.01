@@ -17,7 +17,11 @@ class TypographyStudioTest {
         assertEquals(0xFF000000L, kodak.background)
         assertEquals(0xE6140C08L, kodak.surface)
         assertEquals(0xFFF3E2C8L, kodak.text)
-        NativeThemes.ALL.forEach { palette -> ThemeController.select(context, palette); assertEquals(palette.key, ThemeController.palette.key) }
+        NativeThemes.ALL.forEach { palette ->
+            ThemeController.select(context, palette)
+            ThemeController.load(context)
+            assertEquals(palette.key, ThemeController.palette.key)
+        }
     }
     @Test fun typographyPreferencesPersistQuantizedValues() {
         TypographyStudioController.applyPreset(context, "reading")
@@ -27,6 +31,10 @@ class TypographyStudioTest {
         assertEquals(650, TypographyStudioController.preferences.weight)
         assertEquals(0.3f, TypographyStudioController.preferences.tracking, 0.001f)
         assertEquals(1.45f, TypographyStudioController.preferences.lineHeight, 0.001f)
+        TypographyStudioController.saveCustomPreset(context)
+        TypographyStudioController.load(context)
+        assertEquals("custom", TypographyStudioController.preferences.preset)
+        assertTrue(TypographyStudioController.presets.any { it.key == "custom" })
     }
     @Test fun variationCacheIsBounded() {
         repeat(300) { TypographyFontCache.settings(300f + it, 75f + it % 70) }

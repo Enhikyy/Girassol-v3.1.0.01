@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -29,6 +30,7 @@ class TypographyStudioComposeTest {
         compose.onNodeWithText("Typography Studio").assertIsDisplayed()
         listOf("typography_scale","typography_weight","typography_tracking","typography_line_height").forEach { compose.onNodeWithTag(it).assertIsDisplayed() }
         compose.onNodeWithTag("typography_preset_kodak").performClick()
+        compose.onNodeWithTag("typography_save_preset").assertIsDisplayed()
     }
     @Test fun liquidGlassComposesAcrossAllHardwareTiers() {
         var tier by mutableStateOf(GlassTier.LOW)
