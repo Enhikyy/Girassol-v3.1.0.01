@@ -154,10 +154,22 @@ class FourLayerMemoryAndSleepEngine(
     private val maxNodesPerAgent: Int = 512,
     private val replayBatchSize: Int = 12
 ) {
+    /**
+     * Buffer legado para chamadas antigas sem owner explícito. O motor do mundo deve sempre
+     * passar o buffer do cidadão; este fallback existe apenas para compatibilidade de API.
+     */
+    private val legacyWorkingMemoryIds = mutableListOf<Long>()
+
     /** O chamador possui o buffer; ele pertence ao cidadão e é serializado no WorldState. */
     fun activeWorkingIds(workingMemoryIds: List<Long>): Set<Long> = workingMemoryIds.toSet()
 
     fun workingMemorySize(workingMemoryIds: List<Long>): Int = workingMemoryIds.size
+
+    @Deprecated("Passe o buffer individual do cidadão para workingMemorySize(ids)")
+    fun workingMemorySize(): Int = legacyWorkingMemoryIds.size
+
+    @Deprecated("Passe o buffer individual do cidadão e limpe a lista do cidadão")
+    fun clearWorkingMemory() = legacyWorkingMemoryIds.clear()
 
     /**
      * Recuperação em 2 estágios (ver [EpisodicIndex]): Hamming bit[256] seleciona os
@@ -173,7 +185,7 @@ class FourLayerMemoryAndSleepEngine(
         queryEntities: Set<String>,
         topK: Int = 6,
         workingCapacity: Int = workingMemoryCapacity,
-        workingMemoryIds: MutableList<Long> = mutableListOf()
+        workingMemoryIds: MutableList<Long> = legacyWorkingMemoryIds
     ): RetrievalResult {
         if (nodes.isEmpty()) {
             workingMemoryIds.clear()
@@ -226,7 +238,7 @@ class FourLayerMemoryAndSleepEngine(
         queryTags: Set<String>,
         queryEntities: Set<String>,
         topK: Int = 6,
-        workingMemoryIds: MutableList<Long> = mutableListOf()
+        workingMemoryIds: MutableList<Long> = legacyWorkingMemoryIds
     ): List<AssociativeMemoryNode> = retrieveTwoStage(
         nodes, currentTick, queryTags.joinToString(" "), queryTags, queryEntities,
         topK = topK, workingMemoryIds = workingMemoryIds
