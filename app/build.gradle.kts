@@ -243,7 +243,7 @@ val downloadPocketTts = downloadTask("PocketTts", pocketTts)
 
 /** Monta a árvore de assets de modelos (models/ + sherpa/) com manifesto JSON verificável. */
 abstract class AssembleModelAssets : DefaultTask() {
-    @get:InputFiles abstract val inputs: ConfigurableFileCollection
+    @get:InputFiles abstract val sourceArchives: ConfigurableFileCollection
     @get:Input abstract val fastName: Property<String>
     @get:Input abstract val fastSha: Property<String>
     @get:Input abstract val includeFast: Property<Boolean>
@@ -256,7 +256,7 @@ abstract class AssembleModelAssets : DefaultTask() {
     fun run() {
         val out = outputDir.get().asFile
         out.deleteRecursively(); out.mkdirs()
-        val files = inputs.files.associateBy { it.name }
+        val files = sourceArchives.files.associateBy { it.name }
         if (includeFast.get()) {
             val m = File(out, "models").apply { mkdirs() }
             files.getValue(fastName.get()).copyTo(File(m, fastName.get()))
@@ -287,7 +287,7 @@ abstract class SplitDeepModel : DefaultTask() {
     @get:Input abstract val modelName: Property<String>
     @get:Input abstract val sha: Property<String>
     @get:Input abstract val packDirs: ListProperty<String>
-    @get:OutputDirectories abstract val outputs: ConfigurableFileCollection
+    @get:OutputDirectories abstract val partDirs: ConfigurableFileCollection
 
     @TaskAction
     fun run() {
@@ -318,7 +318,7 @@ val packProfundoDirs = listOf("pack_profundo_a", "pack_profundo_b").map { rootPr
 
 val assembleModelAssets by tasks.registering(AssembleModelAssets::class) {
     enabled = embedModels
-    inputs.from(downloadFastModel.flatMap { it.dest }, downloadSenseVoice.flatMap { it.dest }, downloadPocketTts.flatMap { it.dest })
+    sourceArchives.from(downloadFastModel.flatMap { it.dest }, downloadSenseVoice.flatMap { it.dest }, downloadPocketTts.flatMap { it.dest })
     fastName.set(fastModel.name); fastSha.set(fastModel.sha256)
     includeFast.set(true); includeSherpa.set(true)
     outputDir.set(if (distribution == "play") rootProject.layout.projectDirectory.dir("pack_rapido/src/main/assets")
@@ -329,7 +329,7 @@ val splitDeepModel by tasks.registering(SplitDeepModel::class) {
     model.set(downloadDeepModel.flatMap { it.dest })
     modelName.set(deepModel.name); sha.set(deepModel.sha256)
     packDirs.set(packProfundoDirs)
-    outputs.from(packProfundoDirs.map { File(it, "models") })
+    partDirs.from(packProfundoDirs.map { File(it, "models") })
 }
 val prepareAssetPacks by tasks.registering {
     enabled = embedModels && distribution == "play"
