@@ -87,7 +87,16 @@ data class ShadowReplayMetrics(
     val behavioralDiversityScore: Double,
     val llmCallsPer100Ticks: Double,
     val invariantsViolated: Int
-)
+) {
+    /** Métricas fora do domínio ou não finitas não podem ser usadas como evidência de promoção. */
+    fun hasValidMeasurements(): Boolean =
+        meanFreeEnergy.isFinite() &&
+            survivalEfficiency.isFinite() &&
+            brierScore.isFinite() && brierScore in 0.0..1.0 &&
+            behavioralDiversityScore.isFinite() && behavioralDiversityScore in 0.0..1.0 &&
+            llmCallsPer100Ticks.isFinite() && llmCallsPer100Ticks >= 0.0 &&
+            invariantsViolated >= 0
+}
 
 @kotlinx.serialization.Serializable
 data class RsiPromotionDecision(
@@ -103,18 +112,6 @@ class BoundedRsiPromotionGate(
     private val maxBrierDegradation: Double = 0.010,
     private val minDiversityFloor: Double = 0.35
 ) {
-    /**
-     * Falha fechada: NaN/Infinity ou métricas fora do domínio tornam a avaliação inválida.
-     * Um candidato não pode ganhar por overflow, divisão por zero ou ausência de evidência.
-     */
-    private fun ShadowReplayMetrics.isValidForPromotion(): Boolean =
-        meanFreeEnergy.isFinite() &&
-            survivalEfficiency.isFinite() &&
-            brierScore.isFinite() && brierScore in 0.0..1.0 &&
-            behavioralDiversityScore.isFinite() && behavioralDiversityScore in 0.0..1.0 &&
-            llmCallsPer100Ticks.isFinite() && llmCallsPer100Ticks >= 0.0 &&
-            invariantsViolated >= 0
-
     fun computeBrierScore(forecastOutcomePairs: List<Pair<Double, Boolean>>): Double {
         if (forecastOutcomePairs.isEmpty()) return Double.NaN
         var sumSq = 0.0
@@ -136,7 +133,7 @@ class BoundedRsiPromotionGate(
         val baseHash = baseline.sha256Signature()
         val candHash = candidate.sha256Signature()
 
-        if (!baseMetrics.isValidForPromotion() || !candMetrics.isValidForPromotion()) {
+        if (!baseMetrics.hasValidMeasurements() || !candMetrics.hasValidMeasurements()) {
             return RsiPromotionDecision(
                 promoted = false,
                 reason = "REJEITADO: Métricas de Shadow-Replay ausentes, não finitas ou fora do domínio.",
