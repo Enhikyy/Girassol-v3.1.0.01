@@ -22,7 +22,7 @@ class FourLayerMemoryTest {
         salience = 0.8,
         confidence = 0.9,
         sourceEventId = id,
-        sourceAgentId = "C1",
+        sourceAgentId = ownerId,
         createdTick = id * 10,
         qUtility = 0.8,
         verifiedByWorldCore = true
@@ -44,12 +44,17 @@ class FourLayerMemoryTest {
         assertTrue(report.promotedSemanticSummaries.any { it.contains("horta") })
         assertFalse(report.distilledProceduralMacros.isEmpty())
         assertTrue(report.replayedNodeIds.isNotEmpty())
+        val schema = report.semanticRelations.single { it.topicTag == "horta" }
+        assertEquals(setOf(1L, 2L, 3L), schema.sourceEpisodeIds)
+        assertEquals(setOf("HORTA_1"), schema.entityIds)
+        assertTrue(report.proceduralRelations.all { it.sourceEpisodeId in memories.map { node -> node.id } })
     }
 
     @Test
     fun semanticAndProceduralMemoryNodesSurviveWorldSnapshotRoundTrip() {
         val core = WorldCore.create(seed = 42L, initialPopulation = 1)
         val citizen = core.state.citizens.single()
+        citizen.memories += episode(3L, "Episódio fonte: irrigação verificada.", citizen.id)
         citizen.memories += AssociativeMemoryNode(
             id = 1L,
             ownerAgentId = citizen.id,
@@ -57,6 +62,7 @@ class FourLayerMemoryTest {
             content = "SCHEMA[horta]: episódios verificados indicam cuidado diário.",
             tags = setOf("SCHEMA", "horta"),
             entityIds = setOf("HORTA_1"),
+            linkedMemoryIds = linkedSetOf(3L),
             salience = 0.7,
             confidence = 0.9,
             sourceEventId = null,
@@ -72,6 +78,7 @@ class FourLayerMemoryTest {
             content = "SKILL_MACRO: irrigar antes da colheita.",
             tags = setOf("MACRO", "cultivo"),
             entityIds = setOf("HORTA_1"),
+            linkedMemoryIds = linkedSetOf(3L),
             salience = 0.8,
             confidence = 0.95,
             sourceEventId = null,
@@ -80,7 +87,7 @@ class FourLayerMemoryTest {
             verifiedByWorldCore = true,
             qUtility = 0.6
         )
-        citizen.nextMemoryId = 3L
+        citizen.nextMemoryId = 4L
 
         val restored = WorldSnapshotCodec.decode(WorldSnapshotCodec.encode(core.state))
         val restoredMemories = restored.citizens.single { it.id == citizen.id }.memories
@@ -89,8 +96,11 @@ class FourLayerMemoryTest {
             setOf(MemoryLayer.SEMANTIC, MemoryLayer.PROCEDURAL),
             restoredMemories.map { it.layer }.toSet()
         )
-        assertEquals(2, restoredMemories.size)
-        assertEquals(3L, restored.citizens.single { it.id == citizen.id }.nextMemoryId)
+        assertEquals(3, restoredMemories.size)
+        assertEquals(setOf(3L), restoredMemories.single { it.layer == MemoryLayer.SEMANTIC }.linkedMemoryIds)
+        assertEquals(setOf(3L), restoredMemories.single { it.layer == MemoryLayer.PROCEDURAL }.linkedMemoryIds)
+        assertEquals(setOf("HORTA_1"), restoredMemories.single { it.layer == MemoryLayer.SEMANTIC }.entityIds)
+        assertEquals(4L, restored.citizens.single { it.id == citizen.id }.nextMemoryId)
         assertTrue(restoredMemories.all { it.verifiedByWorldCore })
     }
 
