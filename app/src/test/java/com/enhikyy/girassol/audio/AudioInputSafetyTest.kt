@@ -52,7 +52,7 @@ class AudioInputSafetyTest {
         assertNull(PocketTtsVoice.readWav(truncated))
 
         val noChannels = pcm16Wav()
-        ByteBuffer.wrap(noChannels).order(ByteOrder.LITTLE_ENDIAN).putShort(22, 0)
+        ByteBuffer.wrap(noChannels).order(ByteOrder.LITTLE_ENDIAN).putShort(22, 0.toShort())
         assertNull(PocketTtsVoice.readWav(noChannels))
     }
 
