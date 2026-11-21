@@ -34,13 +34,15 @@ Implementação feita do zero a partir do documento consolidado "PROJETO GIRASSO
 - Chat (aba principal): pílulas para conversar com cada cidadão ou com o canal aberto; cada cidadão responde com o
   seu `.gguf` (gramática restrita) ou, sem modelo, pelo deliberador simbólico baseado no estado real. Mensagens
   persistidas em `chat_messages` (SQLite WAL), no `.grs` (`WorldState.chat`) e na cadeia de eventos; voz TTS pt-BR.
-- Evolução: gráficos Canvas (Anokhin/Brier/CMA-ES com marcadores de promoção/LoRA, árvore g0→g1→g2 com nó do próximo nascimento, comuns/PSI/Gini/população), mérito individual e seções recolhíveis.
-- RAM: pesos em mmap não contam como heap; admissão por RAM ativa estimada (LFM2.5-230M-F16, 350M F16 e Q5_K aceitos em 3631 MB). Perfis 4/8/12 GB mudam `n_ctx` e o tipo de KV; um contexto residente por vez.
+- Evolução: gráficos Canvas (Anokhin/Brier/CMA-ES com marcadores de promoção/LoRA, árvore g0→g1→g2 com nó do
+  próximo nascimento, comuns/PSI/Gini/população), mérito individual e seções recolhíveis.
+- RAM: pesos em mmap não contam como heap; admissão por RAM ativa estimada (LFM2.5-230M-F16, 350M F16 e Q5_K
+  aceitos em 3631 MB). Perfis 4/8/12 GB mudam `n_ctx` e o tipo de KV; um contexto residente por vez.
 - Dados: nova aba analítica com métricas e séries históricas do `DashboardSnapshot` real (população, comuns, PSI/Gini, cognição e estado coletivo), gráficos Canvas leves e filtros de 7/30 dias ou histórico completo; sem números de demonstração.
-- Memória de trabalho: buffer ordenado de 5–9 referências por cidadão, persistido no snapshot do mundo; recuperação Hamming/RRF/BM25 mantém o contexto de trabalho individual entre decisões e reinicializações.
-- Consolidação semântica/procedural: nós `SCHEMA` e `SKILL_MACRO` preservam ligações aos episódios verificados e às entidades de origem (`linkedMemoryIds` / `entityIds`), com migração progressiva de nós legados durante o sono.
+- Memória de trabalho: buffer ordenado de 5–9 referências por cidadão, persistido no snapshot do mundo; recuperação Hamming/RRF/BM25 mantém o contexto individual entre decisões e reinicializações.
+- Consolidação semântica/procedural: nós `SCHEMA` e `SKILL_MACRO` preservam ligações aos episódios verificados e às entidades de origem (`linkedMemoryIds` / `entityIds`), com migração progressiva durante o sono.
 - Economia emergente: escambo de alimento usa preço subjetivo derivado de necessidade, estoque, escassez e histórico do ledger; liquidação alimento/crédito é atômica e preserva a soma zero.
-- Migração de regras: snapshots antigos preservam eventos/hash-chain; ao abrir o mundo, o marcador de regras sobe para v13 e novos eventos registram a versão atual.
+- Migração de regras: snapshots antigos preservam eventos/hash-chain; ao abrir o mundo, o marcador de regras é atualizado sem reescrever o histórico.
 - Anti-clarão Mali: ver `docs/RENDER_CALIBRATION.md`. Balões: no máximo 2, sem sobreposição, com fade-out.
 
 ## Novidades da v3.5.0.00
