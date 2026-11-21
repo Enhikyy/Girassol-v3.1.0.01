@@ -152,4 +152,34 @@ class MeshSyncRoundTripTest {
         repeat(240) { dest.step() }
         assertTrue(dest.state.citizen(admitted.id)!!.lexicon.observedWords >= emigrantBefore.lexicon.observedWords)
     }
+
+    @Test
+    fun rejectsOversizedManifestBeforeAllocatingSnapshotBuffer() {
+        val manifest = MeshSyncProtocol.Manifest(
+            worldSeed = 1L,
+            tick = 0L,
+            totalBytes = MeshSyncProtocol.MAX_FRAME + 1,
+            sha256 = "0".repeat(64),
+            chunks = emptyList()
+        )
+        val failure = runCatching {
+            MeshSyncProtocol.assemble(manifest, null, MeshSyncProtocol.Blocks(emptyList(), byteArrayOf()))
+        }.exceptionOrNull()
+        assertTrue("manifesto acima de MAX_FRAME deve ser rejeitado", failure is MeshSyncProtocol.MeshSyncException)
+    }
+
+    @Test
+    fun rejectsManifestWithDiscontinuousChunkOffsets() {
+        val manifest = MeshSyncProtocol.Manifest(
+            worldSeed = 1L,
+            tick = 0L,
+            totalBytes = 2,
+            sha256 = "0".repeat(64),
+            chunks = listOf(MeshSyncProtocol.ChunkRef("1".repeat(64), 1, 1))
+        )
+        val failure = runCatching {
+            MeshSyncProtocol.assemble(manifest, null, MeshSyncProtocol.Blocks(emptyList(), byteArrayOf()))
+        }.exceptionOrNull()
+        assertTrue("offsets descontínuos devem ser rejeitados", failure is MeshSyncProtocol.MeshSyncException)
+    }
 }
