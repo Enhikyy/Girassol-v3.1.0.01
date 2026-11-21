@@ -135,7 +135,7 @@ object AudioTranscriber {
                         }
                         codec.releaseOutputBuffer(o, false)
                         if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputDone = true
-                        if (mono.size > rate.toLong() * MAX_SECONDS) outputDone = true
+                        if (mono.size.toLong() > rate.toLong() * MAX_SECONDS) outputDone = true
                     }
                 }
             }
@@ -146,6 +146,7 @@ object AudioTranscriber {
     }
 
     fun resampleLinear(x: FloatArray, from: Int, to: Int): FloatArray {
+        require(from > 0 && to > 0) { "taxa de amostragem inválida: $from -> $to" }
         if (from == to || x.isEmpty()) return x
         val n = (x.size.toLong() * to / from).toInt()
         val out = FloatArray(n)
