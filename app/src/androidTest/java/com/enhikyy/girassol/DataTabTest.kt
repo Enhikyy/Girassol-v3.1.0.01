@@ -27,6 +27,6 @@ class DataTabTest {
         rule.waitUntilAtLeastOneExists(hasTestTag("tab_DADOS"), 60_000)
         rule.onNodeWithTag("tab_DADOS").performClick()
         rule.waitUntilAtLeastOneExists(hasTestTag("data_dashboard"), 10_000)
-        rule.onNodeWithTag("data_dashboard").assertExists()
+        rule.onNodeWithTag("data_dashboard").assertExists()\n        rule.onNodeWithTag("data_period_30").assertExists()
     }
 }
