@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from hashlib import sha256
 import json
 import math
@@ -99,7 +99,7 @@ def improvement_step(
     dev_eval: Callable[[Any], float],
     heldout_eval: Callable[[Any], float],
     monitor: Callable[[Any], float],
-    blind_judge: Callable[[Any, Any], bool],
+    blind_judge: Callable[[Any, Any], str],
     human_approve: Callable[[dict[str, Any]], bool],
     log: list[dict[str, Any]],
     config: GateConfig = GateConfig(),
@@ -145,22 +145,27 @@ def improvement_step(
         elif dev_gain - heldout_gain > config.max_dev_heldout_gap:
             decision["reason"] = "dev_heldout_gap"
         else:
-            blind_verdict = blind_judge(deepcopy(parent), deepcopy(child))
-            if not isinstance(blind_verdict, bool):
+            # Remove os rótulos e sorteia a ordem A/B para o juiz não saber qual é o candidato novo.
+            candidate_first = archive._rng.random() < 0.5
+            left, right = (child, parent) if candidate_first else (parent, child)
+            blind_verdict = blind_judge(deepcopy(left), deepcopy(right))
+            if blind_verdict not in ("A", "B", "tie"):
                 decision["reason"] = "invalid_blind_judge_result"
-            elif not blind_verdict:
-                decision["reason"] = "blind_judge_rejected"
             else:
-                approval = human_approve(dict(decision))
-                if not isinstance(approval, bool):
-                    decision["reason"] = "invalid_human_approval"
-                elif not approval:
-                    decision["reason"] = "human_rejected"
+                candidate_won = (blind_verdict == "A" and candidate_first) or (
+                    blind_verdict == "B" and not candidate_first
+                )
+                if not candidate_won:
+                    decision["reason"] = "blind_judge_rejected"
                 else:
-                    child_id = archive.add_child(parent_id, child)
-                    decision.update(accepted=True, child=child_id, reason="accepted")
-        if decision["accepted"]:
-            pass
+                    approval = human_approve(dict(decision))
+                    if not isinstance(approval, bool):
+                        decision["reason"] = "invalid_human_approval"
+                    elif not approval:
+                        decision["reason"] = "human_rejected"
+                    else:
+                        child_id = archive.add_child(parent_id, child)
+                        decision.update(accepted=True, child=child_id, reason="accepted")
     except Exception as exc:  # fail closed; do not archive a candidate on evaluator errors
         decision["reason"] = "evaluation_error"
         decision["error_type"] = type(exc).__name__
