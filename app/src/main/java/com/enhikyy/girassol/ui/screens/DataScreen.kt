@@ -194,14 +194,14 @@ private fun TrendChart(
         valid.forEachIndexed { index, value ->
             val x = if (valid.size == 1) (left + right) / 2f
                 else left + (right - left) * index / (valid.size - 1).toFloat()
-            val normalized = ((value - min) / span).toFloat().coerceIn(0f, 1f)
+            val normalized = if (max - min <= 1e-9) 0.5f else ((value - min) / span).toFloat().coerceIn(0f, 1f)
             val y = bottom - normalized * (bottom - top)
             if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
         }
         drawPath(path, color, style = Stroke(width = 2.5.dp.toPx()))
         val last = valid.last()
         val lastX = if (valid.size == 1) (left + right) / 2f else right
-        val lastY = bottom - (((last - min) / span).toFloat().coerceIn(0f, 1f)) * (bottom - top)
+        val lastY = bottom - (if (max - min <= 1e-9) 0.5f else ((last - min) / span).toFloat().coerceIn(0f, 1f)) * (bottom - top)
         drawCircle(color.copy(alpha = 0.18f), radius = 7.dp.toPx(), center = Offset(lastX, lastY))
         drawCircle(color, radius = 3.dp.toPx(), center = Offset(lastX, lastY))
     }
