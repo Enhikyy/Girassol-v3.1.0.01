@@ -337,6 +337,7 @@ int main() {
         girassol::tsetlin::PersistentTsetlinMachine restored(1, 1, 64, 2.2f, 3, 123ULL);
         CHECK(restored.deserializeBinary(snapshot), "Tsetlin GRST V2 restaura parâmetros e PRNG");
         CHECK(restored.serializeBinary() == snapshot, "Tsetlin roundtrip V2 preserva bytes");
+        const int32_t voteBeforeNextTrain = restored.predictVoteEarlyExit(features);
         source.trainStep(features, true);
         restored.trainStep(features, true);
         CHECK(restored.serializeBinary() == source.serializeBinary(), "Tsetlin roundtrip mantém continuidade do aprendizado");
@@ -350,7 +351,7 @@ int main() {
         legacy.insert(legacy.end(), snapshot.begin() + 36, snapshot.end());
         girassol::tsetlin::PersistentTsetlinMachine legacyReader(8, 10, 32, 3.5f, 5, 123ULL);
         CHECK(legacyReader.deserializeBinary(legacy), "Tsetlin ainda lê snapshots GRST V1");
-        CHECK(legacyReader.predictVoteEarlyExit(features) == source.predictVoteEarlyExit(features),
+        CHECK(legacyReader.predictVoteEarlyExit(features) == voteBeforeNextTrain,
               "Tsetlin V1 preserva inferência dos autômatos");
 
         auto corrupt = snapshot;
