@@ -145,6 +145,14 @@ class WorldCore(
     private val cfcNets = HashMap<String, CfcNeuromodulator>()
     private val violations = mutableListOf<String>()
 
+    init {
+        // Migra apenas o marcador de regras do snapshot. Eventos históricos e seus hashes
+        // permanecem intactos; novos eventos passam a declarar a versão 13.
+        if (state.rulesVersion < CURRENT_RULES_VERSION) {
+            state.rulesVersion = CURRENT_RULES_VERSION
+        }
+    }
+
     // ===================================================================== criação
 
     companion object {
