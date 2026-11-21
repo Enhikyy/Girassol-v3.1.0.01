@@ -35,7 +35,7 @@ class GuardedLoopTests(unittest.TestCase):
         self.assertEqual("accepted", result["reason"])
         self.assertEqual(2, len(self.archive.nodes))
         self.assertEqual(1, self.archive.nodes[0].succ)
-        self.assertEqual(1, self.archive.nodes[1].parent)
+        self.assertEqual(0, self.archive.nodes[1].parent)
         self.assertEqual(1, len(self.log))
 
     def test_dev_overfit_is_rejected_by_heldout_gap(self):
