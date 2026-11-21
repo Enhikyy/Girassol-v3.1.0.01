@@ -86,6 +86,45 @@ class StockFlowDoubleEntryLedger(
         return true
     }
 
+    /**
+     * Liquida uma troca bilateral em duas pernas de recursos distintas.
+     * Ambas são pré-validadas antes de qualquer mutação; assim não há alimento
+     * transferido sem a contrapartida em crédito (ou vice-versa).
+     */
+    fun exchange(
+        firstFrom: String,
+        firstTo: String,
+        firstResource: String,
+        firstQuantity: Double,
+        secondFrom: String,
+        secondTo: String,
+        secondResource: String,
+        secondQuantity: Double,
+        tick: Long,
+        eventHash: String
+    ): Boolean {
+        if (firstResource == secondResource || firstFrom == firstTo || secondFrom == secondTo) return false
+        fun toMicro(quantity: Double): Long? {
+            if (!quantity.isFinite() || quantity <= 0.0 || quantity * MICRO >= Long.MAX_VALUE.toDouble()) return null
+            return Math.round(quantity * MICRO).takeIf { it > 0L }
+        }
+        fun canTransfer(from: String, to: String, resource: String, amount: Long): Boolean {
+            val source = balancesMicro[from]?.get(resource) ?: 0L
+            val destination = balancesMicro[to]?.get(resource) ?: 0L
+            return source >= amount && destination <= Long.MAX_VALUE - amount
+        }
+        val first = toMicro(firstQuantity) ?: return false
+        val second = toMicro(secondQuantity) ?: return false
+        if (!canTransfer(firstFrom, firstTo, firstResource, first) ||
+            !canTransfer(secondFrom, secondTo, secondResource, second)) return false
+
+        // Como os recursos são diferentes, a primeira perna não altera o saldo
+        // usado pela segunda. As duas chamadas só podem falhar se o ledger estiver corrompido.
+        check(transfer(firstFrom, firstTo, firstResource, first / MICRO, tick, eventHash))
+        check(transfer(secondFrom, secondTo, secondResource, second / MICRO, tick, eventHash))
+        return true
+    }
+
     /** Remove o saldo inteiro de uma conta (ex.: herança) transferindo-o para outra conta. */
     fun transferAll(fromAccount: String, toAccount: String, tick: Long, eventHash: String) {
         val map = balancesMicro[fromAccount] ?: return
@@ -124,6 +163,103 @@ class StockFlowDoubleEntryLedger(
         const val CITY_GRID = "CITY_GRID"
         const val CENTRAL_BANK = "CENTRAL_BANK"
     }
+}
+
+/** Cotação subjetiva usada no escambo: valor marginal, escassez e preços de trocas anteriores. */
+data class SubjectiveMarketQuote(
+    val resourceType: String,
+    val currencyType: String,
+    val quantity: Double,
+    val referenceUnitPrice: Double,
+    val unitPrice: Double,
+    val totalPrice: Double,
+    val buyerUrgency: Double,
+    val sellerSurplus: Double,
+    val communalScarcity: Double
+)
+
+/**
+ * Livro de preços leve derivado do próprio diário de partidas dobradas.
+ * Não mantém uma segunda fonte de verdade: o histórico de preços é reconstituído
+ * de duas pernas do mesmo evento canônico (recurso vendido + moeda paga).
+ */
+object SubjectiveMarket {
+    private data class ObservedTrade(val tick: Long, val entryId: Long, val unitPrice: Double)
+
+    fun quote(
+        ledger: StockFlowDoubleEntryLedger,
+        resourceType: String,
+        currencyType: String,
+        quantity: Double,
+        buyerNeed: Double,
+        buyerInventory: Double,
+        sellerInventory: Double,
+        communalInventory: Double,
+        initialUnitPrice: Double = 1.5,
+        buyerTargetInventory: Double = 2.0,
+        sellerReserve: Double = 2.0,
+        communalTargetInventory: Double = 8.0
+    ): SubjectiveMarketQuote? {
+        val numericInputs = listOf(
+            quantity, buyerNeed, buyerInventory, sellerInventory, communalInventory,
+            initialUnitPrice, buyerTargetInventory, sellerReserve, communalTargetInventory
+        )
+        if (numericInputs.any { !it.isFinite() } ||
+            quantity <= 0.0 || initialUnitPrice <= 0.0 ||
+            buyerInventory < 0.0 || sellerInventory < 0.0 || communalInventory < 0.0 ||
+            buyerTargetInventory <= 0.0 || sellerReserve <= 0.0 || communalTargetInventory <= 0.0) return null
+
+        val observations = observedPrices(ledger, resourceType, currencyType).takeLast(12)
+        val reference = observations.fold(initialUnitPrice) { price, observed ->
+            price * 0.75 + observed.unitPrice * 0.25
+        }.coerceIn(initialUnitPrice * 0.25, initialUnitPrice * 4.0)
+
+        val hungerUrgency = (1.0 - buyerNeed.coerceIn(0.0, 1.0)).coerceIn(0.0, 1.0)
+        val inventoryShortage = ((buyerTargetInventory - buyerInventory) / buyerTargetInventory).coerceIn(0.0, 1.0)
+        val buyerUrgency = (0.7 * hungerUrgency + 0.3 * inventoryShortage).coerceIn(0.0, 1.0)
+        val sellerSurplus = ((sellerInventory - sellerReserve) / (sellerReserve * 2.0)).coerceIn(0.0, 1.0)
+        val communalScarcity = ((communalTargetInventory - communalInventory) / communalTargetInventory).coerceIn(0.0, 1.0)
+
+        val buyerBid = reference * (0.75 + 0.55 * buyerUrgency + 0.25 * inventoryShortage + 0.20 * communalScarcity)
+        val sellerAsk = reference * (1.25 - 0.45 * sellerSurplus)
+        val unit = (((buyerBid + sellerAsk) * 0.5).coerceIn(reference * 0.55, reference * 2.25) * 100.0)
+            .let { kotlin.math.round(it) / 100.0 }
+        val total = kotlin.math.round(unit * quantity * 100.0) / 100.0
+
+        return SubjectiveMarketQuote(
+            resourceType = resourceType,
+            currencyType = currencyType,
+            quantity = quantity,
+            referenceUnitPrice = reference,
+            unitPrice = unit,
+            totalPrice = total,
+            buyerUrgency = buyerUrgency,
+            sellerSurplus = sellerSurplus,
+            communalScarcity = communalScarcity
+        )
+    }
+
+    private fun observedPrices(
+        ledger: StockFlowDoubleEntryLedger,
+        resourceType: String,
+        currencyType: String
+    ): List<ObservedTrade> = ledger.recentEntries(1024)
+        .groupBy { it.canonicalEventHash }
+        .values
+        .mapNotNull { entries ->
+            val resources = entries.filter { it.resourceType == resourceType && it.quantity > 0.0 }
+            val payments = entries.filter { it.resourceType == currencyType && it.quantity > 0.0 }
+            resources.firstNotNullOfOrNull { resource ->
+                payments.firstOrNull { payment ->
+                    payment.fromAccount == resource.toAccount && payment.toAccount == resource.fromAccount
+                }?.let { payment ->
+                    if (resource.quantity <= 0.0) null
+                    else ObservedTrade(resource.tick, resource.entryId, payment.quantity / resource.quantity)
+                }
+            }
+        }
+        .filter { it.unitPrice.isFinite() && it.unitPrice > 0.0 }
+        .sortedWith(compareBy<ObservedTrade> { it.tick }.thenBy { it.entryId })
 }
 
 @Serializable

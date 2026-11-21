@@ -5,6 +5,7 @@ import com.enhikyy.girassol.core.memory.EpistemicImmunity
 import com.enhikyy.girassol.core.memory.SubjectiveOpinion
 import com.enhikyy.girassol.core.reflex.KotlinTsetlinMachine
 import com.enhikyy.girassol.core.rsi.RsiCoordinator
+import com.enhikyy.girassol.core.world.CURRENT_RULES_VERSION
 import com.enhikyy.girassol.core.world.FOOD
 import com.enhikyy.girassol.core.world.MATERIAL
 import com.enhikyy.girassol.core.world.TICKS_PER_DAY
@@ -127,4 +128,20 @@ class WorldCoreTest {
         assertEquals(0, core.state.metrics.invariantsViolated)
         assertNotNull(core.injectRealContamination())
     }
+    @Test
+    fun upgradesRuleMarkerWithoutRewritingHistoricalEventChain() {
+        val previous = WorldCore.create(707L, 2)
+        val historicalHash = previous.state.lastEventHash
+        val historicalEvents = previous.state.recentEvents.toList()
+        previous.state.rulesVersion = CURRENT_RULES_VERSION - 1
+
+        val restored = WorldCore(WorldSnapshotCodec.decode(WorldSnapshotCodec.encode(previous.state)))
+        assertEquals(CURRENT_RULES_VERSION, restored.state.rulesVersion)
+        assertEquals(historicalHash, restored.state.lastEventHash)
+        assertEquals(historicalEvents, restored.state.recentEvents)
+
+        restored.emit("RULES_VERSION_TEST", null, "version=${CURRENT_RULES_VERSION}")
+        assertEquals(CURRENT_RULES_VERSION, restored.state.recentEvents.last().rulesVersion)
+    }
+
 }

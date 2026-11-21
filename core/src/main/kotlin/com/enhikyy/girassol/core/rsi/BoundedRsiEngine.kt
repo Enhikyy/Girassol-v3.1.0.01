@@ -87,7 +87,16 @@ data class ShadowReplayMetrics(
     val behavioralDiversityScore: Double,
     val llmCallsPer100Ticks: Double,
     val invariantsViolated: Int
-)
+) {
+    /** Métricas fora do domínio ou não finitas não podem ser usadas como evidência de promoção. */
+    fun hasValidMeasurements(): Boolean =
+        meanFreeEnergy.isFinite() &&
+            survivalEfficiency.isFinite() &&
+            brierScore.isFinite() && brierScore in 0.0..1.0 &&
+            behavioralDiversityScore.isFinite() && behavioralDiversityScore in 0.0..1.0 &&
+            llmCallsPer100Ticks.isFinite() && llmCallsPer100Ticks >= 0.0 &&
+            invariantsViolated >= 0
+}
 
 @kotlinx.serialization.Serializable
 data class RsiPromotionDecision(
@@ -104,7 +113,7 @@ class BoundedRsiPromotionGate(
     private val minDiversityFloor: Double = 0.35
 ) {
     fun computeBrierScore(forecastOutcomePairs: List<Pair<Double, Boolean>>): Double {
-        if (forecastOutcomePairs.isEmpty()) return 0.0
+        if (forecastOutcomePairs.isEmpty()) return Double.NaN
         var sumSq = 0.0
         for ((prob, outcome) in forecastOutcomePairs) {
             val p = prob.coerceIn(0.0, 1.0)
@@ -124,6 +133,15 @@ class BoundedRsiPromotionGate(
         val baseHash = baseline.sha256Signature()
         val candHash = candidate.sha256Signature()
 
+        if (!baseMetrics.hasValidMeasurements() || !candMetrics.hasValidMeasurements()) {
+            return RsiPromotionDecision(
+                promoted = false,
+                reason = "REJEITADO: Métricas de Shadow-Replay ausentes, não finitas ou fora do domínio.",
+                baselineHash = baseHash,
+                candidateHash = candHash,
+                netFitnessGain = -1.0
+            )
+        }
         if (candMetrics.invariantsViolated > 0) {
             return RsiPromotionDecision(
                 promoted = false,

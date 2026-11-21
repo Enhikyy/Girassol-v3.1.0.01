@@ -13,6 +13,7 @@ import com.enhikyy.girassol.core.memory.SubjectiveOpinion
 import com.enhikyy.girassol.core.rsi.BoundedRsiPromotionGate
 import com.enhikyy.girassol.core.rsi.CognitivePolicyGenome
 import com.enhikyy.girassol.core.rsi.RsiMutationProposal
+import com.enhikyy.girassol.core.rsi.RsiCoordinator
 import com.enhikyy.girassol.core.rsi.ShadowReplayMetrics
 import com.enhikyy.girassol.core.social.AdicoInstitutionRule
 import com.enhikyy.girassol.core.social.DeonticOperator
@@ -26,6 +27,7 @@ import com.enhikyy.girassol.core.world.PhysicalJobPipeline
 import com.enhikyy.girassol.core.world.SpatialStigmergyAndReservationBoard
 import com.enhikyy.girassol.core.world.StockFlowDoubleEntryLedger
 import com.enhikyy.girassol.core.world.ToilStatus
+import com.enhikyy.girassol.core.world.WorldCore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -70,6 +72,20 @@ class GeaDeterministicEnginesTest {
     }
 
     @Test
+    fun `rsi shadow replay without forecasts cannot promote a policy`() {
+        val core = WorldCore.create(seed = 505L)
+        val coordinator = RsiCoordinator(replayTicks = 8, cmaLambda = 2, cmaReplayTicks = 4)
+
+        val metrics = coordinator.shadowReplay(core.state, core.state.policy, ticks = 8)
+        assertTrue(metrics.brierScore.isNaN())
+        assertFalse(metrics.hasValidMeasurements())
+
+        val record = coordinator.runCycle(core)
+        assertFalse(record.decision.promoted)
+        assertTrue(record.decision.reason.contains("ausentes"))
+    }
+
+    @Test
     fun `active inference and allostatic thermal coupling gate llm properly`() {
         val gExplore = ActiveInferencePianoOrchestrator.computeExpectedFreeEnergy(
             predictedPragmaticRisk = 0.40,
@@ -91,6 +107,26 @@ class GeaDeterministicEnginesTest {
             tsetlinReflexConfidence = 0.92
         )
         assertFalse(bypassByTsetlin)
+    }
+
+    @Test
+    fun `rsi gate fails closed on missing or non finite evaluation evidence`() {
+        val gate = BoundedRsiPromotionGate()
+        val baseline = CognitivePolicyGenome(version = 1)
+        val candidate = baseline.copy(version = 2, epistemicExplorationWeight = 0.90)
+        val baseMetrics = ShadowReplayMetrics(1.2, 0.70, 0.20, 0.70, 8.0, 0)
+
+        assertTrue(gate.computeBrierScore(emptyList()).isNaN())
+
+        val invalidMetrics = baseMetrics.copy(meanFreeEnergy = Double.POSITIVE_INFINITY)
+        val decision = gate.evaluatePromotion(baseline, candidate, baseMetrics, invalidMetrics)
+        assertFalse(decision.promoted)
+        assertTrue(decision.reason.contains("não finitas"))
+        assertEquals(-1.0, decision.netFitnessGain, 0.0)
+
+        val invalidCalibration = baseMetrics.copy(brierScore = Double.NaN)
+        val calibrationDecision = gate.evaluatePromotion(baseline, candidate, baseMetrics, invalidCalibration)
+        assertFalse(calibrationDecision.promoted)
     }
 
     @Test

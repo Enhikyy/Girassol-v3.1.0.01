@@ -234,6 +234,8 @@ data class Citizen(
     /** Promoções aprovadas creditadas (BoundedRsiPromotionGate: CMA-ES/RSI ou LoRA do sono). */
     var promotions: Int = 0,
     var promotionsAtLastReproduction: Int = 0,
+    /** Referências ordenadas do buffer de trabalho deste cidadão (mais antigo → mais recente). */
+    val workingMemoryIds: MutableList<Long> = mutableListOf(),
     /**
      * v3.7 IRT 2PL: janela (decaimento 0,85/dia) de tentativas/sucessos nos 5 itens de habilidade
      * (COLHER, RECICLAR, MANTER_USINA, PESQUISAR, CONSTRUIR), habilidade latente θ (±EP) estimada
@@ -371,7 +373,7 @@ data class WorldMetrics(
 @Serializable
 data class WorldState(
     val seed: Long,
-    val rulesVersion: Int = CURRENT_RULES_VERSION,
+    var rulesVersion: Int = CURRENT_RULES_VERSION,
     var tick: Long = 0L,
     var wallClockUtcAtLastTick: Long = 0L,
     val districtSize: Int = DISTRICT_SIZE,

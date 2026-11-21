@@ -29,8 +29,17 @@ class KotlinTsetlinMachine(
     val specificityS: Float = 3.5f,
     val thresholdT: Int = 8,
     private var rngState: Long = 42L,
-    private val taStates: IntArray = IntArray(numClauses * numFeatures * 2) { numStates.coerceAtLeast(2) }
+    private val taStates: IntArray = IntArray(checkedStateCount(numFeatures, numClauses)) { numStates.coerceAtLeast(2) }
 ) : ReflexClassifier {
+
+    init {
+        require(numFeatures > 0 && numClauses > 0) { "dimensões Tsetlin devem ser positivas" }
+        require(numStates in 2..(Int.MAX_VALUE / 2)) { "numStates fora do intervalo" }
+        require(thresholdT >= 1) { "thresholdT deve ser positivo" }
+        require(specificityS.isFinite() && specificityS >= 1.01f) { "specificityS inválido" }
+        require(taStates.size == checkedStateCount(numFeatures, numClauses))
+        require(taStates.all { it in 1..(numStates * 2) }) { "estado de autômato fora do intervalo" }
+    }
 
     private fun offset(c: Int) = c * numFeatures * 2
     private fun polarity(c: Int) = if (c % 2 == 0) 1 else -1
@@ -120,10 +129,19 @@ class KotlinTsetlinMachine(
         }
     }
 
-    /** Mesmo formato binário "GRST" (little-endian) do C++: header 20B + polaridades + estados. */
+    /** Snapshot GRST V2 (little-endian): hiperparâmetros, PRNG, polaridades e estados. */
     override fun serialize(): ByteArray {
-        val buf = ByteBuffer.allocate(20 + numClauses + taStates.size * 4).order(ByteOrder.LITTLE_ENDIAN)
-        buf.putInt(0x47525354).putInt(numFeatures).putInt(numClauses).putInt(numStates).putInt(thresholdT)
+        val totalBytes = V2_HEADER_BYTES.toLong() + numClauses.toLong() + taStates.size.toLong() * 4L
+        require(totalBytes <= Int.MAX_VALUE) { "estado Tsetlin excede o limite de serialização" }
+        val buf = ByteBuffer.allocate(totalBytes.toInt()).order(ByteOrder.LITTLE_ENDIAN)
+        buf.putInt(MAGIC_V2)
+            .putInt(FORMAT_VERSION)
+            .putInt(numFeatures)
+            .putInt(numClauses)
+            .putInt(numStates)
+            .putInt(thresholdT)
+            .putInt(java.lang.Float.floatToRawIntBits(specificityS))
+            .putLong(rngState)
         for (c in 0 until numClauses) buf.put(polarity(c).toByte())
         for (st in taStates) buf.putInt(st)
         return buf.array()
@@ -135,17 +153,72 @@ class KotlinTsetlinMachine(
         KotlinTsetlinMachine(numFeatures, numClauses, numStates, specificityS, thresholdT, rngState, taStates.copyOf())
 
     companion object {
+        private fun checkedStateCount(features: Int, clauses: Int): Int {
+            require(features > 0 && clauses > 0) { "dimensões Tsetlin devem ser positivas" }
+            val count = features.toLong() * clauses.toLong() * 2L
+            require(count <= Int.MAX_VALUE) { "dimensões Tsetlin excedem o espaço de endereçamento" }
+            return count.toInt()
+        }
+
+        private const val MAGIC_V1 = 0x47525354
+        private const val MAGIC_V2 = 0x32545347 // "GST2" em little-endian
+        private const val FORMAT_VERSION = 2
+        private const val V2_HEADER_BYTES = 36
+
+        /**
+         * Lê o formato V2 completo (parâmetros + estado do PRNG). Mantém leitura do
+         * legado V1, que não guardava specificityS nem rngState; nesse caso os valores
+         * recebidos pelos argumentos continuam sendo usados como fallback.
+         */
         fun deserialize(blob: ByteArray, specificityS: Float = 3.5f, rngState: Long = 42L): KotlinTsetlinMachine? {
             if (blob.size < 20) return null
-            val buf = ByteBuffer.wrap(blob).order(ByteOrder.LITTLE_ENDIAN)
-            if (buf.int != 0x47525354) return null
-            val nf = buf.int; val nc = buf.int; val ns = buf.int; val tt = buf.int
-            if (nf <= 0 || nc <= 0 || ns < 2 || tt < 1) return null
-            val expected = nc.toLong() * nf * 2
-            if (blob.size.toLong() != 20L + nc + expected * 4) return null
-            repeat(nc) { buf.get() }
-            val states = IntArray(expected.toInt()) { buf.int }
-            return KotlinTsetlinMachine(nf, nc, ns, specificityS, tt, rngState, states)
+            return runCatching {
+                val buf = ByteBuffer.wrap(blob).order(ByteOrder.LITTLE_ENDIAN)
+                val magic = buf.int
+                val nf: Int
+                val nc: Int
+                val ns: Int
+                val tt: Int
+                val storedSpecificity: Float
+                val storedRng: Long
+                val headerBytes: Int
+                when (magic) {
+                    MAGIC_V1 -> {
+                        nf = buf.int
+                        nc = buf.int
+                        ns = buf.int
+                        tt = buf.int
+                        storedSpecificity = specificityS
+                        storedRng = rngState
+                        headerBytes = 20
+                    }
+                    MAGIC_V2 -> {
+                        val version = buf.int
+                        require(version == FORMAT_VERSION) { "versão GRST não suportada: $version" }
+                        nf = buf.int
+                        nc = buf.int
+                        ns = buf.int
+                        tt = buf.int
+                        storedSpecificity = java.lang.Float.intBitsToFloat(buf.int)
+                        storedRng = buf.long
+                        headerBytes = V2_HEADER_BYTES
+                    }
+                    else -> return null
+                }
+                require(nf > 0 && nc > 0 && ns in 2..(Int.MAX_VALUE / 2) && tt >= 1)
+                require(storedSpecificity.isFinite() && storedSpecificity >= 1.01f)
+                val expectedStates = nc.toLong() * nf.toLong() * 2L
+                require(expectedStates <= Int.MAX_VALUE)
+                val expectedBytes = headerBytes.toLong() + nc.toLong() + expectedStates * 4L
+                require(expectedBytes == blob.size.toLong())
+                repeat(nc) { index ->
+                    val expectedPolarity = if (index % 2 == 0) 1 else -1
+                    require(buf.get().toInt() == expectedPolarity) { "polaridade GRST inválida" }
+                }
+                val states = IntArray(expectedStates.toInt()) { buf.int }
+                require(states.all { it in 1..(ns * 2) }) { "estado de autômato fora do intervalo" }
+                KotlinTsetlinMachine(nf, nc, ns, storedSpecificity, tt, storedRng, states)
+            }.getOrNull()
         }
     }
 }

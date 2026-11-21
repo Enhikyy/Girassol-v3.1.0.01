@@ -140,6 +140,11 @@ class WorldCore(
     private val cfcNets = HashMap<String, CfcNeuromodulator>()
     private val violations = mutableListOf<String>()
 
+    init {
+        // Migra apenas o marcador do snapshot; eventos e hashes históricos permanecem intactos.
+        if (state.rulesVersion < CURRENT_RULES_VERSION) state.rulesVersion = CURRENT_RULES_VERSION
+    }
+
     // ===================================================================== criação
 
     companion object {
@@ -489,10 +494,17 @@ class WorldCore(
             val broadcast = workspace.broadcastWinningSignals(signals)
             // 4. Memória & atualização epistêmica (ACT-R + MemRL + A-MEM)
             val tags = broadcast.mapNotNull { it.entityId }.toSet() + broadcast.map { it.sourceModule }.toSet()
-            memoryEngine.clearWorkingMemory()
             val queryText = broadcast.joinToString(" ") { it.summary }
-            val retrieval = memoryEngine.retrieveTwoStage(c.memories, tick, queryText, tags, broadcast.mapNotNull { it.entityId }.toSet(),
-                topK = 4, workingCapacity = 5 + (4.0 * c.trait("conscienciosidade")).roundToInt())
+            val retrieval = memoryEngine.retrieveTwoStage(
+                nodes = c.memories,
+                currentTick = tick,
+                queryText = queryText,
+                queryTags = tags,
+                queryEntities = broadcast.mapNotNull { it.entityId }.toSet(),
+                topK = 4,
+                workingCapacity = 5 + (4.0 * c.trait("conscienciosidade")).roundToInt(),
+                workingMemoryIds = c.workingMemoryIds
+            )
             val recalled = retrieval.memories
             state.retrievalQueries++
             state.retrievalStage1Total += retrieval.stage1Candidates
@@ -1216,18 +1228,66 @@ class WorldCore(
             m.recentAccessTicks += state.tick
             m.tdPredictionError *= 0.5
         }
+        val semanticRelations = report.semanticRelations.associateBy { it.summary }
         for (summary in report.promotedSemanticSummaries) {
-            if (c.memories.none { it.layer == MemoryLayer.SEMANTIC && it.content == summary }) {
-                c.memories += AssociativeMemoryNode(c.nextMemoryId++, c.id, MemoryLayer.SEMANTIC, summary,
-                    linkedSetOf("SCHEMA"), linkedSetOf(), salience = 0.7, confidence = 0.9, sourceEventId = null,
-                    sourceAgentId = null, createdTick = state.tick, verifiedByWorldCore = true, qUtility = 0.4)
+            val relation = semanticRelations[summary]
+            val existing = c.memories.firstOrNull { it.layer == MemoryLayer.SEMANTIC && it.content == summary }
+            if (existing != null) {
+                relation?.let {
+                    existing.linkedMemoryIds.addAll(it.sourceEpisodeIds)
+                    existing.tags = existing.tags + it.topicTag
+                    existing.entityIds = existing.entityIds + it.entityIds
+                    existing.bits = null
+                }
+            } else {
+                val tags = linkedSetOf("SCHEMA").apply { relation?.topicTag?.let { add(it) } }
+                c.memories += AssociativeMemoryNode(
+                    id = c.nextMemoryId++,
+                    ownerAgentId = c.id,
+                    layer = MemoryLayer.SEMANTIC,
+                    content = summary,
+                    tags = tags,
+                    entityIds = relation?.entityIds ?: emptySet(),
+                    linkedMemoryIds = relation?.sourceEpisodeIds?.toMutableSet() ?: mutableSetOf(),
+                    salience = 0.7,
+                    confidence = relation?.meanConfidence ?: 0.9,
+                    sourceEventId = null,
+                    sourceAgentId = c.id,
+                    createdTick = state.tick,
+                    verifiedByWorldCore = true,
+                    qUtility = 0.4
+                )
             }
         }
+        val proceduralRelations = report.proceduralRelations.associateBy { it.macro }
         for (macro in report.distilledProceduralMacros) {
-            if (c.memories.none { it.layer == MemoryLayer.PROCEDURAL && it.content == macro }) {
-                c.memories += AssociativeMemoryNode(c.nextMemoryId++, c.id, MemoryLayer.PROCEDURAL, macro,
-                    linkedSetOf("MACRO"), linkedSetOf(), salience = 0.8, confidence = 0.95, sourceEventId = null,
-                    sourceAgentId = null, createdTick = state.tick, verifiedByWorldCore = true, qUtility = 0.6)
+            val relation = proceduralRelations[macro]
+            val existing = c.memories.firstOrNull { it.layer == MemoryLayer.PROCEDURAL && it.content == macro }
+            if (existing != null) {
+                relation?.let {
+                    existing.linkedMemoryIds.add(it.sourceEpisodeId)
+                    existing.tags = existing.tags + it.tags
+                    existing.entityIds = existing.entityIds + it.entityIds
+                    existing.bits = null
+                }
+            } else {
+                val tags = linkedSetOf("MACRO").apply { addAll(relation?.tags.orEmpty()) }
+                c.memories += AssociativeMemoryNode(
+                    id = c.nextMemoryId++,
+                    ownerAgentId = c.id,
+                    layer = MemoryLayer.PROCEDURAL,
+                    content = macro,
+                    tags = tags,
+                    entityIds = relation?.entityIds ?: emptySet(),
+                    linkedMemoryIds = relation?.sourceEpisodeId?.let { mutableSetOf(it) } ?: mutableSetOf(),
+                    salience = 0.8,
+                    confidence = relation?.confidence ?: 0.95,
+                    sourceEventId = null,
+                    sourceAgentId = c.id,
+                    createdTick = state.tick,
+                    verifiedByWorldCore = true,
+                    qUtility = 0.6
+                )
             }
         }
         val pruned = report.prunedNodeIds.toSet()
@@ -1428,11 +1488,32 @@ class WorldCore(
                     state.stressEvents.lastOrNull { it.targetId == claim.claimKey && it.resolvedTick < 0 }?.let { it.quarantinedBy++ }
                 }
             }
-            // comércio de alimento por crédito decidido pelo kernel (partidas dobradas no razão)
+            // O kernel decide quando há oportunidade; o motor Kotlin calcula o preço subjetivo e liquida atomicamente.
             if (flags and 4L != 0L) {
-                val h = emit("COMERCIO", a.id, "vendedor=${b.id};alimento=2;credito=3")
-                if (state.ledger.transfer(b.id, a.id, FOOD, 2.0, state.tick, h)) state.ledger.transfer(a.id, b.id, CREDIT, 3.0, state.tick, h)
-                tie.recordTrustOutcome("comercio", true)
+                val quantity = 2.0
+                val buyerFood = state.ledger.getBalance(a.id, FOOD)
+                val sellerFood = state.ledger.getBalance(b.id, FOOD)
+                val buyerCredit = state.ledger.getBalance(a.id, CREDIT)
+                val commonsFood = state.ledger.getBalance(COMMUNAL_COMMONS, FOOD)
+                val quote = SubjectiveMarket.quote(
+                    ledger = state.ledger,
+                    resourceType = FOOD,
+                    currencyType = CREDIT,
+                    quantity = quantity,
+                    buyerNeed = a.needs.getValue(Need.FOME),
+                    buyerInventory = buyerFood,
+                    sellerInventory = sellerFood,
+                    communalInventory = commonsFood
+                )
+                val h = emit("COMERCIO", a.id, "vendedor=${b.id};recurso=$FOOD;qtd=${"%.2f".fmt(quantity)};" +
+                    "moeda=$CREDIT;preco=${quote?.totalPrice ?: 0.0}")
+                val settled = quote != null && buyerCredit >= quote.totalPrice &&
+                    state.ledger.exchange(
+                        firstFrom = b.id, firstTo = a.id, firstResource = FOOD, firstQuantity = quantity,
+                        secondFrom = a.id, secondTo = b.id, secondResource = CREDIT, secondQuantity = quote.totalPrice,
+                        tick = state.tick, eventHash = h
+                    )
+                tie.recordTrustOutcome("comercio", settled)
             }
         }
     }

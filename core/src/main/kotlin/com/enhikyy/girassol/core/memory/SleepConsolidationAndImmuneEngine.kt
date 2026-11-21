@@ -83,8 +83,8 @@ data class AssociativeMemoryNode(
     val ownerAgentId: String,
     val layer: MemoryLayer,
     val content: String,
-    val tags: Set<String>,
-    val entityIds: Set<String>,
+    var tags: Set<String>,
+    var entityIds: Set<String>,
     val linkedMemoryIds: MutableSet<Long> = mutableSetOf(),
     val salience: Double,
     val confidence: Double,
@@ -124,11 +124,29 @@ data class AssociativeMemoryNode(
 
 data class RetrievalResult(val memories: List<AssociativeMemoryNode>, val stage1Candidates: Int, val corpusSize: Int)
 
+data class SemanticMemoryRelation(
+    val summary: String,
+    val topicTag: String,
+    val sourceEpisodeIds: Set<Long>,
+    val entityIds: Set<String>,
+    val meanConfidence: Double
+)
+
+data class ProceduralMemoryRelation(
+    val macro: String,
+    val sourceEpisodeId: Long,
+    val tags: Set<String>,
+    val entityIds: Set<String>,
+    val confidence: Double
+)
+
 data class ConsolidationReport(
     val replayedNodeIds: List<Long>,
     val promotedSemanticSummaries: List<String>,
     val distilledProceduralMacros: List<String>,
-    val prunedNodeIds: List<Long>
+    val prunedNodeIds: List<Long>,
+    val semanticRelations: List<SemanticMemoryRelation> = emptyList(),
+    val proceduralRelations: List<ProceduralMemoryRelation> = emptyList()
 )
 
 class FourLayerMemoryAndSleepEngine(
@@ -136,19 +154,22 @@ class FourLayerMemoryAndSleepEngine(
     private val maxNodesPerAgent: Int = 512,
     private val replayBatchSize: Int = 12
 ) {
-    private val workingSlots = ArrayDeque<AssociativeMemoryNode>()
+    /**
+     * Buffer legado para chamadas antigas sem owner explícito. O motor do mundo deve sempre
+     * passar o buffer do cidadão; este fallback existe apenas para compatibilidade de API.
+     */
+    private val legacyWorkingMemoryIds = mutableListOf<Long>()
 
-    fun clearWorkingMemory() = workingSlots.clear()
+    /** O chamador possui o buffer; ele pertence ao cidadão e é serializado no WorldState. */
+    fun activeWorkingIds(workingMemoryIds: List<Long>): Set<Long> = workingMemoryIds.toSet()
 
-    fun pushWorkingMemory(node: AssociativeMemoryNode) {
-        workingSlots.removeAll { it.id == node.id }
-        if (workingSlots.size >= workingMemoryCapacity) {
-            workingSlots.removeFirst()
-        }
-        workingSlots.addLast(node)
-    }
+    fun workingMemorySize(workingMemoryIds: List<Long>): Int = workingMemoryIds.size
 
-    fun activeWorkingIds(): Set<Long> = workingSlots.map { it.id }.toSet()
+    @Deprecated("Passe o buffer individual do cidadão para workingMemorySize(ids)")
+    fun workingMemorySize(): Int = legacyWorkingMemoryIds.size
+
+    @Deprecated("Passe o buffer individual do cidadão e limpe a lista do cidadão")
+    fun clearWorkingMemory() = legacyWorkingMemoryIds.clear()
 
     /**
      * Recuperação em 2 estágios (ver [EpisodicIndex]): Hamming bit[256] seleciona os
@@ -163,15 +184,27 @@ class FourLayerMemoryAndSleepEngine(
         queryTags: Set<String>,
         queryEntities: Set<String>,
         topK: Int = 6,
-        workingCapacity: Int = workingMemoryCapacity
+        workingCapacity: Int = workingMemoryCapacity,
+        workingMemoryIds: MutableList<Long> = legacyWorkingMemoryIds
     ): RetrievalResult {
-        if (nodes.isEmpty()) return RetrievalResult(emptyList(), 0, 0)
+        if (nodes.isEmpty()) {
+            workingMemoryIds.clear()
+            return RetrievalResult(emptyList(), 0, 0)
+        }
+        val validMemoryIds = nodes.mapTo(HashSet()) { it.id }
+        workingMemoryIds.retainAll(validMemoryIds)
+        val cap = workingCapacity.coerceIn(5, 9)
+        val normalizedBuffer = workingMemoryIds.distinct().takeLast(cap)
+        if (normalizedBuffer != workingMemoryIds) {
+            workingMemoryIds.clear()
+            workingMemoryIds.addAll(normalizedBuffer)
+        }
         val qFeatures = EpisodicIndex.features(queryText, queryTags, queryEntities)
         val qBits = EpisodicIndex.simHash(qFeatures)
         val stage1 = nodes.indices.sortedWith(compareBy<Int> { EpisodicIndex.hamming(qBits, nodes[it].binaryEmbedding()) }.thenByDescending { nodes[it].id })
             .take(EpisodicIndex.STAGE1_K).map { nodes[it] }
         val qDense = EpisodicIndex.dense(qFeatures)
-        val activeWm = activeWorkingIds()
+        val activeWm = activeWorkingIds(workingMemoryIds)
         val cos = DoubleArray(stage1.size) { EpisodicIndex.cosine(qDense, EpisodicIndex.dense(stage1[it].features())).toDouble() }
         val corpus = nodes.map { EpisodicIndex.terms(it.content) + it.tags.map { t -> t.lowercase() } }
         val bm25 = EpisodicIndex.bm25(EpisodicIndex.terms(queryText) + queryTags.map { it.lowercase() },
@@ -188,14 +221,13 @@ class FourLayerMemoryAndSleepEngine(
         val hawkes = DoubleArray(stage1.size) { EpisodicIndex.hawkesIntensity(stage1[it].hawkesExcitation, stage1[it].hawkesLastTick, currentTick) }
         val fused = EpisodicIndex.rrf(listOf(cos, bm25, composite, hawkes), stage1.size)
         val chosen = stage1.indices.sortedWith(compareByDescending<Int> { fused[it] }.thenByDescending { stage1[it].id }).take(topK).map { stage1[it] }
-        val cap = workingCapacity.coerceIn(5, 9)
         for (node in chosen) {
             if (node.recentAccessTicks.size >= 16) node.recentAccessTicks.removeAt(0)
             node.recentAccessTicks.add(currentTick)
             EpisodicIndex.hawkesExcite(node, currentTick, node.salience)
-            workingSlots.removeAll { it.id == node.id }
-            while (workingSlots.size >= cap) workingSlots.removeFirst()
-            workingSlots.addLast(node)
+            workingMemoryIds.removeAll { it == node.id }
+            while (workingMemoryIds.size >= cap) workingMemoryIds.removeAt(0)
+            workingMemoryIds.add(node.id)
         }
         return RetrievalResult(chosen, stage1.size, nodes.size)
     }
@@ -205,10 +237,12 @@ class FourLayerMemoryAndSleepEngine(
         currentTick: Long,
         queryTags: Set<String>,
         queryEntities: Set<String>,
-        topK: Int = 6
-    ): List<AssociativeMemoryNode> = retrieveTwoStage(nodes, currentTick, queryTags.joinToString(" "), queryTags, queryEntities, topK).memories
-
-    fun workingMemorySize(): Int = workingSlots.size
+        topK: Int = 6,
+        workingMemoryIds: MutableList<Long> = legacyWorkingMemoryIds
+    ): List<AssociativeMemoryNode> = retrieveTwoStage(
+        nodes, currentTick, queryTags.joinToString(" "), queryTags, queryEntities,
+        topK = topK, workingMemoryIds = workingMemoryIds
+    ).memories
 
     /**
      * Sharp-Wave Ripple Replay: reproduz as sequências encadeadas (A-MEM) em ordem reversa
@@ -248,23 +282,41 @@ class FourLayerMemoryAndSleepEngine(
             .sortedByDescending { abs(it.tdPredictionError) * 0.65 + abs(it.qUtility) * 0.35 }
             .take(replayBatchSize)
 
-        val promotedSemantic = memories
+        val semanticGroups = memories
             .filter { it.layer == MemoryLayer.EPISODIC && it.verifiedByWorldCore && it.qUtility > 0.35 }
             .flatMap { mem -> mem.tags.map { tag -> tag to mem } }
             .groupBy({ it.first }, { it.second })
             .filter { (_, group) -> group.size >= 3 }
-            .map { (tag, group) ->
-                val avgQ = group.map { it.qUtility }.average()
-                "SCHEMA[$tag]: ${group.size} episódios verificados consolidados (Q_m=${"%.2f".fmt(avgQ)})."
-            }
+            .toSortedMap()
 
-        val distilledProcedural = memories
+        val semanticRelations = semanticGroups.map { (tag, group) ->
+            val avgQ = group.map { it.qUtility }.average()
+            val summary = "SCHEMA[$tag]: ${group.size} episódios verificados consolidados (Q_m=${"%.2f".fmt(avgQ)})."
+            SemanticMemoryRelation(
+                summary = summary,
+                topicTag = tag,
+                sourceEpisodeIds = group.mapTo(linkedSetOf()) { it.id },
+                entityIds = group.flatMapTo(linkedSetOf()) { it.entityIds },
+                meanConfidence = group.map { it.confidence }.average().coerceIn(0.0, 1.0)
+            )
+        }
+        val promotedSemantic = semanticRelations.map { it.summary }
+
+        val proceduralSources = memories
             .filter { it.layer == MemoryLayer.EPISODIC && it.verifiedByWorldCore && it.qUtility >= 0.65 }
-            .sortedByDescending { it.qUtility }
+            .sortedWith(compareByDescending<AssociativeMemoryNode> { it.qUtility }.thenBy { it.id })
             .take(3)
-            .map { ep ->
-                "SKILL_MACRO[src=${ep.id}]: ${ep.content.take(96)} (Q_m=${"%.2f".fmt(ep.qUtility)})"
-            }
+        val proceduralRelations = proceduralSources.map { ep ->
+            val macro = "SKILL_MACRO[src=${ep.id}]: ${ep.content.take(96)} (Q_m=${"%.2f".fmt(ep.qUtility)})"
+            ProceduralMemoryRelation(
+                macro = macro,
+                sourceEpisodeId = ep.id,
+                tags = ep.tags,
+                entityIds = ep.entityIds,
+                confidence = ep.confidence.coerceIn(0.0, 1.0)
+            )
+        }
+        val distilledProcedural = proceduralRelations.map { it.macro }
 
         val prunedIds = if (memories.size > maxNodesPerAgent) {
             val excess = memories.size - maxNodesPerAgent
@@ -281,7 +333,9 @@ class FourLayerMemoryAndSleepEngine(
             replayedNodeIds = replayCandidates.map { it.id },
             promotedSemanticSummaries = promotedSemantic,
             distilledProceduralMacros = distilledProcedural,
-            prunedNodeIds = prunedIds
+            prunedNodeIds = prunedIds,
+            semanticRelations = semanticRelations,
+            proceduralRelations = proceduralRelations
         )
     }
 }

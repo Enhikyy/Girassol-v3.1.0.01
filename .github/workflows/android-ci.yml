@@ -62,10 +62,18 @@ jobs:
           cmake --build build-llg
           ./build-llg/girassol_native_tests
 
+  guarded-rsi:
+    name: Guarded RSI harness (stdlib)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Testar gates de held-out, monitor, juiz cego e aprovação humana
+        run: python3 -m unittest discover -s tools/guarded_rsi -p 'test_*.py' -v
+
   android:
     name: Testes, lint e APKs
     runs-on: ubuntu-latest
-    needs: native-tests
+    needs: [native-tests, guarded-rsi]
     steps:
       - uses: actions/checkout@v5
       - name: Caminhos relativos (compatibilidade CodeAssist)

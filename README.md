@@ -12,7 +12,7 @@ Implementação feita do zero a partir do documento consolidado "PROJETO GIRASSO
 | Módulo | Conteúdo |
 |---|---|
 | `core/` | Motor Kotlin/JVM puro (sem Android): `WorldCore` com ciclo de 12 estágios, economia por partidas dobradas, estigmergia, ADICO + cliodinâmica, inferência ativa, memória ACT-R/MemRL, imunidade epistêmica, sono/consolidação, pedagogia BKT, evolução diploide, Tsetlin, MAP-Elites/AURORA, RSI delimitado com Shadow-Replay e snapshot CBOR+gzip com SHA-256. |
-| `app/` | App Android (Compose, minSdk 33, targetSdk 35, só `arm64-v8a` no release): serviço em primeiro plano contínuo, persistência SQLite WAL, autodetecção de hardware, viewport 3D Google Filament (estética Kodak 500T/70mm) com Modo Eco 2D isométrico, balões de fala dos cidadãos, barra de navegação flutuante em cápsula e quatro abas (Chat, Biosfera, Evolução, Sistema) + gaveta com 15 temas, Biblioteca Offline e MeshSync. |
+| `app/` | App Android (Compose, minSdk 33, targetSdk 35, só `arm64-v8a` no release): serviço em primeiro plano contínuo, persistência SQLite WAL, autodetecção de hardware, viewport 3D Google Filament (estética Kodak 500T/70mm) com Modo Eco 2D isométrico, balões de fala dos cidadãos, barra de navegação flutuante em cápsula e cinco abas (Chat, Biosfera, Evolução, Sistema, Dados) + gaveta com 15 temas, Biblioteca Offline e MeshSync. |
 | `app/src/main/cpp/` | Núcleo nativo C++20 via JNI: `libgirassol_core.so` (A* com clearance, LoRA on-device treinado no sono, áudio binaural em AAudio com ducking, Tsetlin bit a bit idêntico ao Kotlin, MAP-Elites, índice episódico binário bit[256] com popcount, sonda de SoC, detecção SIMD por HWCAP, `/proc/self/status`) e um único motor LLM `libgirassol_llm.so` sobre `libllama.so`/`libggml.so` compartilhadas, com backends de CPU dinâmicos (`GGML_BACKEND_DL`) `libggml-cpu-android_armv8.0_1.so`, `armv8.2_2` (dotprod+fp16+KleidiAI) e `armv8.6_1` (i8mm), escolhidos em runtime. As bibliotecas do Girassol exportam só `JNI_OnLoad` e `Java_*`. |
 | `app/src/main/materials/` | Materiais Filament (`city.mat` com PBR KTX2 triplanar, `glow.mat` e o pós analógico `girassol_dehancer_post.mat`) compilados para `.filamat` pelo `matc` na task Gradle `compileFilamentMaterials`. |
 | `app/src/main/assets/textures/` | Texturas PBR procedurais KTX2 (concreto brutalista, carpete Backrooms), geradas por `scripts/gen_pbr_ktx2.py` e conferidas por `licenses/TEXTURES.sha256`. |
@@ -20,6 +20,8 @@ Implementação feita do zero a partir do documento consolidado "PROJETO GIRASSO
 | `native-tests/` | Testes nativos de host com ASan/UBSan, incluindo a assinatura de paridade Kotlin↔C++. |
 
 ## Novidades da v3.6.0.00 (Adão e Eva)
+
+ > Auditoria de implementação e pendências das especificações GEA/v2.5: [`docs/IMPLEMENTATION_CROSSWALK_2026-11-21.md`](docs/IMPLEMENTATION_CROSSWALK_2026-11-21.md). O documento diferencia módulos ativos, parciais e propostas ainda não ligadas ao runtime.
 
 - Mundo começa com 0 cidadãos. Cada `.gguf` importado (F16, BF16, Q8_0, Q5_K, Q4_K_M, Q4_0…) cria exatamente
   um fundador g0 com nome e sexo escolhidos (`WorldCore.spawnFounder`, `SimulationHub.importFounder`). Nenhum
@@ -32,10 +34,13 @@ Implementação feita do zero a partir do documento consolidado "PROJETO GIRASSO
 - Chat (aba principal): pílulas para conversar com cada cidadão ou com o canal aberto; cada cidadão responde com o
   seu `.gguf` (gramática restrita) ou, sem modelo, pelo deliberador simbólico baseado no estado real. Mensagens
   persistidas em `chat_messages` (SQLite WAL), no `.grs` (`WorldState.chat`) e na cadeia de eventos; voz TTS pt-BR.
-- Evolução: gráficos Canvas (Anokhin/Brier/CMA-ES com marcadores de promoção/LoRA, árvore g0→g1→g2 com nó do
-  próximo nascimento, comuns/PSI/Gini/população), mérito individual e seções recolhíveis.
-- RAM: pesos em mmap não contam como heap; admissão por RAM ativa estimada (LFM2.5-230M-F16, 350M F16 e Q5_K
-  aceitos em 3631 MB). Perfis 4/8/12 GB mudam `n_ctx` e o tipo de KV; um contexto residente por vez.
+- Evolução: gráficos Canvas (Anokhin/Brier/CMA-ES com marcadores de promoção/LoRA, árvore g0→g1→g2 com nó do próximo nascimento, comuns/PSI/Gini/população), mérito individual e seções recolhíveis.
+- RAM: pesos em mmap não contam como heap; admissão por RAM ativa estimada (LFM2.5-230M-F16, 350M F16 e Q5_K aceitos em 3631 MB). Perfis 4/8/12 GB mudam `n_ctx` e o tipo de KV; um contexto residente por vez.
+- Dados: nova aba analítica com métricas e séries históricas do `DashboardSnapshot` real (população, comuns, PSI/Gini, cognição e estado coletivo), gráficos Canvas leves e filtros de 7/30 dias ou histórico completo; sem números de demonstração.
+- Memória de trabalho: buffer ordenado de 5–9 referências por cidadão, persistido no snapshot do mundo; recuperação Hamming/RRF/BM25 mantém o contexto de trabalho individual entre decisões e reinicializações.
+- Consolidação semântica/procedural: nós `SCHEMA` e `SKILL_MACRO` preservam ligações aos episódios verificados e às entidades de origem (`linkedMemoryIds` / `entityIds`), com migração progressiva de nós legados durante o sono.
+- Economia emergente: escambo de alimento usa preço subjetivo derivado de necessidade, estoque, escassez e histórico do ledger; liquidação alimento/crédito é atômica e preserva a soma zero.
+- Migração de regras: snapshots antigos preservam eventos/hash-chain; ao abrir o mundo, o marcador de regras sobe para v13 e novos eventos registram a versão atual.
 - Anti-clarão Mali: ver `docs/RENDER_CALIBRATION.md`. Balões: no máximo 2, sem sobreposição, com fade-out.
 
 ## Novidades da v3.5.0.00
