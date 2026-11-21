@@ -77,7 +77,9 @@ object MeshSyncManager {
     private var regListener: NsdManager.RegistrationListener? = null
     private var discListener: NsdManager.DiscoveryListener? = null
     private val main = Handler(Looper.getMainLooper())
-    private val lockTimeout = Runnable { log("WifiLock expirou (${LOCK_TIMEOUT_MS / 60000} min): malha encerrada"); stop() }
+    private val lockTimeout = object : Runnable {
+        override fun run() { log("WifiLock expirou (${LOCK_TIMEOUT_MS / 60000} min): malha encerrada"); stop() }
+    }
 
     private fun log(msg: String) {
         Log.i(TAG, msg)
@@ -140,7 +142,12 @@ object MeshSyncManager {
     }
 
     private suspend fun beaconLoop(id: String, port: Int) {
-        val sock = DatagramSocket(null).apply { reuseAddress = true; broadcast = true; bind(InetSocketAddress(MeshSyncProtocol.BEACON_PORT)) }
+        val sock = runCatching {
+            DatagramSocket(null).apply { reuseAddress = true; broadcast = true; bind(InetSocketAddress(MeshSyncProtocol.BEACON_PORT)) }
+        }.getOrElse {
+            log("beacon UDP indisponível (${it.message}); seguindo só com NSD")
+            return
+        }
         udp = sock
         sock.soTimeout = BEACON_EVERY_MS.toInt()
         val payload = MeshSyncProtocol.beacon(id, port, deviceName())
@@ -162,7 +169,8 @@ object MeshSyncManager {
         }
     }
 
-    private fun currentCoroutineContextActive() = udp?.isClosed == false
+    // O estado de execução encerra o laço sem depender do timeout do receive() no socket.
+    private fun currentCoroutineContextActive() = _state.value.running
 
     @Suppress("DEPRECATION")
     private fun registerNsd(context: Context, id: String, port: Int) {
