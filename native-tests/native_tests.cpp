@@ -326,7 +326,37 @@ int main() {
     const uint64_t sig = paritySignature();
     std::printf("assinatura_paridade_tsetlin=0x%016llx\n", static_cast<unsigned long long>(sig));
     // Valor dourado também verificado em core/src/test/.../TsetlinParityTest.kt
-    CHECK(sig == 0x28e9517335a66aeaULL, "paridade bit a bit com KotlinTsetlinMachine");
+    CHECK(sig == 0x2ed3a414a018e2ecULL, "paridade bit a bit com KotlinTsetlinMachine");
+
+    {
+        girassol::tsetlin::PersistentTsetlinMachine source(8, 10, 32, 3.5f, 5, 99ULL);
+        const std::vector<uint8_t> features{1, 0, 1, 1, 0, 0, 1, 0};
+        for (int i = 0; i < 25; ++i) source.trainStep(features, (i % 2) == 0);
+        const auto snapshot = source.serializeBinary();
+
+        girassol::tsetlin::PersistentTsetlinMachine restored(1, 1, 64, 2.2f, 3, 123ULL);
+        CHECK(restored.deserializeBinary(snapshot), "Tsetlin GRST V2 restaura parâmetros e PRNG");
+        CHECK(restored.serializeBinary() == snapshot, "Tsetlin roundtrip V2 preserva bytes");
+        source.trainStep(features, true);
+        restored.trainStep(features, true);
+        CHECK(restored.serializeBinary() == source.serializeBinary(), "Tsetlin roundtrip mantém continuidade do aprendizado");
+
+        // Converte o snapshot V2 para o layout legado V1 (sem specificity/PRNG).
+        std::vector<uint8_t> legacy;
+        const uint32_t magicV1 = 0x47525354U;
+        const auto* magicBytes = reinterpret_cast<const uint8_t*>(&magicV1);
+        legacy.insert(legacy.end(), magicBytes, magicBytes + sizeof(magicV1));
+        legacy.insert(legacy.end(), snapshot.begin() + 8, snapshot.begin() + 24);
+        legacy.insert(legacy.end(), snapshot.begin() + 36, snapshot.end());
+        girassol::tsetlin::PersistentTsetlinMachine legacyReader(8, 10, 32, 3.5f, 5, 123ULL);
+        CHECK(legacyReader.deserializeBinary(legacy), "Tsetlin ainda lê snapshots GRST V1");
+        CHECK(legacyReader.predictVoteEarlyExit(features) == source.predictVoteEarlyExit(features),
+              "Tsetlin V1 preserva inferência dos autômatos");
+
+        auto corrupt = snapshot;
+        corrupt[46] = 0; // primeiro estado de autômato fora do intervalo [1, 2N]
+        CHECK(!restored.deserializeBinary(corrupt), "Tsetlin rejeita estado de autômato corrompido");
+    }
 
     // v3.5 — valores dourados também em core/.../ports/ParityVectors.kt (ANOKHIN_GOLDEN, CMA_ES_GOLDEN)
     const uint64_t ano = girassol::anokhin::paritySignature();
