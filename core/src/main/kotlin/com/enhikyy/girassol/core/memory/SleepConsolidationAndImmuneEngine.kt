@@ -124,11 +124,29 @@ data class AssociativeMemoryNode(
 
 data class RetrievalResult(val memories: List<AssociativeMemoryNode>, val stage1Candidates: Int, val corpusSize: Int)
 
+data class SemanticMemoryRelation(
+    val summary: String,
+    val topicTag: String,
+    val sourceEpisodeIds: Set<Long>,
+    val entityIds: Set<String>,
+    val meanConfidence: Double
+)
+
+data class ProceduralMemoryRelation(
+    val macro: String,
+    val sourceEpisodeId: Long,
+    val tags: Set<String>,
+    val entityIds: Set<String>,
+    val confidence: Double
+)
+
 data class ConsolidationReport(
     val replayedNodeIds: List<Long>,
     val promotedSemanticSummaries: List<String>,
     val distilledProceduralMacros: List<String>,
-    val prunedNodeIds: List<Long>
+    val prunedNodeIds: List<Long>,
+    val semanticRelations: List<SemanticMemoryRelation> = emptyList(),
+    val proceduralRelations: List<ProceduralMemoryRelation> = emptyList()
 )
 
 class FourLayerMemoryAndSleepEngine(
@@ -252,23 +270,41 @@ class FourLayerMemoryAndSleepEngine(
             .sortedByDescending { abs(it.tdPredictionError) * 0.65 + abs(it.qUtility) * 0.35 }
             .take(replayBatchSize)
 
-        val promotedSemantic = memories
+        val semanticGroups = memories
             .filter { it.layer == MemoryLayer.EPISODIC && it.verifiedByWorldCore && it.qUtility > 0.35 }
             .flatMap { mem -> mem.tags.map { tag -> tag to mem } }
             .groupBy({ it.first }, { it.second })
             .filter { (_, group) -> group.size >= 3 }
-            .map { (tag, group) ->
-                val avgQ = group.map { it.qUtility }.average()
-                "SCHEMA[$tag]: ${group.size} episódios verificados consolidados (Q_m=${"%.2f".fmt(avgQ)})."
-            }
+            .toSortedMap()
 
-        val distilledProcedural = memories
+        val semanticRelations = semanticGroups.map { (tag, group) ->
+            val avgQ = group.map { it.qUtility }.average()
+            val summary = "SCHEMA[$tag]: ${group.size} episódios verificados consolidados (Q_m=${"%.2f".fmt(avgQ)})."
+            SemanticMemoryRelation(
+                summary = summary,
+                topicTag = tag,
+                sourceEpisodeIds = group.mapTo(linkedSetOf()) { it.id },
+                entityIds = group.flatMapTo(linkedSetOf()) { it.entityIds },
+                meanConfidence = group.map { it.confidence }.average().coerceIn(0.0, 1.0)
+            )
+        }
+        val promotedSemantic = semanticRelations.map { it.summary }
+
+        val proceduralSources = memories
             .filter { it.layer == MemoryLayer.EPISODIC && it.verifiedByWorldCore && it.qUtility >= 0.65 }
-            .sortedByDescending { it.qUtility }
+            .sortedWith(compareByDescending<AssociativeMemoryNode> { it.qUtility }.thenBy { it.id })
             .take(3)
-            .map { ep ->
-                "SKILL_MACRO[src=${ep.id}]: ${ep.content.take(96)} (Q_m=${"%.2f".fmt(ep.qUtility)})"
-            }
+        val proceduralRelations = proceduralSources.map { ep ->
+            val macro = "SKILL_MACRO[src=${ep.id}]: ${ep.content.take(96)} (Q_m=${"%.2f".fmt(ep.qUtility)})"
+            ProceduralMemoryRelation(
+                macro = macro,
+                sourceEpisodeId = ep.id,
+                tags = ep.tags,
+                entityIds = ep.entityIds,
+                confidence = ep.confidence.coerceIn(0.0, 1.0)
+            )
+        }
+        val distilledProcedural = proceduralRelations.map { it.macro }
 
         val prunedIds = if (memories.size > maxNodesPerAgent) {
             val excess = memories.size - maxNodesPerAgent
@@ -285,7 +321,9 @@ class FourLayerMemoryAndSleepEngine(
             replayedNodeIds = replayCandidates.map { it.id },
             promotedSemanticSummaries = promotedSemantic,
             distilledProceduralMacros = distilledProcedural,
-            prunedNodeIds = prunedIds
+            prunedNodeIds = prunedIds,
+            semanticRelations = semanticRelations,
+            proceduralRelations = proceduralRelations
         )
     }
 }
