@@ -94,14 +94,37 @@ internal object WorldGpu {
             var s = d.size
             for (l in 0 until levels) {
                 val off = ProceduralAssetsNative.mipOffset(d.size, l).toInt()
-                val slice = buf.duplicate().order(ByteOrder.nativeOrder())
-                slice.position(off); slice.limit(off + s * s * 4)
-                t.setImage(engine, l, Texture.PixelBufferDescriptor(slice.slice(), Texture.Format.RGBA, Texture.Type.UBYTE))
+                setLevel(engine, t, l, s, 0, buf, off, 4, Texture.Type.UBYTE)
                 s = maxOf(1, s / 2)
             }
             return t
         }
         return SurfaceTextures(srgbMipmapped(d.albedo), chain(d.orm), chain(d.normal), if (withEmissive) srgbMipmapped(d.emissive) else null)
+    }
+
+    /**
+     * Envia o nível [level] (quadrado [size]², camada/face [z]) de [buf] a partir de [offset].
+     *
+     * O JNI do Filament 1.75.1 (`Texture.cpp`, `getTextureDataSize`) desloca a altura da região
+     * por `level` uma segunda vez (`height >> level`), declarando um buffer 2^level vezes menor que
+     * a região e disparando o Precondition "buffer overflow" do `setImageCommon` em todo nível > 0.
+     * Contorno: o nível 0 vai inteiro; os demais linha a linha (altura 1 ⇒ `max(1, 1 >> level)` = 1,
+     * tamanho exato), preservando a cadeia pré-filtrada do C++ (GGX no IBL, Toksvig nas normais).
+     */
+    fun setLevel(engine: Engine, tex: Texture, level: Int, size: Int, z: Int, buf: ByteBuffer, offset: Int, bpp: Int, type: Texture.Type) {
+        val rowBytes = size * bpp
+        fun region(off: Int, bytes: Int): ByteBuffer {
+            val d = buf.duplicate().order(ByteOrder.nativeOrder())
+            d.limit(off + bytes); d.position(off)
+            return d.slice().order(ByteOrder.nativeOrder())
+        }
+        if (level == 0) {
+            tex.setImage(engine, 0, 0, 0, z, size, size, 1, Texture.PixelBufferDescriptor(region(offset, rowBytes * size), Texture.Format.RGBA, type))
+            return
+        }
+        for (y in 0 until size) {
+            tex.setImage(engine, level, 0, y, z, size, 1, 1, Texture.PixelBufferDescriptor(region(offset + y * rowBytes, rowBytes), Texture.Format.RGBA, type))
+        }
     }
 
     /** Cubemap pré-filtrado + SH de 3 bandas (CPU, thread de fundo). */
@@ -139,10 +162,8 @@ internal object WorldGpu {
         var s = d.faceSize
         for (l in 0 until levels) {
             val faceBytes = s * s * 8
-            val slice = d.cube.duplicate().order(ByteOrder.nativeOrder())
-            slice.position(off); slice.limit(off + faceBytes * 6)
             // z = face (cubemap): as 6 faces do nível são contíguas
-            tex.setImage(engine, l, 0, 0, 0, s, s, 6, Texture.PixelBufferDescriptor(slice.slice(), Texture.Format.RGBA, Texture.Type.HALF))
+            for (face in 0 until 6) setLevel(engine, tex, l, s, face, d.cube, off + face * faceBytes, 8, Texture.Type.HALF)
             off += faceBytes * 6
             s = maxOf(1, s / 2)
         }

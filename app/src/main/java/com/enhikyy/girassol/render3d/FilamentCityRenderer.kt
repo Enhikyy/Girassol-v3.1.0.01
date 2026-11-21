@@ -530,7 +530,8 @@ class FilamentCityRenderer(
                 val d = WorldGpu.generateSurface(kind, size, 0x6172A5L + kind * 7919L) ?: return@execute
                 main.post {
                     if (!initialized || gen != generation || surfaces.containsKey(kind)) return@post
-                    surfaces[kind] = WorldGpu.upload(engine, d, withEmissive)
+                    surfaces[kind] = runCatching { WorldGpu.upload(engine, d, withEmissive) }
+                        .getOrElse { Log.w(TAG, "envio da superfície $kind falhou; mantendo cor sólida", it); return@post }
                     refreshMaterials()
                     Log.i(TAG, "superfície $kind ${size}² enviada (${ProceduralAssetsNative.mipLevels(size)} mips)")
                 }
@@ -548,7 +549,10 @@ class FilamentCityRenderer(
         if (!ProceduralAssetsNative.isLoaded) return
         val overcast = if (ph == TimePhase.INTERIOR) 0f else 0.62f
         // 32² síncrono (≈ poucos ms) para nunca renderizar sem luz ambiente; 256² chega em seguida
-        WorldGpu.generateIbl(ph, phaseSunDir(ph), overcast, 32, 16)?.let { ibls[ph] = WorldGpu.uploadIbl(engine, it, phaseLight(ph).iblLux) }
+        WorldGpu.generateIbl(ph, phaseSunDir(ph), overcast, 32, 16)?.let { d ->
+            runCatching { WorldGpu.uploadIbl(engine, d, phaseLight(ph).iblLux) }
+                .onSuccess { ibls[ph] = it }.onFailure { Log.w(TAG, "IBL ${ph.label} 32² falhou", it) }
+        }
         val ex = worker ?: return
         val face = profile().iblFaceSize
         if (face <= 32 || !iblPending.add(ph)) return
@@ -559,7 +563,8 @@ class FilamentCityRenderer(
                 iblPending.remove(ph)
                 if (!initialized || gen != generation) return@post
                 val old = ibls[ph]
-                val n = WorldGpu.uploadIbl(engine, d, phaseLight(ph).iblLux)
+                val n = runCatching { WorldGpu.uploadIbl(engine, d, phaseLight(ph).iblLux) }
+                    .getOrElse { Log.w(TAG, "IBL ${ph.label} ${face}² falhou", it); return@post }
                 ibls[ph] = n
                 if (activeIbl === old) applyIbl(n)
                 old?.destroy(engine)
