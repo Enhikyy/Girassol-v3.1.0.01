@@ -69,7 +69,8 @@ class RsiCoordinator(
             delib += copy.metrics.deliberationsPer100Ticks
         }
         val n = ticks.toDouble()
-        val brier = if (copy.forecastWindow.isEmpty()) 0.25 else copy.metrics.brierScore
+        // Sem previsões observadas não existe calibração: não fabricar Brier neutro.
+        val brier = if (copy.forecastWindow.isEmpty()) Double.NaN else copy.metrics.brierScore
         return ShadowReplayMetrics(fe / n, surv / n, brier, div / n, delib / n, violations)
     }
 
@@ -105,6 +106,9 @@ class RsiCoordinator(
 
     /** Custo minimizado pelo CMA-ES: −(mesmo escore do gate) + penalidades de invariantes e diversidade. */
     fun cmaCost(m: ShadowReplayMetrics): Double {
+        // CMA-ES precisa ordenar custos finitos; métricas inválidas recebem custo máximo e
+        // nunca podem ser escolhidas como evidência de melhoria.
+        if (!m.hasValidMeasurements()) return Double.MAX_VALUE / 4.0
         val score = m.survivalEfficiency - 0.35 * m.meanFreeEnergy - 0.004 * m.llmCallsPer100Ticks
         val diversityPenalty = if (m.behavioralDiversityScore < 0.35) (0.35 - m.behavioralDiversityScore) * 4.0 else 0.0
         return -score + m.invariantsViolated.toDouble() + diversityPenalty + 2.0 * (m.brierScore - 0.25).coerceAtLeast(0.0)
