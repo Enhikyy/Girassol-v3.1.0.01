@@ -213,6 +213,7 @@ class WorldCore(
         val id = "C$serial"
         val name = FIRST_NAMES[rng.nextInt(FIRST_NAMES.size)] + " " + SURNAMES[rng.nextInt(SURNAMES.size)]
         val home = nearHome?.let { state.obj(it) } ?: leastOccupiedHome()
+            ?: error("mundo sem nenhuma CASA: não há onde alojar o cidadão $id (gere/expanda um distrito MORADIA)")
         val c = Citizen(
             id = id, name = name, generation = generation, birthTick = state.tick, parents = parents, genome = genome,
             x = home.tileX, z = home.tileZ, homeObjectId = home.id,
@@ -239,7 +240,8 @@ class WorldCore(
         state.citizens.firstOrNull { it.alive && it.modelKey == modelKey }?.let { return it }
         val rng = StreamSeeds.rng(state.seed, "FUNDADOR:$modelKey", state.tick, "fundador")
         val c = spawnCitizen(randomGenome(rng), emptyList(), 0, rng)
-        val idx = state.citizens.indexOf(c)
+        // spawnCitizen acaba de anexar o novo cidadão ao fim da lista.
+        val idx = state.citizens.lastIndex
         val chosenSex = sex?.uppercase()?.takeIf { it == "F" || it == "M" }
             ?: if (state.citizens.count { it.alive && it.founder && it.sex == "F" } >
                 state.citizens.count { it.alive && it.founder && it.sex == "M" }) "M" else if (rng.nextDouble() < 0.5) "F" else "M"
@@ -248,6 +250,8 @@ class WorldCore(
             birthTick = state.tick - (ADULT_DAYS * TICKS_PER_DAY).toLong() - TICKS_PER_DAY
         ).also { it.modelKey = modelKey; it.sex = chosenSex }
         state.citizens[idx] = founder
+        // Registra a identidade final do fundador após substituir nome e sexo sorteados.
+        emit("FUNDADOR", founder.id, "modelo=$modelKey;nome=${founder.name};sexo=$chosenSex")
         emit("FUNDADOR", founder.id, "modelo=$modelKey;nome=${founder.name};sexo=$chosenSex")
         return founder
     }
@@ -332,10 +336,10 @@ class WorldCore(
 
     /** Parceiros compatíveis para reprodução: sexos diferentes (ou desconhecido em mundos antigos). */
 
-    private fun leastOccupiedHome(): SmartObject {
+    private fun leastOccupiedHome(): SmartObject? {
         val homes = state.objects.filter { it.type == SmartObjectType.CASA }
         val counts = state.aliveCitizens().groupingBy { it.homeObjectId }.eachCount()
-        return homes.minWith(compareBy<SmartObject> { counts[it.id] ?: 0 }.thenBy { it.id })
+        return homes.minWithOrNull(compareBy<SmartObject> { counts[it.id] ?: 0 }.thenBy { it.id })
     }
 
     // ===================================================================== Anokhin
@@ -424,6 +428,7 @@ class WorldCore(
         val src = p.citizen
         val newId = "C${state.nextCitizenSerial++}"
         val home = leastOccupiedHome()
+            ?: error("mundo sem CASA: não é possível admitir o migrante ${src.name}")
         val age = (p.originTick - src.birthTick).coerceAtLeast(0L)
         val c = src.copy(id = newId, birthTick = state.tick - age, x = home.tileX, z = home.tileZ, homeObjectId = home.id,
             social = DunbarSocialNetwork(newId), intention = null, path = mutableListOf(), actionTicksRemaining = 0,
@@ -842,6 +847,7 @@ class WorldCore(
         val rng = StreamSeeds.rng(state.seed, c.id, state.tick, "explorar")
         val unknown = state.objects.filter { "rendimento:${it.id}" !in known }
         if (unknown.isNotEmpty()) return unknown[rng.nextInt(unknown.size)]
+        if (state.objects.isEmpty()) return null
         return state.objects[rng.nextInt(state.objects.size)]
     }
 
