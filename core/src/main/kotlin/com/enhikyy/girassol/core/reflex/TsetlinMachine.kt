@@ -129,7 +129,7 @@ class KotlinTsetlinMachine(
         }
     }
 
-    /** Mesmo formato binário "GRST" (little-endian) do C++: header 20B + polaridades + estados. */
+    /** Snapshot GRST V2 (little-endian): hiperparâmetros, PRNG, polaridades e estados. */
     override fun serialize(): ByteArray {
         val totalBytes = V2_HEADER_BYTES.toLong() + numClauses.toLong() + taStates.size.toLong() * 4L
         require(totalBytes <= Int.MAX_VALUE) { "estado Tsetlin excede o limite de serialização" }
@@ -205,7 +205,7 @@ class KotlinTsetlinMachine(
                     }
                     else -> return null
                 }
-                require(nf > 0 && nc > 0 && ns >= 2 && tt >= 1)
+                require(nf > 0 && nc > 0 && ns in 2..(Int.MAX_VALUE / 2) && tt >= 1)
                 require(storedSpecificity.isFinite() && storedSpecificity >= 1.01f)
                 val expectedStates = nc.toLong() * nf.toLong() * 2L
                 require(expectedStates <= Int.MAX_VALUE)
