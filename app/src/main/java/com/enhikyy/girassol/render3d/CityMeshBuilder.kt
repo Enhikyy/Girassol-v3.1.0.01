@@ -1,5 +1,7 @@
 package com.enhikyy.girassol.render3d
 
+import com.enhikyy.girassol.core.render.BackroomsCorridors
+import com.enhikyy.girassol.core.render.CitizenRig
 import com.enhikyy.girassol.core.world.ObjectView
 import com.enhikyy.girassol.core.world.SmartObjectType
 import com.enhikyy.girassol.core.world.TileType
@@ -141,7 +143,40 @@ object CityMeshBuilder {
             val h = when (o.type) { SmartObjectType.ESCOLA, SmartObjectType.LABORATORIO -> 0.9f; SmartObjectType.PRACA -> 0.12f; else -> 0.55f }
             box(b, o.x + 0.18f, o.z + 0.18f, o.x + 0.82f, o.z + 0.82f, 0f, h, c)
         }
+        backrooms(b, width, tiles, objects)
         return b.mesh()
+    }
+
+    /** Cor do papel de parede amarelo-envelhecido, do carpete úmido e das luminárias fluorescentes. */
+    private val WALLPAPER = lin(0.80f, 0.74f, 0.46f)
+    private val CARPET_DAMP = lin(0.55f, 0.50f, 0.30f)
+    private val CEILING_TILE = lin(0.86f, 0.84f, 0.74f)
+    private val FLUORESCENT = lin(1.0f, 1.0f, 0.86f, 1f)
+    const val BACKROOMS_WALL_H = 1.95f
+
+    /**
+     * Corredores liminares Backrooms (ver [BackroomsCorridors]) entre o setor Lumon e a ala
+     * Modernismo Tropical: carpete úmido, divisórias com papel de parede, faixa de forro
+     * rebaixado no topo das paredes e luminárias fluorescentes a cada 2 células. Sem teto
+     * contínuo para manter os cidadãos visíveis pela câmera orbital.
+     */
+    private fun backrooms(b: Buf, width: Int, tiles: IntArray, objects: List<ObjectView>) {
+        for (c in BackroomsCorridors.plan(width, tiles, objects)) {
+            val mask = BackroomsCorridors.wallMask(width, tiles, c)
+            for ((k, cell) in c.cells.withIndex()) {
+                val x = (cell % width).toFloat(); val z = (cell / width).toFloat()
+                val j = (hash(cell, k, 17) % 5) * 0.01f
+                val floor = floatArrayOf(CARPET_DAMP[0] + j, CARPET_DAMP[1] + j, CARPET_DAMP[2], 0f)
+                b.quad(V3(x, 0.012f, z), V3(x, 0.012f, z + 1f), V3(x + 1f, 0.012f, z + 1f), V3(x + 1f, 0.012f, z), floor)
+                val m = mask[k]
+                val t = 0.05f; val h = BACKROOMS_WALL_H
+                if (m and 1 != 0) { box(b, x, z, x + 1f, z + t, 0f, h, WALLPAPER, 0.7f); box(b, x, z, x + 1f, z + 0.22f, h, h + 0.08f, CEILING_TILE, 0.95f) }
+                if (m and 2 != 0) { box(b, x + 1f - t, z, x + 1f, z + 1f, 0f, h, WALLPAPER, 0.7f); box(b, x + 0.78f, z, x + 1f, z + 1f, h, h + 0.08f, CEILING_TILE, 0.95f) }
+                if (m and 4 != 0) { box(b, x, z + 1f - t, x + 1f, z + 1f, 0f, h, WALLPAPER, 0.7f); box(b, x, z + 0.78f, x + 1f, z + 1f, h, h + 0.08f, CEILING_TILE, 0.95f) }
+                if (m and 8 != 0) { box(b, x, z, x + t, z + 1f, 0f, h, WALLPAPER, 0.7f); box(b, x, z, x + 0.22f, z + 1f, h, h + 0.08f, CEILING_TILE, 0.95f) }
+                if (k % 2 == 0) box(b, x + 0.3f, z + 0.42f, x + 0.7f, z + 0.58f, h + 0.1f, h + 0.14f, FLUORESCENT, 1f)
+            }
+        }
     }
 
     /** Postes de luz (praças e a cada 4 tiles de rua) + janelas acesas → sprites de halation. */
@@ -154,6 +189,8 @@ object CityMeshBuilder {
             if (t == TileType.PRACA && hash(x, z, 5) % 3 == 0) centers.add(floatArrayOf(x + 0.5f, 1.6f, z + 0.5f, 1.0f, 0.72f, 0.42f, 1.2f))
             if (t == TileType.EDIFICIO && hash(x, z, 13) % 4 == 0) centers.add(floatArrayOf(x + 1.0f, buildingHeight(x, z) * 0.55f, z + 1.0f, 1.0f, 0.42f, 0.22f, 1.3f))
         }
+        for (c in BackroomsCorridors.plan(width, tiles, objects)) for ((k, cell) in c.cells.withIndex()) if (k % 2 == 0)
+            centers.add(floatArrayOf(cell % width + 0.5f, BACKROOMS_WALL_H + 0.12f, cell / width + 0.5f, 0.92f, 1.0f, 0.72f, 0.9f))
         for (o in objects) if (o.type == SmartObjectType.LABORATORIO || o.type == SmartObjectType.USINA_SOLAR)
             centers.add(floatArrayOf(o.x + 0.5f, 1.2f, o.z + 0.5f, 0.35f, 0.85f, 0.8f, 1.1f))
         val n = minOf(centers.size, maxSprites)
@@ -173,11 +210,27 @@ object CityMeshBuilder {
         return GlowSprites(pos, uv, col, idx)
     }
 
-    /** Caixa unitária (base no chão, centro em x/z) para os cidadãos; branca, sombreada; cor via tint. */
-    fun citizenMesh(): CityMesh {
+    /** Malha do cidadão com skinning rígido: [bones] = índice do osso por vértice ([CitizenRig]). */
+    class RiggedMesh(val positions: FloatArray, val colors: FloatArray, val indices: IntArray, val bones: ShortArray)
+
+    /**
+     * Cidadão articulado (pose de ligação adulta, 1,42 de altura, rosto em +z): tronco,
+     * cabeça, boca, braços e pernas; branco sombreado (a cor vem do tint do material),
+     * com a boca escura e emissivo zero.
+     */
+    fun citizenMesh(): RiggedMesh {
         val b = Buf()
-        box(b, -0.22f, -0.22f, 0.22f, 0.22f, 0f, 1.05f, floatArrayOf(1f, 1f, 1f, 0f), 0.7f)
-        box(b, -0.16f, -0.16f, 0.16f, 0.16f, 1.12f, 1.42f, floatArrayOf(1f, 1f, 1f, 0f), 0.85f)
-        return b.mesh()
+        val boneOf = ArrayList<Short>()
+        fun part(bone: Int, f: () -> Unit) { val before = b.p.size / 3; f(); repeat(b.p.size / 3 - before) { boneOf.add(bone.toShort()) } }
+        val white = floatArrayOf(1f, 1f, 1f, 0f)
+        part(CitizenRig.BONE_LEG_L) { box(b, -0.16f, -0.07f, -0.04f, 0.07f, 0f, 0.55f, white, 0.7f) }
+        part(CitizenRig.BONE_LEG_R) { box(b, 0.04f, -0.07f, 0.16f, 0.07f, 0f, 0.55f, white, 0.7f) }
+        part(CitizenRig.BONE_TORSO) { box(b, -0.21f, -0.13f, 0.21f, 0.13f, 0.53f, 1.06f, white, 0.8f) }
+        part(CitizenRig.BONE_ARM_L) { box(b, -0.33f, -0.055f, -0.22f, 0.055f, 0.56f, 1.02f, white, 0.75f) }
+        part(CitizenRig.BONE_ARM_R) { box(b, 0.22f, -0.055f, 0.33f, 0.055f, 0.56f, 1.02f, white, 0.75f) }
+        part(CitizenRig.BONE_HEAD) { box(b, -0.15f, -0.15f, 0.15f, 0.15f, 1.10f, 1.40f, white, 0.85f) }
+        part(CitizenRig.BONE_MOUTH) { box(b, -0.055f, 0.148f, 0.055f, 0.162f, 1.185f, 1.215f, floatArrayOf(0.05f, 0.03f, 0.03f, 0f), 1f) }
+        val m = b.mesh()
+        return RiggedMesh(m.positions, m.colors, m.indices, boneOf.toShortArray())
     }
 }

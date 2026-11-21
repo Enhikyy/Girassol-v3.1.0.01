@@ -26,9 +26,9 @@ enum class EffectLevel(
     val postProcessing: Boolean get() = bloomLevels > 0 || fxaa || fog || vignette || colorGrading
 
     fun describe(): String = when (this) {
-        FULL -> "bloom 6 níveis + halação + grão + gradação 500T + vinheta + névoa + FXAA"
-        REDUCED -> "bloom 3 níveis + halação + grão + gradação 500T + vinheta"
-        MINIMAL -> "gradação 500T + halação + grão (sem bloom)"
+        FULL -> "girassol_dehancer_post (bloom + halação + sombras densas + grão Kodak) + bloom 6 níveis + gradação 500T + vinheta + névoa + FXAA + PBR KTX2"
+        REDUCED -> "girassol_dehancer_post (bloom + halação + sombras densas + grão Kodak) + bloom 3 níveis + gradação 500T + vinheta + PBR KTX2"
+        MINIMAL -> "girassol_dehancer_post (halação + sombras densas + grão Kodak, sem bloom) + gradação 500T + PBR KTX2"
         NONE -> "cena sem pós-processamento"
     }
 

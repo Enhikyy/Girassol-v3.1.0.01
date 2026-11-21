@@ -5,7 +5,12 @@ import android.util.Log
 import android.view.Choreographer
 import android.view.Surface
 import android.view.SurfaceView
+import com.enhikyy.girassol.audio.VoiceAmplitude
+import com.enhikyy.girassol.core.render.CitizenRig
+import com.enhikyy.girassol.core.render.Mat4
 import com.enhikyy.girassol.core.world.ActionType
+import com.enhikyy.girassol.core.world.AgentView
+import com.enhikyy.girassol.sim.SimulationHub
 import com.enhikyy.girassol.core.world.WorldRenderSnapshot
 import com.google.android.filament.Box
 import com.google.android.filament.Camera
@@ -17,10 +22,13 @@ import com.google.android.filament.IndexBuffer
 import com.google.android.filament.Material
 import com.google.android.filament.MaterialInstance
 import com.google.android.filament.RenderableManager
+import com.google.android.filament.RenderTarget
 import com.google.android.filament.Renderer
 import com.google.android.filament.Scene
 import com.google.android.filament.SwapChain
 import com.google.android.filament.SwapChainFlags
+import com.google.android.filament.Texture
+import com.google.android.filament.TextureSampler
 import com.google.android.filament.ToneMapper
 import com.google.android.filament.VertexBuffer
 import com.google.android.filament.View
@@ -85,6 +93,25 @@ class FilamentCityRenderer(
     private lateinit var glowMat: Material
     private lateinit var cityMi: MaterialInstance
     private lateinit var glowMi: MaterialInstance
+    private lateinit var concreteTex: Texture
+    private lateinit var carpetTex: Texture
+
+    // Passada analógica girassol_dehancer_post: a View da cidade renderiza num RenderTarget e
+    // uma segunda View desenha um triângulo de tela cheia com bloom/halação/sombras/grão.
+    private lateinit var postMat: Material
+    private lateinit var postMi: MaterialInstance
+    private lateinit var postScene: Scene
+    private lateinit var postView: View
+    private lateinit var postCamera: Camera
+    private var postEntity = 0
+    private var postVb: VertexBuffer? = null; private var postIb: IndexBuffer? = null
+    private var rtColor: Texture? = null; private var rtDepth: Texture? = null; private var renderTarget: RenderTarget? = null
+    private var postActive = false
+    private val startNs = System.nanoTime()
+    private val rigStates = HashMap<String, CitizenRig.State>()
+    private val agentViews = HashMap<String, AgentView>()
+    private val boneScratch = FloatArray(CitizenRig.BONES * 16)
+    private val boneBuffer: ByteBuffer = ByteBuffer.allocateDirect(CitizenRig.BONES * 16 * 4).order(ByteOrder.nativeOrder())
 
     private var cityEntity = 0; private var cityVb: VertexBuffer? = null; private var cityIb: IndexBuffer? = null
     private var glowEntity = 0; private var glowVb: VertexBuffer? = null; private var glowIb: IndexBuffer? = null
@@ -132,6 +159,7 @@ class FilamentCityRenderer(
             override fun onResized(width: Int, height: Int) {
                 widthPx = width.coerceAtLeast(1); heightPx = height.coerceAtLeast(1)
                 view.setViewport(Viewport(0, 0, widthPx, heightPx))
+                configurePost()
                 updateProjection()
             }
         })
@@ -147,6 +175,7 @@ class FilamentCityRenderer(
         swapChain = engine.createSwapChain(width, height, SwapChainFlags.CONFIG_DEFAULT)
         widthPx = width; heightPx = height
         view.setViewport(Viewport(0, 0, width, height))
+        configurePost()
         updateProjection()
         initialized = true
     }
@@ -164,7 +193,7 @@ class FilamentCityRenderer(
             val eye = camera.eye(); val tgt = camera.target()
             fCamera.lookAt(eye.x.toDouble(), eye.y.toDouble(), eye.z.toDouble(), tgt.x.toDouble(), tgt.y.toDouble(), tgt.z.toDouble(), 0.0, 1.0, 0.0)
             if (renderer.beginFrame(sc, System.nanoTime())) {
-                renderer.render(view)
+                renderViews()
                 renderer.endFrame()
                 done++
             }
@@ -185,15 +214,100 @@ class FilamentCityRenderer(
         view.setCamera(fCamera)
         renderer.setClearOptions(Renderer.ClearOptions().apply { clear = true; clearColor = doubleArrayOf(0.0, 0.0, 0.0, 1.0) })
         fCamera.setExposure(1.0f)
-        applyEffectLevel(level)
         cityMat = loadMaterial("materials/city.filamat")
         glowMat = loadMaterial("materials/glow.filamat")
-        cityMi = cityMat.createInstance().apply { setParameter("tint", 1f, 1f, 1f, 1f); setParameter("emissiveBoost", 1.2f) }
+        postMat = loadMaterial("materials/girassol_dehancer_post.filamat")
+        concreteTex = PbrTextures.load(context, engine, PbrTextures.CONCRETE)
+        carpetTex = PbrTextures.load(context, engine, PbrTextures.CARPET)
+        cityMi = cityMat.createInstance().apply { setParameter("tint", 1f, 1f, 1f, 1f); setParameter("emissiveBoost", 1.2f); bindDetail(this) }
         glowMi = glowMat.createInstance().apply { setParameter("size", 0.55f); setParameter("intensity", 1.0f) }
         val agentMesh = CityMeshBuilder.citizenMesh()
-        agentVb = colorVertexBuffer(agentMesh.positions, agentMesh.colors)
+        agentVb = riggedVertexBuffer(agentMesh)
         agentIb = indexBuffer(agentMesh.indices)
         agentIndexCount = agentMesh.indices.size
+        initPostPass()
+        applyEffectLevel(level)
+    }
+
+    /** Texturas PBR KTX2 triplanares (concreto/carpete); intensidade cai nos níveis baixos. */
+    private fun bindDetail(mi: MaterialInstance) {
+        mi.setParameter("concreteTex", concreteTex, PbrTextures.sampler)
+        mi.setParameter("carpetTex", carpetTex, PbrTextures.sampler)
+        mi.setParameter("detail", if (level == EffectLevel.NONE) 0f else 1f, 0.5f)
+    }
+
+    private fun initPostPass() {
+        postScene = engine.createScene()
+        postView = engine.createView()
+        postCamera = engine.createCamera(EntityManager.get().create())
+        postView.setScene(postScene)
+        postView.setCamera(postCamera)
+        postView.setPostProcessingEnabled(false)
+        postView.setShadowingEnabled(false)
+        postMi = postMat.createInstance()
+        // triângulo de tela cheia em espaço de dispositivo (vertexDomain: device)
+        val vb = VertexBuffer.Builder().bufferCount(2).vertexCount(3)
+            .attribute(VertexBuffer.VertexAttribute.POSITION, 0, VertexBuffer.AttributeType.FLOAT3, 0, 12)
+            .attribute(VertexBuffer.VertexAttribute.UV0, 1, VertexBuffer.AttributeType.FLOAT2, 0, 8)
+            .build(engine)
+        vb.setBufferAt(engine, 0, floatBuffer(floatArrayOf(-1f, -1f, 0f, 3f, -1f, 0f, -1f, 3f, 0f)))
+        vb.setBufferAt(engine, 1, floatBuffer(floatArrayOf(0f, 0f, 2f, 0f, 0f, 2f)))
+        val ib = indexBuffer(intArrayOf(0, 1, 2))
+        postVb = vb; postIb = ib
+        postEntity = EntityManager.get().create()
+        RenderableManager.Builder(1)
+            .boundingBox(Box(0f, 0f, 0f, 1f, 1f, 1f)).culling(false)
+            .geometry(0, RenderableManager.PrimitiveType.TRIANGLES, vb, ib, 0, 3)
+            .material(0, postMi).castShadows(false).receiveShadows(false)
+            .build(engine, postEntity)
+        postScene.addEntity(postEntity)
+    }
+
+    /** Intensidades (bloom, halação, densidade das sombras, grão) por nível de efeito. */
+    private fun postStrength(l: EffectLevel): FloatArray? = when (l) {
+        EffectLevel.FULL -> floatArrayOf(0.32f, 0.55f, 0.38f, 0.055f)
+        EffectLevel.REDUCED -> floatArrayOf(0.24f, 0.45f, 0.32f, 0.05f)
+        EffectLevel.MINIMAL -> floatArrayOf(0f, 0.35f, 0.28f, 0.045f)
+        EffectLevel.NONE -> null
+    }
+
+    /** (Re)cria o RenderTarget no tamanho do viewport e liga/desliga a passada analógica. */
+    private fun configurePost() {
+        val strength = postStrength(level)
+        renderTarget?.let { view.setRenderTarget(null); engine.destroyRenderTarget(it) }; renderTarget = null
+        rtColor?.let { engine.destroyTexture(it) }; rtColor = null
+        rtDepth?.let { engine.destroyTexture(it) }; rtDepth = null
+        postActive = false
+        if (strength == null) return
+        val ok = runCatching {
+            val color = Texture.Builder().width(widthPx).height(heightPx).levels(1).sampler(Texture.Sampler.SAMPLER_2D)
+                .format(Texture.InternalFormat.RGBA8).usage(Texture.Usage.COLOR_ATTACHMENT or Texture.Usage.SAMPLEABLE).build(engine)
+            val depth = Texture.Builder().width(widthPx).height(heightPx).levels(1).sampler(Texture.Sampler.SAMPLER_2D)
+                .format(Texture.InternalFormat.DEPTH24).usage(Texture.Usage.DEPTH_ATTACHMENT).build(engine)
+            rtColor = color; rtDepth = depth
+            renderTarget = RenderTarget.Builder()
+                .texture(RenderTarget.AttachmentPoint.COLOR, color)
+                .texture(RenderTarget.AttachmentPoint.DEPTH, depth)
+                .build(engine)
+            view.setRenderTarget(renderTarget)
+            postView.setViewport(Viewport(0, 0, widthPx, heightPx))
+            postMi.setParameter("sceneColor", color, TextureSampler(TextureSampler.MinFilter.LINEAR, TextureSampler.MagFilter.LINEAR, TextureSampler.WrapMode.CLAMP_TO_EDGE))
+            postMi.setParameter("texelSize", 1f / widthPx, 1f / heightPx)
+            postMi.setParameter("strength", strength[0], strength[1], strength[2], strength[3])
+            true
+        }.getOrElse { Log.w(TAG, "girassol_dehancer_post indisponível; seguindo sem a passada analógica", it); false }
+        postActive = ok
+        if (!ok) view.setRenderTarget(null)
+    }
+
+    private fun renderViews() {
+        if (postActive) {
+            postMi.setParameter("time", (System.nanoTime() - startNs) / 1e9f)
+            renderer.render(view)
+            renderer.render(postView)
+        } else {
+            renderer.render(view)
+        }
     }
 
     /**
@@ -222,7 +336,8 @@ class FilamentCityRenderer(
             color = floatArrayOf(0.10f, 0.085f, 0.06f)
         })
         view.setDynamicResolutionOptions(View.DynamicResolutionOptions().apply {
-            enabled = l.dynamicResolution; minScale = 0.55f; maxScale = 1.0f; quality = View.QualityLevel.LOW
+            // com o RenderTarget da passada analógica a resolução fica fixa (o RT tem o tamanho do viewport)
+            enabled = l.dynamicResolution && postStrength(l) == null; minScale = 0.55f; maxScale = 1.0f; quality = View.QualityLevel.LOW
         })
         if (l.colorGrading) {
             if (!::colorGrading.isInitialized) colorGrading = ColorGrading.Builder()
@@ -249,6 +364,9 @@ class FilamentCityRenderer(
         if (!initialized || l == level) return
         level = l
         applyEffectLevel(l)
+        configurePost()
+        bindDetail(cityMi)
+        for ((_, pair) in agentEntities) bindDetail(pair.second)
         lastSnapshot?.let { rebuildCity(it) }
         fpsGovernor.reset()
         Render3dTelemetry.update { it.copy(effectLevel = l.label) }
@@ -278,12 +396,39 @@ class FilamentCityRenderer(
         return vb
     }
 
+    /** Cidadão articulado: posição, cor e skinning rígido (1 osso por vértice, peso 1). */
+    private fun riggedVertexBuffer(m: CityMeshBuilder.RiggedMesh): VertexBuffer {
+        val n = m.positions.size / 3
+        val vb = VertexBuffer.Builder().bufferCount(4).vertexCount(n)
+            .attribute(VertexBuffer.VertexAttribute.POSITION, 0, VertexBuffer.AttributeType.FLOAT3, 0, 12)
+            .attribute(VertexBuffer.VertexAttribute.COLOR, 1, VertexBuffer.AttributeType.FLOAT4, 0, 16)
+            .attribute(VertexBuffer.VertexAttribute.BONE_INDICES, 2, VertexBuffer.AttributeType.USHORT4, 0, 8)
+            .attribute(VertexBuffer.VertexAttribute.BONE_WEIGHTS, 3, VertexBuffer.AttributeType.FLOAT4, 0, 16)
+            .build(engine)
+        vb.setBufferAt(engine, 0, floatBuffer(m.positions))
+        vb.setBufferAt(engine, 1, floatBuffer(m.colors))
+        val bi = ByteBuffer.allocateDirect(n * 8).order(ByteOrder.nativeOrder())
+        val sb = bi.asShortBuffer(); for (b in m.bones) { sb.put(b); sb.put(0); sb.put(0); sb.put(0) }
+        vb.setBufferAt(engine, 2, bi)
+        val w = FloatArray(n * 4); for (i in 0 until n) w[i * 4] = 1f
+        vb.setBufferAt(engine, 3, floatBuffer(w))
+        return vb
+    }
+
     private fun indexBuffer(idx: IntArray): IndexBuffer {
         val ib = IndexBuffer.Builder().indexCount(idx.size).bufferType(IndexBuffer.Builder.IndexType.UINT).build(engine)
         val b = ByteBuffer.allocateDirect(idx.size * 4).order(ByteOrder.nativeOrder())
         b.asIntBuffer().put(idx)
         ib.setBuffer(engine, b)
         return ib
+    }
+
+    private fun destroyPostEntity() {
+        if (postEntity == 0) return
+        postScene.removeEntity(postEntity)
+        engine.renderableManager.destroy(postEntity)
+        EntityManager.get().destroy(postEntity)
+        postEntity = 0
     }
 
     private fun destroyRenderable(entity: Int) {
@@ -357,16 +502,19 @@ class FilamentCityRenderer(
                 val ent = EntityManager.get().create()
                 val mi = cityMat.createInstance()
                 mi.setParameter("emissiveBoost", 0f)
+                bindDetail(mi)
                 engine.transformManager.create(ent)
                 RenderableManager.Builder(1)
-                    .boundingBox(Box(0f, 0.75f, 0f, 0.3f, 0.8f, 0.3f))
+                    .boundingBox(Box(0f, 0.75f, 0f, 0.5f, 0.85f, 0.5f))
                     .geometry(0, RenderableManager.PrimitiveType.TRIANGLES, agentVb, agentIb, 0, agentIndexCount)
                     .material(0, mi).castShadows(false).receiveShadows(false)
+                    .skinning(CitizenRig.BONES)
                     .build(engine, ent)
                 scene.addEntity(ent)
                 visual[a.id] = floatArrayOf(a.fx, 0f, a.fz)
                 Pair(ent, mi).also { agentEntities[a.id] = it }
             }
+            agentViews[a.id] = a
             val c = actionRgb(a.action)
             val glow = if (night) 1.6f else 1f
             val moodLift = (0.85f + 0.15f * a.mood.toFloat())
@@ -377,7 +525,7 @@ class FilamentCityRenderer(
             val (ent, mi) = agentEntities.remove(id) ?: continue
             destroyRenderable(ent)
             engine.destroyMaterialInstance(mi)
-            visual.remove(id)
+            visual.remove(id); rigStates.remove(id); agentViews.remove(id)
         }
         targets = newTargets
         Render3dTelemetry.update { it.copy(vertices = vertexCount, citizens = agentEntities.size) }
@@ -425,14 +573,23 @@ class FilamentCityRenderer(
     private fun renderFrame(frameTimeNanos: Long, dt: Float) {
         val tm = engine.transformManager
         val k = (dt * 6f).coerceAtMost(1f)
-        val m = FloatArray(16)
+        val rm = engine.renderableManager
+        val tps = SimulationHub.status.value.effectiveTps.toFloat()
+        val now = System.nanoTime()
         for ((id, pair) in agentEntities) {
             val v = visual[id] ?: continue
             val t = targets[id] ?: continue
             v[0] += (t[0] - v[0]) * k; v[2] += (t[2] - v[2]) * k
-            m.fill(0f); m[0] = 1f; m[5] = 1f; m[10] = 1f; m[15] = 1f
-            m[12] = v[0]; m[13] = v[1]; m[14] = v[2]
+            val a = agentViews[id]
+            val st = rigStates.getOrPut(id) { CitizenRig.State() }
+            // cinemática sincronizada: velocidade ORCA/RVO2, digitação CRT e amplitude do Pocket-TTS
+            val root = CitizenRig.pose(st, CitizenRig.Input(
+                maturity = a?.maturity ?: 1f, vx = a?.vx ?: 0f, vz = a?.vz ?: 0f, ticksPerSecond = tps,
+                typing = a?.typing == true, amplitude = VoiceAmplitude.level(id, now), dt = dt), boneScratch)
+            val m = Mat4.mul(Mat4.translate(v[0], v[1], v[2]), root)
             tm.setTransform(tm.getInstance(pair.first), m)
+            boneBuffer.clear(); boneBuffer.asFloatBuffer().put(boneScratch); boneBuffer.rewind()
+            rm.setBonesAsMatrices(rm.getInstance(pair.first), boneBuffer, CitizenRig.BONES, 0)
         }
         val eye = camera.eye(); val tgt = camera.target()
         fCamera.lookAt(eye.x.toDouble(), eye.y.toDouble(), eye.z.toDouble(), tgt.x.toDouble(), tgt.y.toDouble(), tgt.z.toDouble(), 0.0, 1.0, 0.0)
@@ -440,7 +597,7 @@ class FilamentCityRenderer(
         val sc = swapChain ?: return
         if (!uiHelper.isReadyToRender) return
         if (renderer.beginFrame(sc, frameTimeNanos)) {
-            renderer.render(view)
+            renderViews()
             renderer.endFrame()
             fpsFrames++
         }
@@ -475,13 +632,21 @@ class FilamentCityRenderer(
         initialized = false
         if (!headless) uiHelper.detach()
         for ((_, pair) in agentEntities) { destroyRenderable(pair.first); engine.destroyMaterialInstance(pair.second) }
-        agentEntities.clear(); visual.clear()
+        agentEntities.clear(); visual.clear(); rigStates.clear(); agentViews.clear()
+        view.setRenderTarget(null)
+        renderTarget?.let { engine.destroyRenderTarget(it) }; rtColor?.let { engine.destroyTexture(it) }; rtDepth?.let { engine.destroyTexture(it) }
+        destroyPostEntity()
+        postVb?.let { engine.destroyVertexBuffer(it) }; postIb?.let { engine.destroyIndexBuffer(it) }
+        engine.destroyMaterialInstance(postMi); engine.destroyMaterial(postMat)
+        engine.destroyView(postView); engine.destroyScene(postScene)
+        postCamera.entity.let { engine.destroyCameraComponent(it); EntityManager.get().destroy(it) }
         destroyRenderable(cityEntity); destroyRenderable(glowEntity)
         cityVb?.let { engine.destroyVertexBuffer(it) }; cityIb?.let { engine.destroyIndexBuffer(it) }
         glowVb?.let { engine.destroyVertexBuffer(it) }; glowIb?.let { engine.destroyIndexBuffer(it) }
         engine.destroyVertexBuffer(agentVb); engine.destroyIndexBuffer(agentIb)
         engine.destroyMaterialInstance(cityMi); engine.destroyMaterialInstance(glowMi)
         engine.destroyMaterial(cityMat); engine.destroyMaterial(glowMat)
+        engine.destroyTexture(concreteTex); engine.destroyTexture(carpetTex)
         if (::colorGrading.isInitialized) engine.destroyColorGrading(colorGrading)
         swapChain?.let { engine.destroySwapChain(it) }; swapChain = null
         engine.destroyView(view); engine.destroyScene(scene); engine.destroyRenderer(renderer)

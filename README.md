@@ -1,4 +1,4 @@
-# Girassol v3.4.0.00
+# Girassol v3.5.0.00
 
 Sociedade sintética que vive continuamente num aparelho Android: cidadãos com corpo, memória,
 emoções, crenças e instituições habitam uma cidade isométrica gerada a partir de uma semente,
@@ -14,8 +14,49 @@ Implementação feita do zero a partir do documento consolidado "PROJETO GIRASSO
 | `core/` | Motor Kotlin/JVM puro (sem Android): `WorldCore` com ciclo de 12 estágios, economia por partidas dobradas, estigmergia, ADICO + cliodinâmica, inferência ativa, memória ACT-R/MemRL, imunidade epistêmica, sono/consolidação, pedagogia BKT, evolução diploide, Tsetlin, MAP-Elites/AURORA, RSI delimitado com Shadow-Replay e snapshot CBOR+gzip com SHA-256. |
 | `app/` | App Android (Compose, minSdk 33, targetSdk 35, só `arm64-v8a` no release): serviço em primeiro plano contínuo, persistência SQLite WAL, autodetecção de hardware, viewport 3D Google Filament (estética Kodak 500T/70mm) com Modo Eco 2D isométrico, balões de fala dos cidadãos, barra de navegação flutuante OLED e cinco abas (Mundo, Cidadãos, Sociedade, Mente, Sistema). |
 | `app/src/main/cpp/` | Núcleo nativo C++20 via JNI: `libgirassol_core.so` (A* com clearance, LoRA on-device treinado no sono, áudio binaural em AAudio com ducking, Tsetlin bit a bit idêntico ao Kotlin, MAP-Elites, índice episódico binário bit[256] com popcount, sonda de SoC, detecção SIMD por HWCAP, `/proc/self/status`) e um único motor LLM `libgirassol_llm.so` sobre `libllama.so`/`libggml.so` compartilhadas, com backends de CPU dinâmicos (`GGML_BACKEND_DL`) `libggml-cpu-android_armv8.0_1.so`, `armv8.2_2` (dotprod+fp16+KleidiAI) e `armv8.6_1` (i8mm), escolhidos em runtime. As bibliotecas do Girassol exportam só `JNI_OnLoad` e `Java_*`. |
-| `app/src/main/materials/` | Materiais Filament (`city.mat`, `glow.mat`) compilados para `.filamat` pelo `matc` na task Gradle `compileFilamentMaterials`. |
+| `app/src/main/materials/` | Materiais Filament (`city.mat` com PBR KTX2 triplanar, `glow.mat` e o pós analógico `girassol_dehancer_post.mat`) compilados para `.filamat` pelo `matc` na task Gradle `compileFilamentMaterials`. |
+| `app/src/main/assets/textures/` | Texturas PBR procedurais KTX2 (concreto brutalista, carpete Backrooms), geradas por `scripts/gen_pbr_ktx2.py` e conferidas por `licenses/TEXTURES.sha256`. |
+| `pack_rapido/`, `pack_profundo_a/`, `pack_profundo_b/` | Asset packs `install-time` do AAB (modelo rápido + Sherpa-ONNX; modelo profundo em duas partes < 1,5 GB). |
 | `native-tests/` | Testes nativos de host com ASan/UBSan, incluindo a assinatura de paridade Kotlin↔C++. |
+
+## Novidades da v3.5.0.00
+
+Os 11 pontos do adendo de fechamento, com onde cada um vive no código:
+
+1. Biblioteca de Conhecimento (processo 19): ingestão offline de `TXT`, `EPUB`, `PDF`, `Parquet` e áudio
+   (`core/knowledge/DocumentParsers.kt`, `app/knowledge/LibraryIngest.kt`, `AudioTranscriber.kt` com SenseVoice-Small
+   via Sherpa-ONNX), alimentando a memória semântica e o léxico comprimido emergente (`EmergentLexicon`).
+   MeshSync LAN (`core/mesh/MeshSyncProtocol.kt`, `app/mesh/MeshSyncManager.kt`): descoberta NSD `_girassol._tcp` +
+   beacon UDP 47653, quadros autenticados por HMAC-SHA256, WifiLock/MulticastLock com tempo limite de 10 min,
+   snapshots diferenciais `.grs` e migração de cidadãos com reversão em caso de falha.
+2. LoRA real no aparelho: `OnDeviceLoraTrainer` (`cpp/lora_ondevice.cpp`) treina um adaptador leve no ciclo de sono a
+   partir das memórias episódicas de maior utilidade, aceita só se a NLL de validação cair, e aplica via
+   `llama_adapter_lora_init` / `llama_set_adapters_lora`.
+3. Cadeia SHA-256 no SQLite WAL: cada evento canônico grava `prev_hash` e `event_hash` (`WorldStateHashChain`),
+   com verificação na aba Sistema ("Verificar cadeia SHA-256").
+4. Sistemas Funcionais de Anokhin: síntese aferente + Aceitador de Resultados da Ação
+   (`AnokhinFunctionalSystem.kt` / `anokhin_functional_system.hpp`) antes de atualizar plasticidade e surpresa.
+5. CMA-ES compacto (`CmaEs.kt` / `cma_es.hpp`) para hiperparâmetros contínuos de decisão e locomoção, promovido só
+   pelo `BoundedRsiPromotionGate`.
+6. Qualquer `.gguf` válido (F16/FP16 ~350M, Q4_0, Q8_0 …), sem filtro por nome; KV-cache volta para F16 sempre que
+   `head_dim % 32 != 0`.
+7. Build blindado: `-Pgirassol.llguidance=auto|on|off` compila o crate `llguidance` (Rust, `aarch64-linux-android`)
+   e cai para GBNF estrito se falhar; `-Pgirassol.embedModels=true -Pgirassol.distribution=direto` gera o APK
+   arm64-v8a com o modelo rápido Q4_0 + Sherpa-ONNX + texturas KTX2, checado abaixo de 1,90 GB
+   (`scripts/check_apk_size.sh <apk> 1945`); `-Pgirassol.distribution=play` gera o AAB com o modelo profundo
+   (~2,2 GB) em asset packs `install-time` (`scripts/check_aab_size.sh`: AAB < 5 GB, cada pack < 1,5 GB,
+   base + packs < 4 GB). O modelo profundo também pode ser importado pelo SAF.
+8. Pós-processamento `girassol_dehancer_post.filamat` (bloom, halação vermelho-alaranjada, sombras densas e grão
+   Kodak) numa segunda View sobre um RenderTarget, e corredores liminares Backrooms ligando os laboratórios
+   Severance/Lumon às praças e hortas da ala Modernismo Tropical (`core/render/BackroomsCorridors.kt`).
+9. Crescimento infantil → adulto (`CitizenGrowth`) e esqueleto procedural de 7 ossos com skinning no Filament
+   (`core/render/CitizenRig.kt`): passada sincronizada com a velocidade ORCA/RVO2, braços no teclado nos
+   terminais CRT e boca/gesto pela amplitude vocal do Pocket-TTS (`VoiceAmplitude`).
+10. 15 temas nativos com contraste WCAG AA ≥ 4,5:1 (pior caso sobre superfícies translúcidas) entre Instrument Sans /
+    JetBrains Mono e o fundo, validado em `ThemeContrastTest` (`core/ui/ThemePalettes.kt`). Fontes OFL em
+    `app/src/main/res/font/`, conferidas por `licenses/FONTS.sha256`.
+11. Caminhos relativos em `settings.gradle.kts`, `build.gradle.kts` e `CMakeLists.txt` (CodeAssist), verificados no
+    CI por `scripts/check_relative_paths.sh`.
 
 ## Compilar
 
@@ -28,10 +69,11 @@ Requisitos: JDK 17, Android SDK 35, NDK 27.0.12077973 e CMake 3.22.1.
 ```
 
 Saídas: um APK por ABI (`splits.abi`, sem APK universal) em `app/build/outputs/apk/<tipo>/app-<abi>-<tipo>.apk`
-e o bundle `app/build/outputs/bundle/release/app-release.aab`. `scripts/check_apk_size.sh <apk> 14` confere o
-limite de 14 MB e a presença de exatamente um motor compartilhado + três backends de CPU. Tamanho medido
-(release arm64-v8a, v3.4.0.00): 13.942 KiB (≈13,6 MiB) com libllama/libggml/libggml-base compartilhadas e os três
-backends `libggml-cpu-android_armv8.{0_1,2_2,6_1}.so`; o AAB tem ≈14,8 MiB (inclui símbolos de depuração).
+e o bundle `app/build/outputs/bundle/release/app-release.aab`. Sem `-Pgirassol.embedModels=true` o APK fica leve
+(sem modelos; útil para desenvolvimento). Com modelos embutidos, `scripts/check_apk_size.sh <apk> 1945` confere o
+teto de 1,90 GB do APK direto (o Android recusa APKs únicos acima de 2 GB com `INSTALL_FAILED_INVALID_APK`) e a
+presença de exatamente um motor compartilhado + três backends de CPU; `scripts/check_aab_size.sh <aab>` confere
+os limites do Google Play para os asset packs.
 
 Na primeira execução o Gradle baixa e verifica por SHA-256 o código do llama.cpp (tag `v1.0.0`) e as
 ferramentas do Filament 1.75.1 (`matc`) em `build/third_party/`. Para usar cópias locais:
@@ -77,9 +119,10 @@ testes, não para publicação). No GitHub Actions, configure o secret `GIRASSOL
    o painel "Energia e ADPF" (wake lock, WifiLock, temperatura, sessão ADPF) e a chave de vozes TTS offline.
 6. A faixa de telemetria acima da barra flutuante mostra FPS do Filament, estado do llama.cpp, ciclos LoRA e RSS.
 
-Modelos recomendados para 4 GB: GGUF de até ~1,5 B parâmetros em **Q4_0** ou Q8_0 (Regra de Ouro KleidiAI;
-ex.: Qwen2.5-0.5B/1.5B-Instruct Q4_0). K-quants (Q4_K_M) funcionam, mas não usam os micro-kernels KleidiAI.
-O app recusa modelos acima de min(1,6 GB, 40 % da RAM física).
+Modelos: o APK direto já traz o modelo rápido Qwen2.5-0.5B-Instruct Q4_0; o AAB traz também o profundo
+Phi-3.5-mini-instruct Q4_0 (~2,2 GB). Qualquer `.gguf` válido pode ser importado pelo SAF, incluindo F16/FP16 de
+~350M parâmetros (~700 MB, acelerados em ARMv8.2 fp16). K-quants (Q4_K_M) funcionam, mas não usam os
+micro-kernels KleidiAI. O orçamento de RAM do modelo é ajustado pela RAM física do aparelho.
 
 Detalhes de arquitetura e limitações conhecidas: [docs/ARQUITETURA.md](docs/ARQUITETURA.md).
 Roteiro de validação em aparelho físico de 4 GB (Snapdragon 695, Helio G99): [docs/VALIDACAO_APARELHO.md](docs/VALIDACAO_APARELHO.md).

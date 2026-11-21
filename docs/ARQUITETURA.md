@@ -41,7 +41,7 @@
 | `qd` | MAP-Elites + AURORA |
 | `rsi` | Auto-aperfeiçoamento delimitado: proposta → Shadow-Replay em cópia profunda → promoção só com ganho líquido, sem queda de diversidade semântica abaixo de 0,35 |
 
-## Módulos nativos e portas (v3.4)
+## Módulos nativos e portas (v3.4/v3.5)
 
 O `core` continua JVM puro. Os módulos nativos entram por interfaces em `core/ports` (`PathfinderPort`,
 `LoraPort`, `NeuralDeliberatorPort`), montadas pelo `SimulationHub`. Cada porta tem implementação Kotlin de
@@ -125,8 +125,9 @@ estado.
   a duração-alvo acompanha os ticks por segundo e cada tick/geração chama `reportActualWorkDuration`.
 - Áudio: o sintetizador AAudio aplica ducking na trilha Trautonium (`computeTrautoniumDuckingGain`) durante
   blips de fala e durante a voz TTS. `audio/CitizenVoice.kt` usa o `TextToSpeech` do Android com voz pt-BR offline
-  e pan estéreo pela posição do cidadão. O pipeline Sherpa-ONNX (Pocket-TTS/Kokoro + SenseVoice) não é
-  empacotado: os modelos somam dezenas de MB e estourariam o limite de 14 MB do APK.
+  e pan estéreo pela posição do cidadão. Desde a v3.5 o Sherpa-ONNX (AAR v2.0.2) é
+  empacotado com Pocket-TTS e SenseVoice-Small nos builds com modelos embutidos; a chave "Pocket-TTS neural" na aba
+  Sistema troca o motor e a amplitude RMS de qualquer um dos dois alimenta a boca do cidadão no 3D.
 
 ### Renderização 3D (Filament 1.75.1) e Modo Eco 2D
 
@@ -195,6 +196,50 @@ de debug (`CN=Android Debug`) ou keystore de release, com o SHA-256. Como o Andr
 com outra assinatura, a aba Sistema avisa para exportar o snapshot `.grs` (SAF) antes de desinstalar e oferece
 a importação depois.
 
+### Fechamento v3.5.0.00
+
+- Biblioteca de Conhecimento (processo 19): `DocumentParsers` (Kotlin puro) lê TXT (UTF-8/Latin-1), EPUB
+  (ZIP + OPF + XHTML sem tags), PDF (streams `FlateDecode`, operadores `Tj`/`TJ`) e Parquet (colunas `BYTE_ARRAY`,
+  páginas v1/v2 PLAIN ou dicionário, sem compressão, Snappy ou gzip); áudio passa por `MediaCodec` → PCM mono 16 kHz →
+  SenseVoice-Small int8 (Sherpa-ONNX) em janelas de 25 s. O texto vira fragmentos na memória semântica e alimenta
+  o `EmergentLexicon` (códigos curtos que os cidadãos passam a usar para termos frequentes).
+- MeshSync LAN: NSD `_girassol._tcp` + beacon UDP 47653 para descoberta, TCP para os quadros. Cada quadro leva
+  tipo, comprimento e HMAC-SHA256 com a chave de pareamento; quadros sem MAC válido são descartados antes de
+  qualquer parsing. Snapshot diferencial `.grs` (base + diff por SHA-256) e migração de cidadão com confirmação;
+  se o par não confirmar, o cidadão volta ao mundo de origem. WifiLock e MulticastLock são liberados após
+  10 min ou ao fim da sessão. A permissão `INTERNET` é usada só para esses sockets locais.
+- LoRA on-device: `OnDeviceLoraTrainer` ajusta matrizes A/B de posto baixo sobre `ffn_down` usando as memórias
+  episódicas de maior utilidade (Sharp-Wave Ripple Replay no sono), com NLL de treino e validação separadas;
+  só um adaptador que melhora a validação é salvo em GGUF e aplicado com `llama_adapter_lora_init` /
+  `llama_set_adapters_lora`. Convive com o TIES-Merging hereditário.
+- Cadeia de auditoria: tabela de eventos do SQLite WAL (DB v3) com `prev_hash`/`event_hash` SHA-256 sobre a
+  forma canônica do evento; gatilhos recusam inserções que quebram o encadeamento e qualquer `UPDATE`, e `WorldStateHashChain.verify` reexecuta a
+  cadeia.
+- Anokhin: `AnokhinFunctionalSystem` faz a síntese aferente (motivação + memória + contexto), forma o resultado
+  sensorial esperado da ação e, depois da ação, o Aceitador compara esperado × obtido; o erro alimenta a
+  surpresa e a plasticidade (e não o contrário).
+- CMA-ES (μ/μ_w, λ) com adaptação de passo por CSA e matriz de covariância por rank-1 + rank-μ, gêmeo Kotlin/C++
+  com goldens; candidatos só são promovidos pelo `BoundedRsiPromotionGate` (Shadow-Replay).
+- GGUF universal: o seletor SAF aceita qualquer arquivo com cabeçalho GGUF válido; o tipo (`F16`, `Q4_0`,
+  `Q8_0` …) vem de `general.file_type`. KV-cache quantizado só quando `head_dim % 32 == 0`; senão, F16.
+- llguidance: compilado do crate Rust para `aarch64-linux-android` (rustup no CI) e ligado como sampler; se o
+  crate não compilar, ou o matcher entrar em erro durante a geração, o motor volta para GBNF estrito.
+- Pós analógico `girassol_dehancer_post.mat`: a View da cidade (tonemapping Filmic + gradação 500T) renderiza
+  num RenderTarget RGBA8; uma segunda View desenha um triângulo de tela cheia que aplica bloom (anel duplo de
+  24 amostras), halação (1,0; 0,32; 0,12) a partir do halo largo, sombras densas (toe) e grão Kodak a 24 qps
+  dependente da luminância. Desligado no nível `NONE` (GL por software).
+- Backrooms: `BackroomsCorridors` traça por BFS determinístico, sobre tiles caminháveis, corredores entre cada
+  laboratório (Severance/Lumon) e a praça/horta mais próxima (Modernismo Tropical); o `CityMeshBuilder` desenha
+  carpete úmido, divisórias com papel de parede, forro rebaixado e luminárias fluorescentes. É só visual: não
+  altera física, replay nem goldens.
+- PBR KTX2: `concreto_brutalista.ktx2` e `carpete_backrooms.ktx2` (RGBA8 com mipmaps, RGB = albedo de detalhe,
+  A = rugosidade) amostrados em projeção triplanar com normal por derivadas de tela.
+- Cidadãos articulados: 7 ossos (tronco, cabeça, boca, braços, pernas) com skinning rígido;
+  `CitizenRig.pose` combina `CitizenGrowth.proportions` (altura, cabeça, membros), a cadência
+  `gaitCyclesPerTick` × TPS efetivo, digitação nos terminais CRT e a amplitude RMS do Pocket-TTS.
+- Temas: 15 paletas nativas; `Wcag.audit` compõe cada superfície translúcida sobre o fundo do tema, preto e
+  branco e exige ≥ 4,5:1 no pior caso para texto primário e secundário.
+
 ## Testes e CI
 
 - `native-tests`: ASan/UBSan em duas configurações (sem llama; com llama.cpp + GGUF `stories260K` e gramática),
@@ -223,9 +268,21 @@ a importação depois.
 - OpenMP desligado (threadpool do ggml). As variantes dotprod/i8mm não foram medidas em aparelho real; o ganho
   de tokens/s depende do modelo e da quantização (Q4_0 aproveita mais o repacking/KleidiAI que Q4_K_M).
 - Embeddings episódicos são SimHash/hashing de termos, não um modelo neural de embeddings.
-- llguidance não está no llama.cpp v1.0.0 empacotado: a gramática é GBNF estrita com fast-forward.
+- llguidance usa o tokenizador guloso aproximado em vocabulários SPM (sem `tokenize_fn` nativo), o que pode
+  gerar tokenizações diferentes das do modelo em literais longos; o fast-forward de gramática fica desligado
+  com llguidance.
 - KV-cache quantizado exige head_dim múltiplo de 32 (com flash-attn); outros modelos caem para F16.
-- Sem Sherpa-ONNX (orçamento de 14 MB); a voz depende do motor TTS instalado no aparelho.
+- SenseVoice-Small só transcreve zh/en/ja/ko/yue; áudio em português é transcrito com baixa qualidade.
+- Pocket-TTS é centrado em inglês; para falas em português o motor TTS do sistema continua sendo o padrão.
+- PDF sem suporte a CMaps/fontes CID (texto em fontes compostas pode sair vazio) nem a OCR de páginas escaneadas.
+- Parquet: só colunas de texto (`BYTE_ARRAY`/UTF-8); colunas numéricas, compressão LZ4/ZSTD/Brotli e tipos
+  aninhados são ignorados.
+- LoRA on-device exige `ffn_down` denso e arquitetura com RMSNorm (Llama/Qwen/Phi); MoE e modelos com
+  LayerNorm ficam só com o TIES-Merging.
+- A permissão `INTERNET` existe só para os sockets da LAN (MeshSync); o app não faz chamadas à internet em
+  runtime.
+- O pós `girassol_dehancer_post` e as texturas triplanares não rodam no emulador (GL por software → nível
+  `NONE`); só aparelhos reais com GLES 3 os exercitam.
 - ADPF e WifiLock dependem do suporte do fabricante; não foram medidos em aparelho físico.
 - O LLM só atua no mundo ao vivo; RSI e sandbox LoRA usam o deliberador simbólico para manter replay fixo.
 - Iluminação do 3D é pré-calculada (sem sombras dinâmicas) para caber no orçamento térmico 24/7.

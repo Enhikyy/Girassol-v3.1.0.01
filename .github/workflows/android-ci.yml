@@ -70,6 +70,10 @@ jobs:
       - uses: actions/checkout@v5
       - name: Caminhos relativos (compatibilidade CodeAssist)
         run: scripts/check_relative_paths.sh
+      - name: Integridade das fontes OFL e texturas PBR KTX2
+        run: |
+          sha256sum -c licenses/FONTS.sha256
+          sha256sum -c licenses/TEXTURES.sha256
       - name: Liberar disco (modelos GGUF/ONNX embutidos ~3 GB)
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true

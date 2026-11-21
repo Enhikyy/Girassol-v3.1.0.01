@@ -25,7 +25,10 @@ class LlmQuantPolicyTest {
     @Test fun regraDeOuroKleidiAi() {
         assertTrue(LlmQuantPolicy.weightAdvice("qwen2.5-0.5b-instruct-q4_0.gguf").contains("compatível KleidiAI"))
         assertTrue(LlmQuantPolicy.weightAdvice("llama 1B Q8_0").contains("compatível KleidiAI"))
-        assertTrue(LlmQuantPolicy.weightAdvice("model-Q4_K_M.gguf").contains("prefira Q4_0/Q8_0"))
-        assertTrue(LlmQuantPolicy.weightAdvice("model-f16.gguf").contains("prefira"))
+        assertTrue(LlmQuantPolicy.weightAdvice("model-Q4_K_M.gguf").contains("Q4_0/Q8_0 é mais rápido"))
+        // v3.5: F16/FP16 é aceito como primeira classe; o tipo real do GGUF (ftype) tem prioridade sobre o nome
+        assertTrue(LlmQuantPolicy.weightAdvice("model-f16.gguf", fp16Cpu = true).contains("aceleração nativa ARMv8.2 fp16"))
+        assertTrue(LlmQuantPolicy.weightAdvice("qualquer-nome.gguf", ftype = "F16").contains("F16 (FP16)"))
+        assertTrue(LlmQuantPolicy.weightAdvice("modelo-sem-pista.gguf").contains("não identificado"))
     }
 }
