@@ -93,7 +93,7 @@ class FourLayerMemoryTest {
         val restoredMemories = restored.citizens.single { it.id == citizen.id }.memories
 
         assertEquals(
-            setOf(MemoryLayer.SEMANTIC, MemoryLayer.PROCEDURAL),
+            setOf(MemoryLayer.EPISODIC, MemoryLayer.SEMANTIC, MemoryLayer.PROCEDURAL),
             restoredMemories.map { it.layer }.toSet()
         )
         assertEquals(3, restoredMemories.size)
