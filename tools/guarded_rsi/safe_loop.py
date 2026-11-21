@@ -69,6 +69,14 @@ class GateConfig:
     max_dev_heldout_gap: float = 0.25
     monitor_limit: float = 1.0
 
+    def __post_init__(self) -> None:
+        values = (self.min_dev_gain, self.min_heldout_gain,
+                  self.max_dev_heldout_gap, self.monitor_limit)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("gate thresholds must be finite")
+        if self.max_dev_heldout_gap < 0.0 or self.monitor_limit < 0.0:
+            raise ValueError("gap and risk limits cannot be negative")
+
 
 def _fingerprint(candidate: Any) -> str:
     try:
@@ -136,13 +144,23 @@ def improvement_step(
             decision["reason"] = "no_heldout_gain"
         elif dev_gain - heldout_gain > config.max_dev_heldout_gap:
             decision["reason"] = "dev_heldout_gap"
-        elif not bool(blind_judge(deepcopy(parent), deepcopy(child))):
-            decision["reason"] = "blind_judge_rejected"
-        elif not bool(human_approve(dict(decision))):
-            decision["reason"] = "human_rejected"
         else:
-            child_id = archive.add_child(parent_id, child)
-            decision.update(accepted=True, child=child_id, reason="accepted")
+            blind_verdict = blind_judge(deepcopy(parent), deepcopy(child))
+            if not isinstance(blind_verdict, bool):
+                decision["reason"] = "invalid_blind_judge_result"
+            elif not blind_verdict:
+                decision["reason"] = "blind_judge_rejected"
+            else:
+                approval = human_approve(dict(decision))
+                if not isinstance(approval, bool):
+                    decision["reason"] = "invalid_human_approval"
+                elif not approval:
+                    decision["reason"] = "human_rejected"
+                else:
+                    child_id = archive.add_child(parent_id, child)
+                    decision.update(accepted=True, child=child_id, reason="accepted")
+        if decision["accepted"]:
+            pass
     except Exception as exc:  # fail closed; do not archive a candidate on evaluator errors
         decision["reason"] = "evaluation_error"
         decision["error_type"] = type(exc).__name__
