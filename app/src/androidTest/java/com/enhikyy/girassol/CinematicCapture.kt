@@ -24,8 +24,8 @@ import java.nio.ByteBuffer
  */
 object CinematicCapture {
     private const val TAG = "BiosferaCaptura"
-    const val W = 540
-    const val H = 960
+    const val W = 360
+    const val H = 640
     const val FPS = 15f
 
     private class Segment(
@@ -34,28 +34,29 @@ object CinematicCapture {
     )
 
     private val script = listOf(
-        Segment("orbita_manha", WorldPreset.URBAN_OVERCAST, CameraMode.ORBIT, 0.36f, 40, dragX = 7f,
-            stills = mapOf(20 to "01_biosfera_3d", 39 to "04_orbita")),
-        Segment("inclinacao", WorldPreset.URBAN_OVERCAST, CameraMode.TILT, 0.42f, 30, dragX = 4f,
-            stills = mapOf(29 to "05_inclinacao")),
-        Segment("manha_8x", WorldPreset.URBAN_OVERCAST, CameraMode.ORBIT, 0.33f, 22, dragX = 3f, stills = mapOf(21 to "06_8x_manha")),
-        Segment("tarde_8x", WorldPreset.URBAN_OVERCAST, CameraMode.ORBIT, 0.68f, 22, dragX = 3f, stills = mapOf(21 to "07_8x_tarde")),
-        Segment("noite_8x", WorldPreset.URBAN_OVERCAST, CameraMode.ORBIT, 0.90f, 26, dragX = 3f, stills = mapOf(25 to "08_8x_noite")),
-        Segment("pov_rua", WorldPreset.URBAN_OVERCAST, CameraMode.FIRST_PERSON_POV, 0.62f, 40, dragX = -4f,
-            stills = mapOf(18 to "02_cidadaos_andando", 39 to "10_pov_primeira_pessoa")),
-        Segment("interior", WorldPreset.LUMON_INTERIOR, CameraMode.TILT, 0.45f, 34, dragX = 5f, stills = mapOf(33 to "11_interior_brutalista")),
-        Segment("interior_pov", WorldPreset.LUMON_INTERIOR, CameraMode.FIRST_PERSON_POV, 0.45f, 34, dragX = 5f,
-            stills = mapOf(33 to "12_interior_pov"))
+        Segment("orbita_manha", WorldPreset.URBAN_OVERCAST, CameraMode.ORBIT, 0.36f, 26, dragX = 7f,
+            stills = mapOf(14 to "01_biosfera_3d", 25 to "04_orbita")),
+        Segment("inclinacao", WorldPreset.URBAN_OVERCAST, CameraMode.TILT, 0.42f, 20, dragX = 4f,
+            stills = mapOf(19 to "05_inclinacao")),
+        Segment("manha_8x", WorldPreset.URBAN_OVERCAST, CameraMode.ORBIT, 0.33f, 14, dragX = 3f, stills = mapOf(13 to "06_8x_manha")),
+        Segment("tarde_8x", WorldPreset.URBAN_OVERCAST, CameraMode.ORBIT, 0.68f, 14, dragX = 3f, stills = mapOf(13 to "07_8x_tarde")),
+        Segment("noite_8x", WorldPreset.URBAN_OVERCAST, CameraMode.ORBIT, 0.90f, 17, dragX = 3f, stills = mapOf(16 to "08_8x_noite")),
+        Segment("pov_rua", WorldPreset.URBAN_OVERCAST, CameraMode.FIRST_PERSON_POV, 0.62f, 26, dragX = -4f,
+            stills = mapOf(12 to "02_cidadaos_andando", 25 to "10_pov_primeira_pessoa")),
+        Segment("interior", WorldPreset.LUMON_INTERIOR, CameraMode.TILT, 0.45f, 22, dragX = 5f, stills = mapOf(21 to "11_interior_brutalista")),
+        Segment("interior_pov", WorldPreset.LUMON_INTERIOR, CameraMode.FIRST_PERSON_POV, 0.45f, 22, dragX = 5f,
+            stills = mapOf(21 to "12_interior_pov"))
     )
 
-    fun run(ctx: Context, mark: (String) -> Unit) {
-        val out = File(ctx.getExternalFilesDir(null), "captura").apply { deleteRecursively(); mkdirs() }
+    fun run(ctx: Context, level: EffectLevel, mark: (String) -> Unit) {
+        val tag = level.name.lowercase()
+        val out = File(ctx.getExternalFilesDir(null), "captura_$tag").apply { deleteRecursively(); mkdirs() }
         val frames = File(out, "quadros").apply { mkdirs() }
-        if (!FilamentCityRenderer.ensureFilament()) { mark("CAPTURA_FALHOU filament"); return }
+        if (!FilamentCityRenderer.ensureFilament()) { mark("CAPTURA_OK_$tag 0 -"); return }
         // mundo determinístico com cidadãos em movimento (ORCA + navegação do núcleo)
         val core = WorldCore.create(2026L, 12)
         repeat(30) { core.step() }
-        val r = FilamentCityRenderer(ctx, null, EffectLevel.FULL)
+        val r = FilamentCityRenderer(ctx, null, level)
         var n = 0
         val t0 = System.currentTimeMillis()
         try {
@@ -76,7 +77,9 @@ object CinematicCapture {
                     // 1 tick do núcleo a cada 4 quadros (≈ 4 ticks/s de simulação a 15 quadros/s)
                     if (i % 4 == 0) { core.step(); r.update(WorldRenderSnapshot.of(core.state)) }
                     if (seg.dragX != 0f || seg.dragY != 0f) r.onDrag(seg.dragX, seg.dragY, H.toFloat())
+                    val tf = System.currentTimeMillis()
                     val px = r.captureFrame(dt, seg.day, read = true) ?: continue
+                    if (n < 3 || n % 10 == 0) Log.i(TAG, "[$tag] quadro $n: ${System.currentTimeMillis() - tf} ms")
                     // readPixels: origem embaixo → inverte as linhas
                     flipped.clear()
                     for (y in H - 1 downTo 0) { px.position(y * W * 4); px.get(row); flipped.put(row) }
@@ -85,16 +88,16 @@ object CinematicCapture {
                     seg.stills[i]?.let { name -> File(out, "$name.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) } }
                 }
                 val ms = (System.currentTimeMillis() - ts) / seg.frames.coerceAtLeast(1)
-                Log.i(TAG, "segmento ${seg.name}: ${seg.frames} quadros, ${ms} ms/quadro (${seg.preset.name}/${seg.camera.name}/dia ${seg.day})")
-                mark("CAPTURA_SEGMENTO ${seg.name} ${ms}ms")
+                Log.i(TAG, "[$tag] segmento ${seg.name}: ${seg.frames} quadros, ${ms} ms/quadro (${seg.preset.name}/${seg.camera.name}/dia ${seg.day})")
+                mark("CAPTURA_SEGMENTO $tag ${seg.name} ${ms}ms")
             }
-            Log.i(TAG, "captura concluída: $n quadros ${W}x$H em ${(System.currentTimeMillis() - t0) / 1000} s")
+            Log.i(TAG, "[$tag] captura concluída: $n quadros ${W}x$H em ${(System.currentTimeMillis() - t0) / 1000} s")
         } catch (t: Throwable) {
             Log.e(TAG, "captura interrompida", t)
         } finally {
             r.destroy()
             WorldViewState.setPreset(WorldPreset.URBAN_OVERCAST); WorldViewState.setCamera(CameraMode.ORBIT); WorldViewState.setPovCitizen(null)
         }
-        mark("CAPTURA_OK $n ${out.absolutePath}")
+        mark("CAPTURA_OK_$tag $n ${out.absolutePath}")
     }
 }

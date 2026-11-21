@@ -44,19 +44,6 @@ CX=$((SW/2)); CY=$((SH*45/100))
 step() { adb shell am broadcast -a girassol.demo.STEP --es step "$1" >/dev/null; [ "$1" = pick ] || waitstep "OK_$1"; }
 waitlong() { for i in $(seq 1 "$2"); do grep -q "PASSO $1" "$OUT/logcat.txt" && return 0; sleep 2; done; echo "passo $1 não chegou"; }
 
-# ---- 1) renderizações offline do pipeline completo (CinematicCapture) -> PNGs + vídeo
-waitlong CAPTURA_OK 1500
-CAP=$(grep -o "PASSO CAPTURA_OK [0-9]* [^ ]*" "$OUT/logcat.txt" | tail -1 | awk '{print $4}')
-echo "captura em: $CAP"; grep -o "PASSO CAPTURA_SEGMENTO.*" "$OUT/logcat.txt" || true
-if [ -n "$CAP" ]; then
-  adb pull "$CAP" "$OUT/captura" >/dev/null 2>&1 || true
-  cp "$OUT"/captura/*.png "$OUT/" 2>/dev/null || true
-  if command -v ffmpeg >/dev/null && ls "$OUT"/captura/quadros/f_0000.png >/dev/null 2>&1; then
-    ffmpeg -y -loglevel error -framerate 15 -i "$OUT/captura/quadros/f_%04d.png" -c:v libx264 -pix_fmt yuv420p -crf 18 "$OUT/biosfera3d.mp4" && echo "vídeo montado: $(ls -la "$OUT/biosfera3d.mp4")"
-  fi
-  rm -rf "$OUT/captura"
-fi
-
 # ---- 2) app ao vivo: interface (barras, cartão do cidadão, HUD do POV, 2D)
 waitstep POVOADO; sleep 3; dismiss_anr
 tap_text "Biosfera"; sleep 15
@@ -75,13 +62,52 @@ step cam2d; sleep 8; shot 09_modo_2d
 step 3d; step orbit
 wait $RP 2>/dev/null; sleep 3
 adb pull /sdcard/aovivo.mp4 "$OUT/biosfera3d_app_ao_vivo.mp4" >/dev/null 2>&1 || true
-step fim; wait $IP 2>/dev/null
+step fim
+# ---- renderizações offline quadro a quadro (CinematicCapture), nível a nível, com detecção de travamento
+alive() { timeout 20 adb shell true >/dev/null 2>&1; }
+waitcap() { # $1 = tag; desiste se o aparelho parar de responder ou se nada novo aparecer no log por 8 min
+  local last=0 since=$(date +%s)
+  while true; do
+    grep -q "PASSO CAPTURA_OK_$1" "$OUT/logcat.txt" && return 0
+    local sz; sz=$(stat -c %s "$OUT/logcat.txt")
+    if [ "$sz" != "$last" ]; then last=$sz; since=$(date +%s); fi
+    if [ $(( $(date +%s) - since )) -gt 480 ] || ! alive; then echo "captura $1: emulador travou/sem progresso"; return 1; fi
+    sleep 10
+  done
+}
+BEST=""
+for tag in minimal reduced full; do
+  if waitcap $tag; then
+    CAP=$(grep -o "PASSO CAPTURA_OK_$tag [0-9]* [^ ]*" "$OUT/logcat.txt" | tail -1 | awk '{print $4}')
+    N=$(grep -o "PASSO CAPTURA_OK_$tag [0-9]*" "$OUT/logcat.txt" | tail -1 | awk '{print $3}')
+    echo "captura $tag: $N quadros em $CAP"
+    if [ "${N:-0}" -gt 0 ]; then
+      mkdir -p "$OUT/render_$tag"
+      adb pull "$CAP/." "$OUT/render_$tag" >/dev/null 2>&1 || true
+      if command -v ffmpeg >/dev/null && [ -f "$OUT/render_$tag/quadros/f_0000.png" ]; then
+        ffmpeg -y -loglevel error -framerate 15 -i "$OUT/render_$tag/quadros/f_%04d.png" -vf "scale=720:1280:flags=lanczos" -c:v libx264 -pix_fmt yuv420p -crf 18 "$OUT/render_$tag/biosfera3d_$tag.mp4"
+      fi
+      rm -rf "$OUT/render_$tag/quadros"
+      BEST=$tag
+    fi
+  else
+    break
+  fi
+done
+if [ -n "$BEST" ]; then
+  echo "melhor nível renderizado: $BEST"
+  cp "$OUT/render_$BEST"/*.png "$OUT/" 2>/dev/null || true
+  cp "$OUT/render_$BEST/biosfera3d_$BEST.mp4" "$OUT/biosfera3d.mp4" 2>/dev/null || true
+  echo "$BEST" > "$OUT/nivel_renderizado.txt"
+fi
+alive && { timeout 60 adb shell am force-stop com.enhikyy.girassol.debug || true; }
+kill $IP 2>/dev/null
 kill $LP 2>/dev/null
 {
   echo "== Resumo do logcat (Biosfera 3D v4.0) =="
   echo "-- passos do roteiro"; grep -E "BiosferaDemo" "$OUT/logcat.txt" | sed -E 's/^.*PASSO/PASSO/'
   echo "-- calibração e pipeline"; grep -E "GpuCalibration|GirassolFilament" "$OUT/logcat.txt" | grep -vE "fps=" | head -60
-  echo "-- captura offline (ms por quadro no SwiftShader)"; grep -E "BiosferaCaptura" "$OUT/logcat.txt" | sed -E "s/^.*BiosferaCaptura: //"
+  echo "-- captura offline (ms por quadro no SwiftShader)"; grep -E "BiosferaCaptura" "$OUT/logcat.txt" | sed -E "s/^.*BiosferaCaptura: //" | head -80
   echo "-- quadros por segundo ao vivo (amostras de 1 s: ambiente, câmera, fase, cidadãos)"; grep -E "GirassolFilament.*fps=" "$OUT/logcat.txt" | sed -E 's/^.*(fps=)/\1/' | awk 'NR%3==1' | head -120
   echo "-- erros fatais"; grep -E "FATAL EXCEPTION|AndroidRuntime: |SIGSEGV|JNI DETECTED ERROR" "$OUT/logcat.txt" | head -40 || true
 } > "$OUT/logcat_resumo.txt"

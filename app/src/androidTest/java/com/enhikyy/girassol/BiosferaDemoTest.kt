@@ -33,9 +33,7 @@ class BiosferaDemoTest {
         assumeTrue("roteiro de demonstração: use -e demo true", InstrumentationRegistry.getArguments().getString("demo") == "true")
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         RenderModePolicy.set(ctx, RenderMode.MODE_3D)
-        // 1) renderizações do pipeline cinematográfico completo, quadro a quadro (fora da tela)
-        if (InstrumentationRegistry.getArguments().getString("captura") != "false") CinematicCapture.run(ctx, ::mark)
-        // 2) app ao vivo para a interface (cartão, barras, HUD do POV). No SwiftShader o pipeline
+        // 1) app ao vivo para a interface (cartão, barras, HUD do POV). No SwiftShader o pipeline
         //    completo não roda em tempo real; o nível ao vivo vem de -e nivel (padrão: mínimo).
         val live = when (InstrumentationRegistry.getArguments().getString("nivel")) { "completo" -> EffectLevel.FULL; "reduzido" -> EffectLevel.REDUCED; else -> EffectLevel.MINIMAL }
         GpuCalibration.forceLevel(ctx, live)
@@ -103,6 +101,13 @@ class BiosferaDemoTest {
                 WorldViewState.setPreset(WorldPreset.URBAN_OVERCAST); WorldViewState.setCamera(CameraMode.ORBIT)
                 GpuCalibration.forceLevel(ctx, null)
             }
+        }
+        // 2) com o app fechado: renderizações quadro a quadro fora da tela — do nível mínimo ao
+        //    completo; cada nível é salvo e baixado antes do próximo (o SwiftShader pode travar no completo).
+        if (InstrumentationRegistry.getArguments().getString("captura") != "false") {
+            CinematicCapture.run(ctx, EffectLevel.MINIMAL, ::mark)
+            CinematicCapture.run(ctx, EffectLevel.REDUCED, ::mark)
+            CinematicCapture.run(ctx, EffectLevel.FULL, ::mark)
         }
     }
 }
