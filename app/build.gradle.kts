@@ -227,7 +227,7 @@ val senseVoice = VerifiedAsset("sense-voice.tar.bz2",
     "7305f7905bfcf77fa0b39388a313f3da35c68d971661a65475b56fb2162c8e63", 165_783_878L)
 val pocketTts = VerifiedAsset("pocket-tts.tar.bz2",
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2",
-    "2f3b88823cbbb9bf0b2477ec8ae7b3fec417b3a87b6bb5f256dba66f2ad967cb", 98_336_520L)
+    "f4da7c7bd465f7b91e89191487fe90504396a51d6f0bcf94d0787633e2657293", 98_337_865L)
 
 fun downloadTask(id: String, a: VerifiedAsset) = tasks.register<DownloadVerified>("download$id") {
     enabled = embedModels
