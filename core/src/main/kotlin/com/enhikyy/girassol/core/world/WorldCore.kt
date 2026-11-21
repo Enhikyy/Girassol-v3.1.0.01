@@ -98,11 +98,6 @@ val ACTION_PROFILES: Map<ActionType, ActionProfile> = listOf(
     ActionProfile(ActionType.EXPLORAR, null, 1, mapOf(Need.DIVERSAO to 0.20))
 ).associateBy { it.action }
 
-private val BASE_DECAY = mapOf(
-    Need.FOME to 0.0016, Need.ENERGIA to 0.0011, Need.SOCIAL to 0.0010,
-    Need.DIVERSAO to 0.0008, Need.HIGIENE to 0.0007, Need.PROPOSITO to 0.0007
-)
-
 val TRAITS = listOf("metabolismo", "sociabilidade", "curiosidade", "aptidao", "conscienciosidade", "longevidade", "amabilidade")
 
 private val FIRST_NAMES = listOf(
@@ -268,9 +263,8 @@ class WorldCore(
         val h = emit("CHAT", citizenId, "autor=usuario;sha=${Sha256.hex(clean).take(16)};chars=${clean.length}")
         val msg = ChatMessage(state.nextChatSerial++, state.tick, wallClockMs, citizenId, "usuario", "Você", clean, "usuario")
         appendChat(msg)
-        state.lexicon.observe(clean)
         val targets = if (citizenId == null) state.aliveCitizens() else listOfNotNull(state.citizen(citizenId)?.takeIf { it.alive })
-        for (c in targets) rememberChat(c, "O Arquiteto disse: $clean", h)
+        for (c in targets) { rememberChat(c, "O Arquiteto disse: $clean", h); c.lexicon.observe(clean) }
         return msg
     }
 
@@ -284,7 +278,7 @@ class WorldCore(
         c.lastSpeech = clean.take(120); c.lastSpeechTick = state.tick
         rememberSpeech(c, clean.take(120))
         state.speechesEmitted++
-        state.lexicon.observe(clean)
+        c.lexicon.observe(clean)
         rememberChat(c, "Respondi ao Arquiteto: ${clean.take(200)}", h)
         return msg
     }
@@ -337,7 +331,6 @@ class WorldCore(
     }
 
     /** Parceiros compatíveis para reprodução: sexos diferentes (ou desconhecido em mundos antigos). */
-    private fun compatible(a: Citizen, b: Citizen): Boolean = ReproductionMerit.compatible(a, b)
 
     private fun leastOccupiedHome(): SmartObject {
         val homes = state.objects.filter { it.type == SmartObjectType.CASA }
@@ -387,7 +380,7 @@ class WorldCore(
         state.knowledge.documents.firstOrNull { d -> d.id == chunk.docId }?.let { d -> d.reads++ }
         val title = state.knowledge.title(chunk.docId)
         val excerpt = chunk.text.take(160)
-        state.lexicon.observe(excerpt)
+        c.lexicon.observe(excerpt)
         val content = "Leu em $title: $excerpt"
         if (c.memories.none { m -> m.layer == MemoryLayer.SEMANTIC && m.content == content }) {
             c.memories += AssociativeMemoryNode(c.nextMemoryId++, c.id, MemoryLayer.SEMANTIC, content,
@@ -551,7 +544,7 @@ class WorldCore(
                     val bus = buildBus(c, broadcast, recalled)
                     val ctx = DeliberationContext(bus, sorted.map { cand ->
                         DeliberationOption(cand.intention.action.name, cand.efe, cand.projected, cand.travel)
-                    }, Need.entries.map { decayFor(c, it) }.toDoubleArray())
+                    }, decayRates(c))
                     val res = deliberator.deliberate(ctx)
                     if (res.chosenIndex in sorted.indices) idx = res.chosenIndex
                     c.lastThought = res.rationale
@@ -626,18 +619,25 @@ class WorldCore(
                 emit("CLIMA", null, "seca_ate=${state.droughtUntilTick}")
             }
         }
-        val night = state.isNight()
-        for (c in state.aliveCitizens()) {
-            for (n in Need.entries) {
-                var d = decayFor(c, n)
-                if (n == Need.ENERGIA && night && c.intention?.action != ActionType.DESCANSAR) d *= 1.4
-                c.needs[n] = (c.needs.getValue(n) - d).coerceIn(0.0, 1.0)
-            }
+        // v3.7: decaimento homeostático + inanição no WorldTick C++20 (linhas compactas via JNI)
+        val citizens = state.aliveCitizens()
+        val stride = NativeWorldTick.NEEDS_STRIDE
+        val packed = DoubleArray(citizens.size * stride)
+        citizens.forEachIndexed { i, c ->
+            val o = i * stride
+            Need.entries.forEachIndexed { k, n -> packed[o + k] = c.needs.getValue(n) }
+            packed[o + 6] = c.trait("metabolismo"); packed[o + 7] = c.trait("sociabilidade")
+            packed[o + 8] = c.trait("conscienciosidade"); packed[o + 9] = c.trait("curiosidade")
+            packed[o + 10] = if (c.intention?.action == ActionType.DESCANSAR) 1.0 else 0.0
+            packed[o + 11] = c.starvationTicks.toDouble()
+        }
+        NativeWorldTick.nativeStepNeeds(packed, citizens.size, state.isNight())
+        citizens.forEachIndexed { i, c ->
+            val o = i * stride
+            Need.entries.forEachIndexed { k, n -> c.needs[n] = packed[o + k] }
+            c.starvationTicks = packed[o + 11].toInt()
             stepNeuromodulation(c)
-            if (c.needs.getValue(Need.FOME) <= 0.0) {
-                c.starvationTicks++
-                state.board.depositPheromone(CH_DANGER, c.x.toFloat(), c.z.toFloat(), 0.4f)
-            } else c.starvationTicks = 0
+            if (c.starvationTicks > 0) state.board.depositPheromone(CH_DANGER, c.x.toFloat(), c.z.toFloat(), 0.4f)
         }
         // energia urbana: consumo pelos edifícios; laboratórios e escolas dependem dela
         state.cityEnergy = (state.cityEnergy - 0.0015 * state.objects.size).coerceAtLeast(0.0)
@@ -662,16 +662,12 @@ class WorldCore(
         c.locomotion = r.locomotion
     }
 
-    private fun decayFor(c: Citizen, n: Need): Double {
-        val base = BASE_DECAY.getValue(n)
-        return when (n) {
-            Need.FOME -> base * (0.7 + 0.6 * c.trait("metabolismo"))
-            Need.SOCIAL -> base * (0.5 + c.trait("sociabilidade"))
-            Need.PROPOSITO -> base * (0.6 + 0.8 * c.trait("conscienciosidade"))
-            Need.DIVERSAO -> base * (0.6 + 0.8 * c.trait("curiosidade"))
-            else -> base
-        }
+    /** Taxas de decaimento por necessidade (kernel nativo; mesma fórmula do passo homeostático). */
+    private fun decayRates(c: Citizen): DoubleArray = decayCache.getOrPut(c.id) {
+        // depende só do genoma (imutável): uma chamada JNI por cidadão
+        NativeWorldTick.nativeNeedDecay(c.trait("metabolismo"), c.trait("sociabilidade"), c.trait("conscienciosidade"), c.trait("curiosidade"))
     }
+    private val decayCache = HashMap<String, DoubleArray>()
 
     // ===================================================================== estágios 3–6
 
@@ -757,7 +753,7 @@ class WorldCore(
         val projected = DoubleArray(needsNow.size) { k ->
             val n = Need.entries[k]
             val gain = (profile.needGains[n] ?: 0.0) * (if ((profile.needGains[n] ?: 0.0) > 0) skillEff * (0.4 + 0.6 * yieldP / 0.6).coerceAtMost(1.4) else 1.0)
-            (needsNow[k] - decayFor(c, n) * (travel + profile.durationTicks) + gain).coerceIn(0.0, 1.0)
+            (needsNow[k] - decayRates(c)[k] * (travel + profile.durationTicks) + gain).coerceIn(0.0, 1.0)
         }
         // produção econômica também tem valor pragmático (alimento futuro)
         val foodWallet = state.ledger.getBalance(c.id, FOOD)
@@ -1027,6 +1023,9 @@ class WorldCore(
             state.forecastWindow += p
             state.outcomeWindow += success
             if (!shadow) ReproductionMerit.updateBrier(c, (p - if (success) 1.0 else 0.0).let { e -> e * e }, state.tick)
+            // resposta ao item IRT 2PL (calibrado no kernel nativo na virada do dia)
+            val item = IRT_ACTIONS.indexOf(it.action)
+            if (item >= 0) { c.irtAttempts[item] += 1.0; if (success) c.irtSuccesses[item] += 1.0 }
             if (state.forecastWindow.size > 600) { state.forecastWindow.removeAt(0); state.outcomeWindow.removeAt(0) }
         }
         when (it.action) {
@@ -1179,7 +1178,13 @@ class WorldCore(
         node.bits = EpisodicIndex.simHash(node.features())
         EpisodicIndex.hawkesExcite(node, state.tick, node.salience)
         c.memories += node
-        PersonalAdapter.train(c.personalAdapter, LoraFeatures.of(it.action, state.tick), c.lastReward.toFloat())
+        // PER: prioridade = |erro TD| do adaptador pessoal antes do treino online
+        val px = LoraFeatures.of(it.action, state.tick)
+        val tdError = c.lastReward - PersonalAdapter.predict(c.personalAdapter, px).toDouble()
+        c.replay += ReplayExperience(it.action.ordinal, state.tick, c.lastReward.toFloat(), reflexFeatures(c, it.action), abs(tdError) + PER_EPS)
+        c.replayCount++
+        if (c.replay.size > PER_CAPACITY) c.replay.removeAt(0)
+        PersonalAdapter.train(c.personalAdapter, px, c.lastReward.toFloat())
         // reflexo Tsetlin aprende se a ação proposta trouxe recompensa positiva
         c.reflex.trainStep(reflexFeatures(c, it.action), c.lastReward > 0.0)
         // descompasso grande: reforço extra do reflexo (plasticidade sináptica dependente de surpresa)
@@ -1227,6 +1232,7 @@ class WorldCore(
         }
         val pruned = report.prunedNodeIds.toSet()
         if (pruned.isNotEmpty()) c.memories.removeAll { it.id in pruned }
+        prioritizedReplay(c)
         // amostras para o adaptador LoRA: memórias episódicas consolidadas com ação conhecida
         if (!shadow) {
             val episodic = c.memories.filter { it.layer == MemoryLayer.EPISODIC }.sortedBy { it.id }.takeLast(24)
@@ -1237,6 +1243,28 @@ class WorldCore(
             }
             if (state.loraPendingSamples.size > 512) state.loraPendingSamples.subList(0, state.loraPendingSamples.size - 512).clear()
         }
+    }
+
+    /**
+     * Prioritized Experience Replay no sono: lote estratificado por p^α (sum-tree nativa), pesos de
+     * importância w = (N·P)^−β (β anelado 0,4 → 1), atualização ponderada do adaptador pessoal e do
+     * reflexo Tsetlin e nova prioridade |erro TD| + ε.
+     */
+    private fun prioritizedReplay(c: Citizen) {
+        if (c.replay.size < 8) return
+        val pri = DoubleArray(c.replay.size) { c.replay[it].priority }
+        val batch = minOf(PER_BATCH, c.replay.size)
+        val weights = DoubleArray(batch)
+        val beta = (0.4 + 0.6 * c.replayCount.toDouble() / 2000.0).coerceAtMost(1.0)
+        val idx = NativeWorldTick.nativePerSample(pri, batch, PER_ALPHA, beta, StreamSeeds.derive(state.seed, c.id, state.tick, "per"), weights)
+        for (k in idx.indices) {
+            val e = c.replay[idx[k]]
+            val x = LoraFeatures.of(ActionType.entries[e.action], e.tick)
+            PersonalAdapter.trainWeighted(c.personalAdapter, x, e.reward, weights[k].toFloat())
+            if (weights[k] >= 0.5) c.reflex.trainStep(e.reflexFeatures, e.reward > 0f)
+            e.priority = abs(e.reward - PersonalAdapter.predict(c.personalAdapter, x)).toDouble() + PER_EPS
+        }
+        state.perReplays += idx.size
     }
 
     private fun activeCondition(): String = when {
@@ -1261,7 +1289,7 @@ class WorldCore(
         c.lastSpeechTick = state.tick
         rememberSpeech(c, text)
         state.speechesEmitted++
-        state.lexicon.observe(text)
+        c.lexicon.observe(text)
     }
 
     private fun rememberSpeech(c: Citizen, text: String) {
@@ -1353,61 +1381,76 @@ class WorldCore(
 
     private fun stageSociety(alive: List<Citizen>) {
         if (state.tick % 9L != 0L) return
-        val groups = alive.filter { it.intention?.action == ActionType.SOCIALIZAR && it.path.isEmpty() && it.actionTicksRemaining > 0 }
-            .groupBy { it.intention!!.targetObjectId }
-        for ((_, members) in groups.entries.sortedBy { it.key }) {
-            if (members.size < 2) continue
-            val sorted = members.sortedBy { it.id }
-            for (a in sorted) {
-                val rng = StreamSeeds.rng(state.seed, a.id, state.tick, "social")
-                val b = sorted.filter { it.id != a.id }.let { it[rng.nextInt(it.size)] }
-                interact(a, b, rng)
+        val members = alive.filter { it.intention?.action == ActionType.SOCIALIZAR && it.path.isEmpty() && it.actionTicksRemaining > 0 }
+        if (members.size < 2) return
+        // v3.7: encontros, afinidade, confiança Beta, opinião DW+FJ e comércio no kernel C++20
+        val index = members.withIndex().associate { (i, c) -> c.id to i }
+        val rows = DoubleArray(members.size * NativeWorldTick.SOCIAL_D)
+        members.forEachIndexed { i, c ->
+            val o = i * NativeWorldTick.SOCIAL_D
+            TRAITS.forEachIndexed { k, t -> rows[o + k] = c.trait(t) }
+            rows[o + 7] = c.emotion.mood; rows[o + 8] = c.emotion.valence; rows[o + 9] = c.opinionCommons
+            rows[o + 10] = c.intrinsicOpinionCommons; rows[o + 11] = c.needs.getValue(Need.FOME)
+            rows[o + 12] = state.ledger.getBalance(c.id, FOOD); rows[o + 13] = state.ledger.getBalance(c.id, CREDIT)
+        }
+        val tieI = ArrayList<Int>(); val tieD = ArrayList<Double>()
+        members.forEachIndexed { i, a ->
+            for (t in a.social.sortedTies()) {
+                val j = index[t.toAgentId] ?: continue
+                tieI += i; tieI += j
+                tieD += t.affinity; tieD += t.familiarity; tieD += t.domainAlpha["general"] ?: 1.5; tieD += t.domainBeta["general"] ?: 1.5
+                tieD += t.currentOpinion; tieD += t.intrinsicOpinion; tieD += t.susceptibility
             }
         }
-    }
-
-    private fun interact(a: Citizen, b: Citizen, rng: SplitMix64) {
-        speak(a, SymbolicSpeech.forGreeting(b.name, rng.nextLong()))
-        val tie = a.social.getOrCreateTie(b.id, a.intrinsicOpinionCommons)
-        val similarity = 1.0 - TRAITS.sumOf { abs(a.trait(it) - b.trait(it)) } / TRAITS.size
-        tie.familiarity = (tie.familiarity + 0.06).coerceAtMost(1.0)
-        tie.affinity = (tie.affinity + 0.05 * (similarity - 0.45) + 0.03 * b.emotion.mood + 0.02 * a.trait("amabilidade")).coerceIn(-1.0, 1.0)
-        tie.recordTrustOutcome("general", b.emotion.valence > -0.3)
-        // dinâmica de opinião híbrida Deffuant–Weisbuch + Friedkin–Johnsen
-        tie.currentOpinion = a.opinionCommons
-        a.opinionCommons = SocialDynamicsAndCliodynamics.stepHybridOpinion(tie, b.opinionCommons)
-        // troca de boatos/crenças sobre rendimento de recursos (A-MEM social + imunidade)
-        val shareable = b.beliefs.values.filter { !it.quarantined }
-            .sortedWith(compareBy<HeldBelief> { it.opinion.uncertainty }.thenBy { it.claimKey })
-        if (shareable.isNotEmpty()) {
-            val claim = shareable[rng.nextInt(minOf(3, shareable.size))]
-            val trust = tie.domainTrust("informacao")
-            val (belief, outcome) = EpistemicImmunity.assimilate(a.beliefs[claim.claimKey], claim.claimKey, claim.domain,
-                claim.opinion, trust, b.id, claim.provenanceEventId ?: state.eventSeq, state.tick)
-            a.beliefs[claim.claimKey] = belief
-            if (outcome == AssimilationOutcome.QUARANTINED_LOW_TRUST || outcome == AssimilationOutcome.QUARANTINED_CONFLICT) {
-                belief.quarantined = belief.quarantined || !belief.verifiedByExperience
-                state.stressEvents.lastOrNull { it.targetId == claim.claimKey && it.resolvedTick < 0 }?.let { it.quarantinedBy++ }
+        val outD = DoubleArray(members.size * 6)
+        val res = NativeWorldTick.nativeStepSocial(state.seed, state.tick, members.map { it.id }.toTypedArray(),
+            members.map { it.intention!!.targetObjectId ?: "" }.toTypedArray(), rows, tieI.toIntArray(), tieD.toDoubleArray(), outD)
+        for (k in 0 until res.size / 5) {
+            val a = members[res[k * 5].toInt()]; val b = members[res[k * 5 + 1].toInt()]
+            val flags = res[k * 5 + 4]
+            speak(a, SymbolicSpeech.forGreeting(b.name, res[k * 5 + 2]))
+            val tie = a.social.getOrCreateTie(b.id, a.intrinsicOpinionCommons)
+            tie.affinity = outD[k * 6]; tie.familiarity = outD[k * 6 + 1]
+            if (flags and 2L != 0L) tie.domainAlpha["general"] = outD[k * 6 + 2] else tie.domainBeta["general"] = outD[k * 6 + 3]
+            tie.currentOpinion = outD[k * 6 + 4]
+            a.opinionCommons = outD[k * 6 + 5]
+            // troca de boatos/crenças sobre rendimento de recursos (A-MEM social + imunidade epistêmica)
+            val shareable = b.beliefs.values.filter { !it.quarantined }
+                .sortedWith(compareBy<HeldBelief> { it.opinion.uncertainty }.thenBy { it.claimKey })
+            if (shareable.isNotEmpty()) {
+                val claim = shareable[((res[k * 5 + 3] ushr 33) % minOf(3, shareable.size)).toInt()]
+                val trust = tie.domainTrust("informacao")
+                val (belief, outcome) = EpistemicImmunity.assimilate(a.beliefs[claim.claimKey], claim.claimKey, claim.domain,
+                    claim.opinion, trust, b.id, claim.provenanceEventId ?: state.eventSeq, state.tick)
+                a.beliefs[claim.claimKey] = belief
+                if (outcome == AssimilationOutcome.QUARANTINED_LOW_TRUST || outcome == AssimilationOutcome.QUARANTINED_CONFLICT) {
+                    belief.quarantined = belief.quarantined || !belief.verifiedByExperience
+                    state.stressEvents.lastOrNull { it.targetId == claim.claimKey && it.resolvedTick < 0 }?.let { it.quarantinedBy++ }
+                }
             }
-        }
-        // comércio de alimento por crédito (partidas dobradas)
-        val aFood = state.ledger.getBalance(a.id, FOOD)
-        val bFood = state.ledger.getBalance(b.id, FOOD)
-        if (a.needs.getValue(Need.FOME) < 0.45 && aFood < 1.0 && bFood > 4.0 && state.ledger.getBalance(a.id, CREDIT) >= 3.0) {
-            val h = emit("COMERCIO", a.id, "vendedor=${b.id};alimento=2;credito=3")
-            if (state.ledger.transfer(b.id, a.id, FOOD, 2.0, state.tick, h)) state.ledger.transfer(a.id, b.id, CREDIT, 3.0, state.tick, h)
-            tie.recordTrustOutcome("comercio", true)
+            // comércio de alimento por crédito decidido pelo kernel (partidas dobradas no razão)
+            if (flags and 4L != 0L) {
+                val h = emit("COMERCIO", a.id, "vendedor=${b.id};alimento=2;credito=3")
+                if (state.ledger.transfer(b.id, a.id, FOOD, 2.0, state.tick, h)) state.ledger.transfer(a.id, b.id, CREDIT, 3.0, state.tick, h)
+                tie.recordTrustOutcome("comercio", true)
+            }
         }
     }
 
     private fun stageLifeCycle() {
-        for (c in state.aliveCitizens().sortedBy { it.id }) {
-            val lifespanDays = 40.0 + 30.0 * c.trait("longevidade")
-            val cause = when {
-                c.starvationTicks > TICKS_PER_DAY -> "inanição"
-                c.ageDays(state.tick) > lifespanDays -> "velhice"
-                else -> null
-            } ?: continue
+        val alive = state.aliveCitizens().sortedBy { it.id }
+        if (alive.isEmpty()) return
+        val index = alive.withIndex().associate { (i, c) -> c.id to i }
+        val packed = LongArray(alive.size * 4)
+        alive.forEachIndexed { i, c ->
+            packed[i * 4] = c.starvationTicks.toLong(); packed[i * 4 + 1] = c.birthTick
+            packed[i * 4 + 2] = (c.parents.getOrNull(0)?.let { index[it] } ?: -1).toLong()
+            packed[i * 4 + 3] = (c.parents.getOrNull(1)?.let { index[it] } ?: -1).toLong()
+        }
+        val out = NativeWorldTick.nativeLifecycle(alive.map { it.id }.toTypedArray(), packed,
+            DoubleArray(alive.size) { alive[it].trait("longevidade") }, state.tick)
+        for ((i, c) in alive.withIndex()) {
+            val cause = when (out[i * 2]) { 1 -> "inanição"; 2 -> "velhice"; else -> continue }
             c.alive = false
             c.deathTick = state.tick
             c.deathCause = cause
@@ -1416,13 +1459,13 @@ class WorldCore(
             c.intention = null
             c.path.clear()
             val h = emit("MORTE", c.id, "causa=$cause;idade=${"%.1f".fmt(c.ageDays(state.tick))}")
-            // herança: filhos vivos recebem, senão os comuns
-            val heir = state.aliveCitizens().filter { c.id in it.parents }.minByOrNull { it.id }
-            state.ledger.transferAll(c.id, heir?.id ?: COMMUNAL_COMMONS, state.tick, h)
+            // herança decidida pelo kernel: filho vivo de menor id, senão os comuns
+            val heir = out[i * 2 + 1].takeIf { it >= 0 }?.let { alive[it].id }
+            state.ledger.transferAll(c.id, heir ?: COMMUNAL_COMMONS, state.tick, h)
             state.metrics.deaths++
-            // libera memória pesada do falecido (genealogia permanece)
             c.memories.clear()
             c.beliefs.clear()
+            c.replay.clear()
         }
     }
 
@@ -1432,26 +1475,17 @@ class WorldCore(
         resolveStaleStressEvents()
         if (!shadow) runLoraSleepCycle()
         evaluateSuperacao(alive)
-        state.lexicon.consolidate(state.tick, alive.maxWithOrNull(compareBy<Citizen> { it.recentSpeeches.size }.thenByDescending { it.id })?.id)?.let { e ->
-            emit("LEXICO", e.coinerId, "glifo=${e.glyph};frase=${e.phrase}")
+        // léxico individual: cada cidadão consolida uma fusão BPE no próprio léxico (.grs)
+        for (c in alive) c.lexicon.consolidate(state.tick, c.id)?.let { e ->
+            emit("LEXICO", c.id, "glifo=${e.glyph};frase=${e.phrase}")
         }
-        // Reprodução determinística com genética diploide, Baldwin, TIES-Merging e simbiogênese
-        reproduction(alive)
-        // Heider: equilíbrio estrutural em tríades dos laços mais fortes
-        for (a in alive) {
-            val top = a.social.sortedTies().sortedByDescending { it.tieStrength() }.take(4)
-            for (i in top.indices) for (j in i + 1 until top.size) {
-                val b = state.citizen(top[i].toAgentId) ?: continue
-                val tieBK = b.social.tieOrNull(top[j].toAgentId) ?: continue
-                SocialDynamicsAndCliodynamics.applyHeiderTriadBalance(top[i], tieBK, top[j])
-            }
-            for (t in a.social.sortedTies()) t.decayFamiliarity(TICKS_PER_DAY, 0.0004)
-            a.windowUsage.clear()
-        }
+        // v3.7: IRT 2PL + reprodução por mérito + Heider + familiaridade + assembleia no kernel C++20
+        val daily = runDailyKernel(alive)
+        for (a in alive) a.windowUsage.clear()
         // Assembleia (Ostrom): a cota dos comuns acompanha a opinião média
         if (alive.isNotEmpty()) {
-            val meanOp = alive.map { it.opinionCommons }.average()
-            val newQuota = (2 + Math.round(2.0 * (meanOp + 1.0))).toInt().coerceIn(2, 6)
+            val meanOp = daily.meanOpinion
+            val newQuota = daily.quota
             val idx = state.institutions.indexOfFirst { it.ruleId == "cota-comuns" }
             if (idx >= 0 && state.institutions[idx].maxQuotaPerWindow != newQuota) {
                 state.institutions[idx] = state.institutions[idx].copy(maxQuotaPerWindow = newQuota)
@@ -1491,26 +1525,41 @@ class WorldCore(
         state.dayFoodConsumed = 0.0
     }
 
-    private fun reproduction(alive: List<Citizen>) {
+    private class DailyResult(val quota: Int, val meanOpinion: Double, val heiderNudges: Int)
+
+    private fun runDailyKernel(alive: List<Citizen>): DailyResult {
         val housing = state.objects.count { it.type == SmartObjectType.CASA } * SmartObjectType.CASA.capacity
-        var population = alive.size
-        for (a in alive) {
-            if (population >= state.admissionCap || population >= housing) break
-            if (a.ageDays(state.tick) < ADULT_DAYS || a.children >= 4) continue
-            if (state.tick - a.lastReproductionTick < reproductionCooldown(a)) continue
-            // v3.6: gatilho obrigatório de desempenho (Anokhin + Brier + promoção + bem-estar) em AMBOS
-            if (!ReproductionMerit.check(a, state.tick).all) continue
-            if (!ReproductionMerit.commonsSurplus(state, population)) break
-            val partnerTie = a.social.sortedTies()
-                .filter { it.affinity > 0.0 }
-                .sortedByDescending { it.tieStrength() }
-                .firstOrNull { t ->
-                    val p = state.citizen(t.toAgentId)
-                    p != null && p.alive && compatible(a, p) && p.children < 4 &&
-                        state.tick - p.lastReproductionTick >= reproductionCooldown(p) && ReproductionMerit.check(p, state.tick).all
-                } ?: continue
-            val b = state.citizen(partnerTie.toAgentId)!!
-            val rng = StreamSeeds.rng(state.seed, a.id + "+" + b.id, state.tick, "reproducao")
+        val ids = alive.map { it.id }.toMutableList()
+        val index = HashMap<String, Int>().apply { alive.forEachIndexed { i, c -> put(c.id, i) } }
+        val tieI = ArrayList<Int>(); val tieD = ArrayList<Double>(); val tieRefs = ArrayList<com.enhikyy.girassol.core.social.DirectedSocialTie>()
+        alive.forEachIndexed { i, a ->
+            for (t in a.social.sortedTies()) {
+                val j = index.getOrPut(t.toAgentId) { ids += t.toAgentId; ids.size - 1 }
+                tieI += i; tieI += j
+                tieD += t.affinity; tieD += t.familiarity; tieD += t.domainAlpha["general"] ?: 1.5; tieD += t.domainBeta["general"] ?: 1.5
+                tieRefs += t
+            }
+        }
+        val (ml, md) = NativeWorldTick.packMerit(alive)
+        val items = state.irtItemA + state.irtItemB
+        val tieArr = tieD.toDoubleArray()
+        val out = NativeWorldTick.nativeStepDaily(state.seed, state.tick, housing, state.admissionCap,
+            state.ledger.getBalance(COMMUNAL_COMMONS, FOOD), ids.toTypedArray(), alive.size, ml, md, tieI.toIntArray(), tieArr, items)
+        NativeWorldTick.unpackMerit(alive, ml, md)
+        for (k in tieRefs.indices) { tieRefs[k].affinity = tieArr[k * 4]; tieRefs[k].familiarity = tieArr[k * 4 + 1] }
+        for (j in 0 until IRT_ACTIONS.size) { state.irtItemA[j] = items[j]; state.irtItemB[j] = items[IRT_ACTIONS.size + j] }
+        val births = out[3].toInt()
+        for (k in 0 until births) {
+            val a = alive[out[4 + k * 3].toInt()]
+            val b = alive[out[5 + k * 3].toInt()]
+            spawnMeritChild(a, b, out[6 + k * 3])
+        }
+        return DailyResult(out[0].toInt(), Double.fromBits(out[2]), out[1].toInt())
+    }
+
+    /** Nascimento aprovado pelo kernel nativo (contadores dos pais já atualizados por ele). */
+    private fun spawnMeritChild(a: Citizen, b: Citizen, birthSeed: Long) {
+            val rng = SplitMix64(birthSeed)
             var genome = a.genome.recombineWith(b.genome, Random(rng.nextLong()), mutationSigma = 0.03)
             // Efeito Baldwin: aptidão aprendida dos pais é lentamente assimilada no genoma
             val acquired = (a.skills.values.map { it.masteryProb } + b.skills.values.map { it.masteryProb }).average()
@@ -1541,16 +1590,19 @@ class WorldCore(
             child.lineageModelKey = lineage.getOrNull(rng.nextInt(lineage.size.coerceAtLeast(1)))
             child.sex = if (rng.nextDouble() < 0.5) "F" else "M"
             state.tiesMerges++
+            // léxico individual: subconjunto recombinado dos léxicos dos pais com mutação própria
+            val lex = com.enhikyy.girassol.core.knowledge.EmergentLexicon.inherit(a.lexicon, b.lexicon, SplitMix64(birthSeed xor 0x1E71C0L))
+            child.lexicon.entries.clear(); child.lexicon.entries += lex.entries
+            child.lexicon.pairCounts.clear(); child.lexicon.pairCounts += lex.pairCounts
+            child.lexicon.mutationRate = lex.mutationRate; child.lexicon.compressionRate = lex.compressionRate
+            child.lexicon.minCount = lex.minCount; child.lexicon.inheritedEntries = lex.inheritedEntries
+            child.lexicon.mutatedEntries = lex.mutatedEntries
             child.social.getOrCreateTie(a.id).apply { affinity = 0.6; familiarity = 0.6 }
             child.social.getOrCreateTie(b.id).apply { affinity = 0.6; familiarity = 0.6 }
-            a.children++; b.children++
-            a.lastReproductionTick = state.tick; b.lastReproductionTick = state.tick
-            a.promotionsAtLastReproduction = a.promotions; b.promotionsAtLastReproduction = b.promotions
             emit("NASCIMENTO_MERITO", child.id, "pais=${a.id}+${b.id};g=${child.generation};promocoes=${a.promotions}/${b.promotions};" +
-                "anokhin=${"%.3f".fmt(a.acceptorEma)}/${"%.3f".fmt(b.acceptorEma)};brier=${"%.3f".fmt(a.brierEma)}/${"%.3f".fmt(b.brierEma)}")
+                "anokhin=${"%.3f".fmt(a.acceptorEma)}/${"%.3f".fmt(b.acceptorEma)};brier=${"%.3f".fmt(a.brierEma)}/${"%.3f".fmt(b.brierEma)};" +
+                "theta=${"%.3f".fmt(a.irtTheta)}/${"%.3f".fmt(b.irtTheta)};lexico=${child.lexicon.entries.size}")
             state.metrics.births++
-            population++
-        }
     }
 
     private fun recordEvolution(day: Long, alive: List<Citizen>) {
@@ -1570,8 +1622,6 @@ class WorldCore(
         )
         if (state.evolutionHistory.size > 180) state.evolutionHistory.removeAt(0)
     }
-
-    private fun reproductionCooldown(c: Citizen): Long = if (c.superacao) TICKS_PER_DAY * 4 else TICKS_PER_DAY * 6
 
     /** Bônus de superação: filho adulto com aptidão ≥ 115% da média dos pais ao nascer. */
     private fun evaluateSuperacao(alive: List<Citizen>) {

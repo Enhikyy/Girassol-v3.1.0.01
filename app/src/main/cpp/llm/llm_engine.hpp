@@ -37,7 +37,22 @@ struct LlmLoadConfig {
     KvCacheType kvType = KvCacheType::Q8_0;
     std::string slotDir;      // "" = sem persistência de slots
     int32_t maxSlots = 24;    // LRU de slots por cidadão
+    // v3.7: modelos residentes (llama_model mmap) mantidos em RAM ao mesmo tempo. Perfil 4 GB = 1
+    // (troca descarrega o modelo); 8 GB = 2; 12 GB = 3. A troca de cidadão/modelo libera e recria
+    // apenas o llama_context (KV-cache) — os pesos permanecem mapeados.
+    int32_t poolCapacity = 1;
 };
+
+struct LlmPoolStatus {
+    int32_t capacity = 1;
+    int32_t resident = 0;
+    std::string active;
+    std::vector<std::string> paths;
+    std::vector<uint64_t> bytes;
+    uint64_t switches = 0;      // trocas servidas pelo pool (sem recarregar pesos)
+    uint64_t coldLoads = 0;     // carregamentos do arquivo GGUF
+    uint64_t evictions = 0;
+}; 
 
 struct LlmRequest {
     std::string system;           // IMMUTABLE_WORLD_PREFIX + identidade do cidadão
@@ -106,6 +121,8 @@ public:
     // "flash_attn=1 kv=q8_0 ctx=1024" efetivamente aplicado.
     std::string runtimeConfig() const;
     size_t slotCount() const;
+    LlmPoolStatus poolStatus() const;
+    void setPoolCapacity(int32_t capacity);
 
     // v3.5 — LoRA on-device (Sharp-Wave Ripple Replay): treina um ciclo sobre os textos
     // episódicos de maior utilidade e, se o NLL real em held-out melhorar, aplica o adaptador.
@@ -125,6 +142,32 @@ private:
     void evictSlotsLocked();
     bool restoreSlotLocked(const std::string& key, const std::vector<int32_t>& want, size_t* common);
     void saveSlotLocked(const std::string& key);
+
+    // Estado por modelo estacionado no pool (pesos residentes, sem contexto).
+    struct Resident {
+        llama_model* model = nullptr;
+        std::string path;
+        uint64_t bytes = 0;
+        std::string desc, chatTemplate;
+        std::unordered_map<std::string, int32_t> pieceToToken;
+        int32_t headDim = 0;
+        llama_adapter_lora* adapter = nullptr;
+        float adapterScale = 0.0f;
+        std::string adapterPath;
+        LoraWeights lora;
+        LoraTrainReport lastLora;
+        uint64_t lastUse = 0;
+    };
+    void parkActiveLocked();
+    void unparkLocked(Resident&& r);
+    void freeResidentLocked(Resident& r);
+    void evictParkedLocked(size_t keep);
+    bool createContextLocked(std::string* err);
+    void unloadLocked();
+
+    std::vector<Resident> parked_;
+    int32_t poolCapacity_ = 1;
+    uint64_t useClock_ = 0, switches_ = 0, coldLoads_ = 0, evictions_ = 0;
 
     mutable std::mutex mu_;
     llama_model* model_ = nullptr;

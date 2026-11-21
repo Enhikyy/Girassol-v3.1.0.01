@@ -359,8 +359,8 @@ android {
         applicationId = "com.enhikyy.girassol"
         minSdk = 33
         targetSdk = 35
-        versionCode = 3600000
-        versionName = "3.6.0.00"
+        versionCode = 3700000
+        versionName = "3.7.0.00"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "FILAMENT_VERSION", "\"$filamentVersion\"")
         buildConfigField("String", "DISTRIBUTION", "\"$distribution\"")
@@ -488,6 +488,8 @@ dependencies {
     implementation(libs.filament.android)
     // Sherpa-ONNX (SenseVoice ASR + Pocket-TTS): AAR oficial do GitHub, verificado por SHA-256.
     implementation(files(downloadSherpaAar.flatMap { it.dest }))
+    // v3.7: extração .tar.bz2 dos pacotes de voz opcionais (Piper VITS / Whisper) nos perfis 8/12 GB
+    implementation(libs.commons.compress)
     debugImplementation(libs.compose.ui.tooling)
     debugImplementation(libs.compose.ui.test.manifest)
     testImplementation(libs.junit)
@@ -501,4 +503,11 @@ dependencies {
 // Os jniLibs gerados pelo CMake precisam existir antes da fusão das pastas de bibliotecas.
 listOf("Debug", "Release").forEach { bt ->
     tasks.matching { it.name == "merge${bt}JniLibFolders" }.configureEach { dependsOn("externalNativeBuild$bt") }
+}
+
+// v3.7: testes unitários do app executam o WorldTick C++20 compilado para o host.
+evaluationDependsOn(":core")
+tasks.withType<Test>().configureEach {
+    dependsOn(":core:buildWorldTickHost")
+    systemProperty("girassol.worldtick.lib", project(":core").extra["worldTickHostLib"] as String)
 }

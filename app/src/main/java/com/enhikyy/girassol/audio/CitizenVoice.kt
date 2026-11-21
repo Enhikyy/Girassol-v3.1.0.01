@@ -36,6 +36,8 @@ object CitizenVoice {
     @Volatile private var ready = false
     @Volatile private var lastSpeakMs = 0L
     @Volatile var usePocketTts = false
+    /** v3.7: Piper VITS pt-BR (só perfis 8/12 GB, pacote verificado por SHA-256). */
+    @Volatile var usePiper = false
     @Volatile private var appCtx: Context? = null
     private val _status = MutableStateFlow(VoiceStatus())
     val status: StateFlow<VoiceStatus> = _status.asStateFlow()
@@ -97,6 +99,14 @@ object CitizenVoice {
     /** Fala uma frase (limite de uma a cada [MIN_GAP_MS]); retorna se foi enfileirada. */
     fun speak(id: String, text: String, pan: Float): Boolean {
         val ctx = appCtx
+        val profile = com.enhikyy.girassol.llm.LocalLlmManager.profile
+        if (usePiper && ctx != null && PiperVoice.available(ctx, profile)) {
+            val now = System.currentTimeMillis()
+            if (now - lastSpeakMs < MIN_GAP_MS) { _status.update { it.copy(skipped = it.skipped + 1) }; return false }
+            val ok = PiperVoice.speak(ctx, profile, id, text, pan) { speaking -> duck(speaking) }
+            if (ok) { lastSpeakMs = now; _status.update { it.copy(spoken = it.spoken + 1, engine = "Piper VITS pt-BR (Sherpa-ONNX)") } }
+            return ok
+        }
         if (usePocketTts && ctx != null && PocketTtsVoice.available(ctx)) {
             val now = System.currentTimeMillis()
             if (now - lastSpeakMs < MIN_GAP_MS) { _status.update { it.copy(skipped = it.skipped + 1) }; return false }
@@ -124,6 +134,12 @@ object CitizenVoice {
      * intervalo mínimo, entra na fila e ajusta o tom pelo sexo do cidadão (F mais agudo).
      */
     fun speakChat(id: String, sex: String, text: String): Boolean {
+        val ctx = appCtx
+        val profile = com.enhikyy.girassol.llm.LocalLlmManager.profile
+        if (usePiper && ctx != null && PiperVoice.available(ctx, profile)) {
+            val ok = PiperVoice.speak(ctx, profile, id, text, 0f, pitchFemale = sex == "F") { speaking -> duck(speaking) }
+            if (ok) { _status.update { it.copy(spoken = it.spoken + 1, engine = "Piper VITS pt-BR (Sherpa-ONNX)") }; return true }
+        }
         val t = tts
         if (t == null || !ready || text.isBlank()) return false
         t.setPitch(when (sex) { "F" -> 1.18f; "M" -> 0.88f; else -> 1f })

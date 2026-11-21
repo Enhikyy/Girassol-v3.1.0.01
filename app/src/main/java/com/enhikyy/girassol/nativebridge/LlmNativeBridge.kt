@@ -115,7 +115,10 @@ object LlmNativeBridge {
      * Carrega o GGUF. kvType: 0=f16, 1=q8_0, 2=q4_0. slotDir = diretório dos slots por
      * cidadão (llama_state_seq_save_file). Retorna "" em caso de sucesso.
      */
-    @JvmStatic external fun nativeLlmLoad(path: String, threads: Int, nCtx: Int, flashAttn: Boolean, kvType: Int, slotDir: String, maxSlots: Int): String
+    @JvmStatic external fun nativeLlmLoad(path: String, threads: Int, nCtx: Int, flashAttn: Boolean, kvType: Int, slotDir: String, maxSlots: Int, poolCapacity: Int): String
+    /** v3.7: pool de llama_model residentes ("cap|residentes|trocas|frias|despejos|ativo|p:b;…"). */
+    @JvmStatic external fun nativeLlmPoolStatus(): String
+    @JvmStatic external fun nativeLlmSetPoolCapacity(capacity: Int)
     @JvmStatic external fun nativeLlmUnload()
     @JvmStatic external fun nativeLlmAbort()
     @JvmStatic external fun nativeLlmClearSlots()

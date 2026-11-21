@@ -43,6 +43,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.enhikyy.girassol.audio.CitizenVoice
 import com.enhikyy.girassol.audio.PocketTtsVoice
+import com.enhikyy.girassol.audio.PiperVoice
+import com.enhikyy.girassol.audio.VoicePacks
 import com.enhikyy.girassol.core.ui.NativeThemes
 import com.enhikyy.girassol.core.ui.Wcag
 import com.enhikyy.girassol.core.world.DashboardSnapshot
@@ -215,4 +217,53 @@ fun PocketTtsToggle() {
         }
         Switch(checked = on, enabled = available, onCheckedChange = { on = it; CitizenVoice.usePocketTts = it })
     }
+}
+
+/**
+ * v3.7: backends de voz por perfil. 4 GB: SenseVoice + Android TTS/Pocket-TTS (embutidos, nada a
+ * baixar). 8/12 GB: Piper VITS pt-BR e Whisper tiny opcionais, baixados das releases oficiais do
+ * Sherpa-ONNX e verificados por SHA-256 (arquivo + cada modelo) antes de carregar.
+ */
+@Composable
+fun VoiceBackendsPanel() {
+    val context = LocalContext.current
+    val profile = LocalLlmManager.profile
+    val states by VoicePacks.states.collectAsStateWithLifecycle()
+    LaunchedEffect(profile.label) { VoicePacks.refresh(context, profile) }
+    val allowed = VoicePacks.allowedFor(profile)
+    Text(if (allowed) "Perfil ${profile.label}: Piper VITS e Whisper disponíveis como backends opcionais (SHA-256 verificado)."
+         else "Perfil ${profile.label}: SenseVoice + Android TTS/Pocket-TTS (Piper/Whisper desativados para não estourar a RAM).",
+        style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
+    if (!allowed) return
+    for (p in VoicePacks.ALL) {
+        val st = states[p.id] ?: VoicePacks.State.Missing
+        Column(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(p.label, style = MaterialTheme.typography.bodyMedium, color = Lumon.Cream)
+                    Text(when (st) {
+                        is VoicePacks.State.Ready -> "instalado · SHA-256 ${p.archiveSha256.take(12)}…"
+                        is VoicePacks.State.Downloading -> "baixando ${(st.fraction * 100).toInt()}% de ${p.archiveBytes / 1048576} MB"
+                        VoicePacks.State.Verifying -> "verificando SHA-256 e extraindo"
+                        is VoicePacks.State.Failed -> "falhou: ${st.message}"
+                        VoicePacks.State.Blocked -> "bloqueado neste perfil"
+                        VoicePacks.State.Missing -> "não instalado (${p.archiveBytes / 1048576} MB)"
+                    }, style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                if (st is VoicePacks.State.Ready) {
+                    if (p.kind == VoicePacks.Kind.TTS) {
+                        var on by remember { mutableStateOf(CitizenVoice.usePiper) }
+                        Switch(checked = on, onCheckedChange = { on = it; CitizenVoice.usePiper = it }, modifier = Modifier.testTag("toggle_piper"))
+                    } else {
+                        var on by remember { mutableStateOf(AudioTranscriber.preferWhisper) }
+                        Switch(checked = on, onCheckedChange = { on = it; AudioTranscriber.preferWhisper = it }, modifier = Modifier.testTag("toggle_whisper"))
+                    }
+                } else if (st !is VoicePacks.State.Downloading && st != VoicePacks.State.Verifying) {
+                    OutlinedButton(onClick = { VoicePacks.install(context, p, profile) }, modifier = Modifier.testTag("install_${p.id}")) { Text("Instalar") }
+                }
+            }
+            if (st is VoicePacks.State.Downloading) LinearProgressIndicator(progress = { st.fraction }, modifier = Modifier.fillMaxWidth())
+        }
+    }
+    if (PiperVoice.lastError.isNotEmpty()) Text("Piper: ${PiperVoice.lastError}", style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
 }

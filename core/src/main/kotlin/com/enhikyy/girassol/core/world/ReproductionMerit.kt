@@ -1,8 +1,6 @@
 package com.enhikyy.girassol.core.world
 
 import com.enhikyy.girassol.core.world.StockFlowDoubleEntryLedger.Companion.COMMUNAL_COMMONS
-import kotlin.math.ceil
-import kotlin.math.max
 
 /**
  * v3.6 — Reprodução por mérito de desempenho.
@@ -25,21 +23,40 @@ object ReproductionMerit {
     const val COMMONS_FOOD_PER_CAPITA = 2.0
     const val EMA_ALPHA = 0.05
 
+    const val IRT_MIN_RESPONSES = 12.0
+    const val IRT_MARGIN = 0.10
+
     data class Check(
         val adult: Boolean,
         val anokhin: Boolean,
         val brier: Boolean,
         val promotion: Boolean,
-        val wellbeing: Boolean
+        val wellbeing: Boolean,
+        /** v3.7: habilidade latente IRT 2PL θ ≥ θ0 + [IRT_MARGIN]. */
+        val irt: Boolean = true
     ) {
-        val all: Boolean get() = adult && anokhin && brier && promotion && wellbeing
-        fun blockers(): List<String> = buildList {
-            if (!adult) add("maturidade")
-            if (!anokhin) add("erro Anokhin")
-            if (!brier) add("Brier")
-            if (!promotion) add("promoção RSI/LoRA")
-            if (!wellbeing) add("bem-estar")
+        val all: Boolean get() = adult && anokhin && brier && promotion && wellbeing && irt
+        fun blockers(): List<String> = blockerLabels(bits())
+        fun bits(): Long = (if (adult) NativeWorldTick.BIT_ADULT else 0) or (if (anokhin) NativeWorldTick.BIT_ANOKHIN else 0) or
+            (if (brier) NativeWorldTick.BIT_BRIER else 0) or (if (promotion) NativeWorldTick.BIT_PROMOTION else 0) or
+            (if (wellbeing) NativeWorldTick.BIT_WELLBEING else 0) or (if (irt) NativeWorldTick.BIT_IRT else 0)
+
+        companion object {
+            fun of(bits: Long) = Check(bits and NativeWorldTick.BIT_ADULT != 0L, bits and NativeWorldTick.BIT_ANOKHIN != 0L,
+                bits and NativeWorldTick.BIT_BRIER != 0L, bits and NativeWorldTick.BIT_PROMOTION != 0L,
+                bits and NativeWorldTick.BIT_WELLBEING != 0L, bits and NativeWorldTick.BIT_IRT != 0L)
         }
+    }
+
+    /** Rótulos dos critérios NÃO satisfeitos (bits ausentes) + bloqueio dos comuns. */
+    fun blockerLabels(okBits: Long, commonsBlocked: Boolean = false): List<String> = buildList {
+        if (okBits and NativeWorldTick.BIT_ADULT == 0L) add("maturidade")
+        if (okBits and NativeWorldTick.BIT_ANOKHIN == 0L) add("erro Anokhin")
+        if (okBits and NativeWorldTick.BIT_BRIER == 0L) add("Brier")
+        if (okBits and NativeWorldTick.BIT_PROMOTION == 0L) add("promoção RSI/LoRA")
+        if (okBits and NativeWorldTick.BIT_WELLBEING == 0L) add("bem-estar")
+        if (okBits and NativeWorldTick.BIT_IRT == 0L) add("IRT θ")
+        if (commonsBlocked) add("comuns")
     }
 
     enum class Status { SEM_POPULACAO, PRECISA_PAR, PRONTO, AGUARDANDO }
@@ -71,17 +88,12 @@ object ReproductionMerit {
         } else c.brierEma = (1 - EMA_ALPHA) * c.brierEma + EMA_ALPHA * squaredError
     }
 
-    fun check(c: Citizen, tick: Long): Check {
-        val ab = c.acceptorBaseline
-        val bb = c.brierBaseline
-        return Check(
-            adult = c.ageDays(tick) >= ADULT_DAYS,
-            // descompasso nulo desde o início também conta como domínio (nada a reduzir)
-            anokhin = ab >= 0 && c.acceptorEma >= 0 && (c.acceptorEma <= ANOKHIN_RATIO * ab || (ab < 1e-6 && c.acceptorEma < 1e-6)),
-            brier = bb >= 0 && c.brierEma >= 0 && c.brierEma <= bb - BRIER_MARGIN,
-            promotion = c.promotions > c.promotionsAtLastReproduction,
-            wellbeing = c.meanNeed() >= WELLBEING_MIN
-        )
+    /** Gatilho de mérito avaliado pelo kernel nativo (mesma função usada pela reprodução). */
+    fun check(c: Citizen, tick: Long): Check = Check.of(citizenRaw(c, tick)[0])
+
+    private fun citizenRaw(c: Citizen, tick: Long): LongArray {
+        val (l, d) = NativeWorldTick.packMerit(listOf(c))
+        return NativeWorldTick.nativeMeritCitizens(arrayOf(c.id), l, d, tick)
     }
 
     fun commonsSurplus(state: WorldState, population: Int): Boolean =
@@ -90,62 +102,25 @@ object ReproductionMerit {
     fun compatible(a: Citizen, b: Citizen): Boolean = a.sex.isEmpty() || b.sex.isEmpty() || a.sex != b.sex
 
     /** Ticks estimados para o cidadão satisfazer o próprio gatilho (-1 = sem taxa mensurável ainda). */
-    fun citizenEtaTicks(c: Citizen, tick: Long, check: Check = check(c, tick)): Long {
-        var worst = 0L
-        fun take(t: Long) { if (worst < 0) return; worst = if (t < 0) -1 else max(worst, t) }
-        if (!check.adult) take(ceil((ADULT_DAYS - c.ageDays(tick)) * TICKS_PER_DAY).toLong())
-        if (!check.anokhin) take(seriesEta(c.acceptorBaseN, c.acceptorBaseline, c.acceptorEma, c.acceptorBaselineTick, ANOKHIN_RATIO * c.acceptorBaseline, tick))
-        if (!check.brier) take(seriesEta(c.brierBaseN, c.brierBaseline, c.brierEma, c.brierBaselineTick, c.brierBaseline - BRIER_MARGIN, tick))
-        if (!check.promotion) {
-            // próximo ciclo de promoção: o LoRA do sono roda na virada do dia; o RSI/CMA-ES a cada 3 dias
-            val toDay = TICKS_PER_DAY - (tick % TICKS_PER_DAY)
-            take(toDay)
-        }
-        if (!check.wellbeing) take(-1)
-        return worst
-    }
+    fun citizenEtaTicks(c: Citizen, tick: Long): Long = citizenRaw(c, tick)[1]
 
-    /** Tempo até a série cair abaixo do alvo, pela velocidade média de queda desde t0. */
-    private fun seriesEta(n: Int, baseline: Double, ema: Double, baselineTick: Long, target: Double, tick: Long): Long {
-        if (n < MERIT_BASELINE_SAMPLES || baselineTick < 0) return -1
-        val elapsed = (tick - baselineTick).coerceAtLeast(1)
-        val rate = (baseline - ema) / elapsed
-        if (rate <= 1e-9) return -1
-        return ceil((ema - target).coerceAtLeast(0.0) / rate).toLong()
-    }
-
-    /** Melhor par compatível vivo e o ETA da próxima geração. */
+    /** Melhor par compatível vivo e o ETA da próxima geração (kernel nativo). */
     fun estimate(state: WorldState): Eta {
         val alive = state.aliveCitizens()
-        if (alive.isEmpty()) return Eta(Status.SEM_POPULACAO, -1)
-        if (alive.size < 2) return Eta(Status.PRECISA_PAR, -1, alive[0].id, nextGeneration = alive[0].generation + 1)
-        val tick = state.tick
-        val checks = alive.associate { it.id to check(it, tick) }
-        val etas = alive.associate { it.id to citizenEtaTicks(it, tick, checks.getValue(it.id)) }
-        val surplus = commonsSurplus(state, alive.size)
-        var best: Eta? = null
-        val sorted = alive.sortedBy { it.id }
-        for (i in sorted.indices) for (j in i + 1 until sorted.size) {
-            val a = sorted[i]; val b = sorted[j]
-            if (!compatible(a, b) || a.children >= 4 || b.children >= 4) continue
-            val ca = checks.getValue(a.id); val cb = checks.getValue(b.id)
-            val ea = etas.getValue(a.id); val eb = etas.getValue(b.id)
-            val ticks = if (ea < 0 || eb < 0) -1 else max(ea, eb)
-            val blockers = (ca.blockers() + cb.blockers()).distinct() + (if (surplus) emptyList() else listOf("comuns"))
-            val status = if (ca.all && cb.all && surplus) Status.PRONTO else Status.AGUARDANDO
-            val cand = Eta(status, if (status == Status.PRONTO) 0 else ticks, a.id, b.id, max(a.generation, b.generation) + 1, blockers)
-            best = when {
-                best == null -> cand
-                rank(cand) < rank(best) -> cand
-                else -> best
-            }
-        }
-        return best ?: Eta(Status.PRECISA_PAR, -1, sorted[0].id, nextGeneration = sorted[0].generation + 1)
-    }
-
-    private fun rank(e: Eta): Double = when {
-        e.status == Status.PRONTO -> -1.0
-        e.ticks >= 0 -> e.ticks.toDouble()
-        else -> 1e12 + e.blockers.size
+        val (l, d) = NativeWorldTick.packMerit(alive)
+        val r = NativeWorldTick.nativeMeritEstimate(alive.map { it.id }.toTypedArray(), l, d,
+            state.ledger.getBalance(COMMUNAL_COMMONS, FOOD), state.tick)
+        val status = Status.entries[r[0].toInt()]
+        val blockers = r[5]
+        return Eta(
+            status = status,
+            ticks = r[1],
+            parentA = r[2].toInt().takeIf { it >= 0 }?.let { alive[it].id },
+            parentB = r[3].toInt().takeIf { it >= 0 }?.let { alive[it].id },
+            nextGeneration = r[4].toInt(),
+            blockers = if (status == Status.AGUARDANDO || status == Status.PRONTO)
+                blockerLabels(NativeWorldTick.ALL_CITIZEN_BITS and blockers.inv(), blockers and NativeWorldTick.BIT_COMMONS != 0L)
+            else emptyList()
+        )
     }
 }

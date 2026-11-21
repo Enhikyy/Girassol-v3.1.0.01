@@ -30,8 +30,15 @@ data class MeritView(
     val id: String, val name: String, val generation: Int,
     val acceptorBaseline: Double, val acceptorRecent: Double,
     val brierBaseline: Double, val brierRecent: Double,
-    val promotions: Int, val wellbeing: Double, val ready: Boolean, val blockers: List<String>
+    val promotions: Int, val wellbeing: Double, val ready: Boolean, val blockers: List<String>,
+    /** v3.7 IRT 2PL: θ atual, erro-padrão, linha de base θ0 (NaN = ainda sem respostas suficientes). */
+    val theta: Double = 0.0, val thetaSe: Double = 1.0, val theta0: Double = Double.NaN,
+    /** v3.7 PER: experiências no buffer, prioridade média e glifos do léxico individual. */
+    val replaySize: Int = 0, val replayMeanPriority: Double = 0.0, val lexiconSize: Int = 0, val lexiconInherited: Int = 0
 )
+
+/** Parâmetros calibrados de um item IRT 2PL. */
+data class IrtItemView(val action: String, val discrimination: Double, val difficulty: Double)
 
 data class GenerationView(
     val status: ReproductionMerit.Status = ReproductionMerit.Status.SEM_POPULACAO,
@@ -42,7 +49,9 @@ data class GenerationView(
     val blockers: List<String> = emptyList(),
     val lineage: List<LineageNode> = emptyList(),
     val merit: List<MeritView> = emptyList(),
-    val history: List<EvolutionSample> = emptyList()
+    val history: List<EvolutionSample> = emptyList(),
+    val irtItems: List<IrtItemView> = emptyList(),
+    val perReplays: Long = 0
 ) {
     val etaDays: Double get() = if (etaTicks < 0) -1.0 else etaTicks.toDouble() / TICKS_PER_DAY
 }
@@ -222,11 +231,16 @@ data class DashboardSnapshot(
                     locomotionSpeedScale = state.policy.locomotionSpeedScale,
                     documents = state.knowledge.documents.map { KnowledgeDocumentView(it.id, it.title, it.format.name, it.chunks, it.reads, it.sha256) },
                     knowledgeChunks = state.knowledge.chunks.size,
-                    lexicon = state.lexicon.entries.sortedByDescending { it.uses }.take(24).map { e ->
-                        LexiconView(e.glyph, e.phrase, e.uses, e.coinerId?.let { id -> state.citizen(id)?.name ?: id })
+                    // v3.7: visão agregada dos léxicos individuais (cada glifo vive no .grs do seu cidadão)
+                    lexicon = alive.flatMap { c -> c.lexicon.entries.map { e -> c to e } }
+                        .sortedWith(compareByDescending<Pair<Citizen, com.enhikyy.girassol.core.knowledge.EmergentLexicon.LexiconEntry>> { it.second.uses }.thenBy { it.second.glyph })
+                        .distinctBy { it.second.glyph }.take(24).map { (c, e) ->
+                            LexiconView(e.glyph, e.phrase, e.uses, c.name)
+                        },
+                    lexiconCompression = alive.sumOf { it.lexicon.observedWords }.let { o ->
+                        if (o == 0L) 0.0 else alive.sumOf { it.lexicon.compressedWords }.toDouble() / o
                     },
-                    lexiconCompression = state.lexicon.compressionRatio(),
-                    compressedSpeechSample = alive.map { it.lastSpeech }.filter { it.isNotBlank() }.take(4).map { state.lexicon.compress(it) },
+                    compressedSpeechSample = alive.filter { it.lastSpeech.isNotBlank() }.take(4).map { it.lexicon.compress(it.lastSpeech) },
                     migrantsIn = state.migrantsIn,
                     migrantsOut = state.migrantsOut,
                     eventSeq = state.eventSeq,
@@ -244,9 +258,14 @@ data class DashboardSnapshot(
                 merit = alive.sortedWith(compareBy<Citizen> { it.generation }.thenBy { it.name }).map { c ->
                     val ch = ReproductionMerit.check(c, state.tick)
                     MeritView(c.id, c.name, c.generation, c.acceptorBaseline, c.acceptorEma, c.brierBaseline, c.brierEma,
-                        c.promotions - c.promotionsAtLastReproduction, c.meanNeed(), ch.all, ch.blockers())
+                        c.promotions - c.promotionsAtLastReproduction, c.meanNeed(), ch.all, ch.blockers(),
+                        c.irtTheta, c.irtThetaSe, if (c.irtCalibrated) c.irtTheta0 else Double.NaN,
+                        c.replay.size, if (c.replay.isEmpty()) 0.0 else c.replay.sumOf { it.priority } / c.replay.size,
+                        c.lexicon.entries.size, c.lexicon.inheritedEntries)
                 },
-                history = state.evolutionHistory.toList()
+                history = state.evolutionHistory.toList(),
+                irtItems = IRT_ACTIONS.mapIndexed { j, a -> IrtItemView(a.label, state.irtItemA[j], state.irtItemB[j]) },
+                perReplays = state.perReplays
             )
             return DashboardSnapshot(state.tick, citizens, society, mind, generation)
         }

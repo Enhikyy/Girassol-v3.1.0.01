@@ -279,4 +279,11 @@ object PersonalAdapter {
         val err = target.coerceIn(-1f, 1f) - predict(w, x)
         for (i in w.indices) w[i] = (w[i] + LR * err * x[i]).coerceIn(-2f, 2f)
     }
+
+    /** Passo ponderado pelo peso de importância do PER (corrige o viés da amostragem priorizada). */
+    fun trainWeighted(w: FloatArray, x: FloatArray, target: Float, isWeight: Float) {
+        val err = target.coerceIn(-1f, 1f) - predict(w, x)
+        val lr = LR * isWeight.coerceIn(0f, 1f)
+        for (i in w.indices) w[i] = (w[i] + lr * err * x[i]).coerceIn(-2f, 2f)
+    }
 }

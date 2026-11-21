@@ -26,6 +26,7 @@
 #include <cstring>
 
 static int gFailures = 0;
+int runWorldTickTests();
 #define CHECK(cond, msg)                                              \
     do {                                                              \
         if (!(cond)) {                                                \
@@ -256,6 +257,50 @@ static void llmTest() {
         std::filesystem::remove(ad);
     }
 
+    // --- v3.7: pool multi-modelo (perfis 8/12 GB) — 3 arquivos GGUF residentes, troca só o contexto
+    {
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::temp_directory_path() / "girassol_pool_test";
+        fs::create_directories(dir);
+        std::vector<std::string> paths;
+        for (int i = 0; i < 3; ++i) {
+            const fs::path p = dir / ("m" + std::to_string(i) + ".gguf");
+            fs::copy_file(path, p, fs::copy_options::overwrite_existing);
+            paths.push_back(p.string());
+        }
+        girassol::llm::LlmLoadConfig pc;
+        pc.nThreads = 2; pc.nCtx = 512; pc.poolCapacity = 3;
+        girassol::llm::LlmEngine ep;
+        for (const auto& p : paths) CHECK(ep.load(p, pc, &err), ("pool: carrega " + p + " " + err).c_str());
+        auto st = ep.poolStatus();
+        CHECK(st.resident == 3 && st.coldLoads == 3 && st.switches == 0, "pool 12 GB: 3 llama_model residentes");
+        const auto g0 = ep.generate("Voce e um cidadao.", "Escolha uma acao.", kGrammar, 64);
+        CHECK(ep.load(paths[0], pc, &err), "pool: volta ao primeiro modelo");
+        st = ep.poolStatus();
+        CHECK(st.coldLoads == 3 && st.switches == 1 && st.resident == 3 && st.active == paths[0],
+              "troca servida pelo pool sem recarregar pesos (só llama_context)");
+        const auto g1 = ep.generate("Voce e um cidadao.", "Escolha uma acao.", kGrammar, 64);
+        CHECK(g0.ok && g1.ok && g0.text == g1.text, "contexto recriado no modelo residente gera a mesma saída");
+        // perfil 8 GB: capacidade 2 → despejo LRU do menos usado
+        ep.setPoolCapacity(2);
+        st = ep.poolStatus();
+        CHECK(st.resident == 2 && st.evictions >= 1, "pool 8 GB: capacidade 2 despeja o LRU");
+        pc.poolCapacity = 2;
+        CHECK(ep.load(paths[1], pc, &err), "pool 8 GB: troca");
+        CHECK(ep.load(paths[2], pc, &err), "pool 8 GB: terceiro modelo força despejo");
+        st = ep.poolStatus();
+        CHECK(st.resident == 2, "pool 8 GB nunca passa de 2 residentes");
+        // perfil 4 GB: single-model
+        pc.poolCapacity = 1;
+        CHECK(ep.load(paths[0], pc, &err), "perfil 4 GB: single-model");
+        st = ep.poolStatus();
+        CHECK(st.resident == 1 && st.capacity == 1, "perfil 4 GB mantém 1 modelo (mmap, orçamento 3631 MB)");
+        ep.unload();
+        CHECK(ep.poolStatus().resident == 0, "unload libera todo o pool");
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+    }
+
     // benchmark tokens/s (pp + tg), mesmo caminho usado pelo botão da aba Sistema
     girassol::llm::LlmEngine eb;
     CHECK(eb.load(path, 2, 512, &err), "recarrega para benchmark");
@@ -431,6 +476,7 @@ int main() {
     cpuFeatureTests();
     semanticEntropyTests();
     llmTest();
+    gFailures += runWorldTickTests();
 
     std::printf(gFailures == 0 ? "TODOS OS TESTES NATIVOS PASSARAM\n" : "%d FALHA(S)\n", gFailures);
     return gFailures == 0 ? 0 : 1;

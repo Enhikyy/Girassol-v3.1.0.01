@@ -10,6 +10,10 @@ import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OfflineSenseVoiceModelConfig
+import com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig
+import com.enhikyy.girassol.audio.VoicePacks
+import com.enhikyy.girassol.llm.LocalLlmManager
+import java.io.File
 import java.nio.ByteOrder
 
 /**
@@ -29,6 +33,34 @@ object AudioTranscriber {
     private const val MAX_SECONDS = 60 * 60
 
     @Volatile private var recognizer: OfflineRecognizer? = null
+    @Volatile private var whisper: OfflineRecognizer? = null
+    /** v3.7: nos perfis 8/12 GB o Whisper (pt) pode substituir o SenseVoice, se instalado e verificado. */
+    @Volatile var preferWhisper = false
+    @Volatile var lastBackend: String = "SenseVoice-Small"; private set
+
+    fun whisperAvailable(context: Context): Boolean {
+        val p = LocalLlmManager.profile
+        return VoicePacks.allowedFor(p) && VoicePacks.isInstalled(VoicePacks.dirOf(context, VoicePacks.WHISPER_TINY), VoicePacks.WHISPER_TINY)
+    }
+
+    @Synchronized
+    private fun whisperRecognizer(context: Context): OfflineRecognizer? {
+        whisper?.let { return it }
+        val dir = VoicePacks.verifiedDir(context, VoicePacks.WHISPER_TINY, LocalLlmManager.profile) ?: return null
+        val model = OfflineModelConfig().apply {
+            whisper = OfflineWhisperModelConfig().apply {
+                encoder = File(dir, "tiny-encoder.int8.onnx").absolutePath
+                decoder = File(dir, "tiny-decoder.int8.onnx").absolutePath
+                language = "pt"
+                task = "transcribe"
+            }
+            tokens = File(dir, "tiny-tokens.txt").absolutePath
+            modelType = "whisper"
+            numThreads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(1, 4)
+            provider = "cpu"
+        }
+        return OfflineRecognizer(null, OfflineRecognizerConfig().apply { modelConfig = model }).also { whisper = it }
+    }
 
     fun modelAvailable(context: Context): Boolean =
         runCatching { context.assets.open(MODEL_ASSET).close(); context.assets.open(TOKENS_ASSET).close(); true }.getOrDefault(false)
@@ -51,7 +83,7 @@ object AudioTranscriber {
         return OfflineRecognizer(context.assets, cfg).also { recognizer = it }
     }
 
-    fun release() = synchronized(this) { recognizer?.release(); recognizer = null }
+    fun release() = synchronized(this) { recognizer?.release(); recognizer = null; whisper?.release(); whisper = null }
 
     /** Decodifica o áudio para PCM mono 16 kHz em float [-1, 1]. */
     fun decodeToMono16k(context: Context, uri: Uri): FloatArray {
@@ -131,9 +163,12 @@ object AudioTranscriber {
 
     /** Transcreve o áudio inteiro em janelas; [onProgress] recebe 0..1. */
     fun transcribe(context: Context, uri: Uri, onProgress: (Float) -> Unit = {}): String {
-        val rec = recognizer(context)
+        val w = if (preferWhisper && whisperAvailable(context)) whisperRecognizer(context) else null
+        val rec = w ?: recognizer(context)
+        lastBackend = if (w != null) "Whisper tiny (pt)" else "SenseVoice-Small"
         val pcm = decodeToMono16k(context, uri)
         if (pcm.isEmpty()) return ""
+        // o Whisper processa janelas de até 30 s; o SenseVoice usa 25 s
         val win = SAMPLE_RATE * WINDOW_S
         val sb = StringBuilder()
         var off = 0

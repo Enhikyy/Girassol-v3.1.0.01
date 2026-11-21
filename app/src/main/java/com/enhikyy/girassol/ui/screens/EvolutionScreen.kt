@@ -90,8 +90,16 @@ fun EvolutionScreen(onOpenCitizen: (String) -> Unit) {
                     Text("Anokhin ${m.acceptorBaseline.f(3)} → ${m.acceptorRecent.f(3)} · Brier ${m.brierBaseline.f(3)} → ${m.brierRecent.f(3)} · promoções ${m.promotions}",
                         style = MonoStyle, color = Lumon.CreamDim)
                     CompactBar("bem-estar", m.wellbeing, if (m.wellbeing >= ReproductionMerit.WELLBEING_MIN) Lumon.Ok else Lumon.Sunflower)
+                    Text("IRT 2PL θ ${if (m.theta0.isNaN()) "—" else m.theta0.f(2)} → ${m.theta.f(2)} ± ${m.thetaSe.f(2)} · PER ${m.replaySize} exp. (prio. ${m.replayMeanPriority.f(3)}) · léxico ${m.lexiconSize} glifos (${m.lexiconInherited} herdados)",
+                        style = MonoStyle, color = Lumon.CreamDim)
                     if (m.blockers.isNotEmpty()) Text(m.blockers.joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
                 }
+            }
+        }
+        if (g.irtItems.isNotEmpty()) item {
+            SectionCard("Itens IRT 2PL (calibração conjunta)", Modifier.testTag("evo_irt")) {
+                Text("Replays PER aplicados: ${g.perReplays}", style = MonoStyle, color = Lumon.CreamDim)
+                for (item in g.irtItems) Text("${item.action}: a ${item.discrimination.f(2)} · b ${item.difficulty.f(2)}", style = MonoStyle, color = Lumon.CreamDim)
             }
         }
         item {

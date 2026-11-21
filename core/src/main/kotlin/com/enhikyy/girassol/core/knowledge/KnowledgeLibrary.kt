@@ -108,7 +108,18 @@ class EmergentLexicon(
     val pairCounts: MutableMap<String, Int> = mutableMapOf(),
     val entries: MutableList<LexiconEntry> = mutableListOf(),
     var observedWords: Long = 0L,
-    var compressedWords: Long = 0L
+    var compressedWords: Long = 0L,
+    /** v3.7: limites e taxas próprias de cada cidadão (herdáveis com mutação). */
+    var maxPairs: Int = MAX_PAIRS,
+    var maxEntries: Int = MAX_ENTRIES,
+    var minCount: Int = MIN_COUNT,
+    /** Probabilidade de um glifo herdado sofrer mutação (deriva cultural). */
+    var mutationRate: Double = 0.08,
+    /** Fração do léxico dos pais retida/comprimida pelo filho (pressão de compressão). */
+    var compressionRate: Double = 0.5,
+    /** Glifos herdados (não cunhados pelo próprio cidadão). */
+    var inheritedEntries: Int = 0,
+    var mutatedEntries: Int = 0
 ) {
     @Serializable
     data class LexiconEntry(val glyph: String, val phrase: String, val coinedTick: Long, val coinerId: String?, var uses: Int = 0)
@@ -118,6 +129,54 @@ class EmergentLexicon(
         const val MAX_ENTRIES = 256
         const val MIN_COUNT = 6
         private val STOP = setOf("a", "o", "e", "de", "da", "do", "em", "um", "uma", "que", "para", "por", "com", "os", "as", "no", "na", "se", "eu")
+
+        const val INDIVIDUAL_PAIRS = 768
+        const val INDIVIDUAL_ENTRIES = 64
+
+        fun individual(): EmergentLexicon = EmergentLexicon(maxPairs = INDIVIDUAL_PAIRS, maxEntries = INDIVIDUAL_ENTRIES)
+
+        /**
+         * Reprodução g1: o filho herda um subconjunto dos glifos dos pais (proporcional à própria
+         * taxa de compressão), com mutação por glifo; taxas do filho = média dos pais + ruído.
+         */
+        fun inherit(a: EmergentLexicon, b: EmergentLexicon, rng: com.enhikyy.girassol.core.util.SplitMix64): EmergentLexicon {
+            val child = individual()
+            child.mutationRate = ((a.mutationRate + b.mutationRate) / 2 + 0.02 * rng.nextGaussian()).coerceIn(0.01, 0.30)
+            child.compressionRate = ((a.compressionRate + b.compressionRate) / 2 + 0.05 * rng.nextGaussian()).coerceIn(0.15, 0.90)
+            child.minCount = (MIN_COUNT * (1.25 - 0.5 * child.compressionRate)).toInt().coerceIn(3, 10)
+            val pool = (a.entries + b.entries).groupBy { it.phrase }
+                .map { (_, es) -> es.maxWith(compareBy<LexiconEntry> { it.uses }.thenByDescending { it.glyph }) }
+                .sortedWith(compareByDescending<LexiconEntry> { it.uses }.thenBy { it.phrase })
+            for (e in pool) {
+                if (child.entries.size >= child.maxEntries) break
+                if (rng.nextDouble() >= child.compressionRate) continue
+                var glyph = e.glyph
+                if (rng.nextDouble() < child.mutationRate) {
+                    glyph = mutate(glyph, rng)
+                    child.mutatedEntries++
+                }
+                var n = 2
+                val base = glyph
+                while (child.entries.any { it.glyph == glyph }) glyph = base + n++
+                child.entries += LexiconEntry(glyph, e.phrase, e.coinedTick, e.coinerId, 0)
+                child.inheritedEntries++
+            }
+            // contagens de bigramas: metade de cada pai (as mais frequentes), para seguir cunhando
+            for (src in listOf(a, b)) for ((k, v) in src.pairCounts.entries.sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key }).take(child.maxPairs / 4)) {
+                child.pairCounts[k] = (child.pairCounts[k] ?: 0) + v / 2
+            }
+            return child
+        }
+
+        /** Mutação de glifo: troca de vogal ou compressão (perde a última letra). */
+        fun mutate(glyph: String, rng: com.enhikyy.girassol.core.util.SplitMix64): String {
+            val vowels = "aeiouáéíóú"
+            if (glyph.length > 3 && rng.nextDouble() < 0.5) return glyph.dropLast(1)
+            val idx = glyph.indices.filter { glyph[it] in vowels }
+            if (idx.isEmpty()) return glyph + vowels[rng.nextInt(5)]
+            val i = idx[rng.nextInt(idx.size)]
+            return glyph.substring(0, i) + vowels[rng.nextInt(vowels.length)] + glyph.substring(i + 1)
+        }
 
         fun words(text: String): List<String> = text.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length > 1 && it !in STOP }
 
@@ -146,8 +205,8 @@ class EmergentLexicon(
             val k = w[i] + " " + w[i + 1]
             pairCounts[k] = (pairCounts[k] ?: 0) + 1
         }
-        if (pairCounts.size > MAX_PAIRS) {
-            val keep = pairCounts.entries.sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key }).take(MAX_PAIRS / 2)
+        if (pairCounts.size > maxPairs) {
+            val keep = pairCounts.entries.sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key }).take(maxPairs / 2)
             pairCounts.clear(); for (e in keep) pairCounts[e.key] = e.value
         }
     }
@@ -169,8 +228,8 @@ class EmergentLexicon(
 
     /** Uma fusão por chamada (consolidação diária). Retorna a entrada cunhada, se houver. */
     fun consolidate(tick: Long, coinerId: String?): LexiconEntry? {
-        if (entries.size >= MAX_ENTRIES) return null
-        val best = pairCounts.entries.filter { it.value >= MIN_COUNT && entries.none { e -> e.phrase == it.key } }
+        if (entries.size >= maxEntries) return null
+        val best = pairCounts.entries.filter { it.value >= minCount && entries.none { e -> e.phrase == it.key } }
             .maxWithOrNull(compareBy<Map.Entry<String, Int>> { it.value }.thenByDescending { it.key }) ?: return null
         var glyph = coin(best.key)
         var n = 2

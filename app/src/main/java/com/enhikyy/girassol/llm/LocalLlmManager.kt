@@ -71,7 +71,14 @@ data class LlmStats(
     val modelCount: Int = 0,
     val activeModel: String = "",
     val activeEstimateMb: Long = 0,
-    val modelSwitches: Int = 0
+    val modelSwitches: Int = 0,
+    /** v3.7: pool multi-modelo (1 no perfil 4 GB). */
+    val poolCapacity: Int = 1,
+    val poolResident: Int = 0,
+    val poolHits: Long = 0,
+    val poolColdLoads: Long = 0,
+    val poolEvictions: Long = 0,
+    val poolKeys: List<String> = emptyList()
 )
 
 /**
@@ -88,14 +95,18 @@ object LlmQuantPolicy {
     const val LAZY_IDLE_MS = 90_000L
 
     /** Perfis automáticos por RAM física: 4 GB (≤ 5,5), 8 GB (≤ 10) e 12 GB+. */
-    data class DeviceProfile(val label: String, val nCtx: Int, val kvType: Int, val description: String)
+    data class DeviceProfile(
+        val label: String, val nCtx: Int, val kvType: Int, val description: String,
+        /** v3.7: quantos llama_model ficam residentes ao mesmo tempo (troca só o llama_context). */
+        val poolCapacity: Int = 1
+    )
 
     fun profileFor(totalMemBytes: Long): DeviceProfile {
         val gb = 1024L * 1024 * 1024
         return when {
             totalMemBytes <= 5L * gb + gb / 2 -> DeviceProfile("4 GB", 1024, KV_Q4_0, "mmap com troca por turno, KV q4_0, filhos compartilham o .gguf base")
-            totalMemBytes <= 10L * gb -> DeviceProfile("8 GB", 2048, KV_Q8_0, "n_ctx 2048, KV q8_0, troca de contexto mais rápida (page cache maior)")
-            else -> DeviceProfile("12 GB", 4096, KV_Q8_0, "n_ctx 4096, KV q8_0, modelos até 3B+")
+            totalMemBytes <= 10L * gb -> DeviceProfile("8 GB", 2048, KV_Q8_0, "n_ctx 2048, KV q8_0, pool residente de 2 modelos (troca só o contexto)", poolCapacity = 2)
+            else -> DeviceProfile("12 GB", 4096, KV_Q8_0, "n_ctx 4096, KV q8_0, pool residente de 3 modelos (troca só o contexto)", poolCapacity = 3)
         }
     }
 
@@ -158,6 +169,39 @@ object LlmQuantPolicy {
         val budget = budgetFor(totalMemBytes)
         if (active > budget) return "Modelo precisa de ~${active / mb} MB de RAM ativa (limite ${budget / mb} MB)"
         return null
+    }
+
+    data class PoolStatus(
+        val capacity: Int = 1, val resident: Int = 0, val switches: Long = 0, val coldLoads: Long = 0,
+        val evictions: Long = 0, val active: String = "", val paths: List<String> = emptyList(), val bytes: List<Long> = emptyList()
+    )
+
+    /** Decodifica "cap|residentes|trocas|frias|despejos|ativo|caminho:bytes;…" do pool nativo. */
+    fun parsePool(raw: String): PoolStatus {
+        val f = raw.split('|')
+        if (f.size < 7) return PoolStatus()
+        val entries = f.subList(6, f.size).joinToString("|").split(';').filter { it.isNotBlank() }
+        val paths = entries.map { it.substringBeforeLast(':') }
+        val bytes = entries.map { it.substringAfterLast(':').toLongOrNull() ?: 0L }
+        return PoolStatus(f[0].toIntOrNull() ?: 1, f[1].toIntOrNull() ?: 0, f[2].toLongOrNull() ?: 0,
+            f[3].toLongOrNull() ?: 0, f[4].toLongOrNull() ?: 0, f[5], paths, bytes)
+    }
+
+    /**
+     * Capacidade efetiva do pool: o perfil pede [profileCap] (1/2/3), mas só mantém k modelos se a
+     * soma das pegadas estimadas (novo + k-1 maiores residentes) couber em [budgetBytes].
+     * O perfil 4 GB fica sempre em 1 (single-model, orçamento de 3631 MB).
+     */
+    fun fitPool(profileCap: Int, newFileBytes: Long, otherResidentBytes: List<Long>, budgetBytes: Long, nCtx: Int, kvType: Int): Int {
+        var k = profileCap.coerceIn(1, 3)
+        val sorted = otherResidentBytes.sortedDescending()
+        while (k > 1) {
+            val total = activeRamEstimate(newFileBytes, nCtx, kvType) +
+                sorted.take(k - 1).sumOf { activeRamEstimate(it, 0, kvType) - 96L * 1024 * 1024 + 16L * 1024 * 1024 }
+            if (total <= budgetBytes) break
+            k--
+        }
+        return k
     }
 }
 
@@ -364,7 +408,9 @@ object LocalLlmManager : NeuralDeliberationPort {
     /** Remove um modelo importado (o cidadão continua vivo, pensando no modo simbólico). */
     fun removeModel(context: Context, key: String) {
         worker.execute {
-            if (loadedKey == key) {
+            val pooled = modelFor(key)?.let { poolKeys().contains(File(it.path).absolutePath) } == true
+            if (loadedKey == key || pooled) {
+                // o pool pode manter o arquivo mapeado mesmo sem ser o ativo: libera tudo antes de apagar
                 runCatching { LlmNativeBridge.nativeLlmUnload() }
                 ready = false; loadedKey = null
             }
@@ -512,13 +558,26 @@ object LocalLlmManager : NeuralDeliberationPort {
         }
         val file = File(m.path)
         if (!file.exists()) { _stats.update { it.copy(status = LlmStatus.ERROR, lastError = "arquivo ausente: ${m.key}") }; return false }
-        if (ready) {
+        val poolNow = if (profile.poolCapacity > 1) LlmQuantPolicy.parsePool(runCatching { LlmNativeBridge.nativeLlmPoolStatus() }.getOrDefault("")) else LlmQuantPolicy.PoolStatus()
+        val others = poolNow.paths.zip(poolNow.bytes).filter { it.first != file.absolutePath }.map { it.second }
+        val pool = LlmQuantPolicy.fitPool(profile.poolCapacity, file.length(), others, LlmQuantPolicy.budgetFor(totalMem), nCtx, kvType)
+        if (ready && pool <= 1) {
+            // perfil 4 GB (3631 MB): single-model — a troca descarrega e mapeia o próximo
             runCatching { LlmNativeBridge.nativeLlmUnload() }
             ready = false; loadedKey = null
         }
         val am = ctx.getSystemService(ActivityManager::class.java)
-        val mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
-        val active = LlmQuantPolicy.activeRamEstimate(file.length(), nCtx, kvType)
+        var mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+        val resident = pool > 1 && poolNow.paths.contains(file.absolutePath)
+        // residente no pool: os pesos já estão mapeados, só o contexto (KV) é recriado
+        val active = if (resident) LlmQuantPolicy.activeRamEstimate(0L, nCtx, kvType)
+            else LlmQuantPolicy.activeRamEstimate(file.length(), nCtx, kvType)
+        if (pool > 1 && !resident && (mi.lowMemory || mi.availMem - active < MIN_FREE_AFTER_LOAD)) {
+            // pressão de RAM: despeja os modelos estacionados antes de recusar
+            runCatching { LlmNativeBridge.nativeLlmSetPoolCapacity(1) }
+            mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+        }
+        ready = false; loadedKey = null
         if (mi.lowMemory || mi.availMem - active < MIN_FREE_AFTER_LOAD) {
             _stats.update { it.copy(status = LlmStatus.PAUSED_MEMORY,
                 lastError = "RAM livre insuficiente agora (${mi.availMem / 1048576} MB livres, modelo precisa de ~${active / 1048576} MB)") }
@@ -527,7 +586,7 @@ object LocalLlmManager : NeuralDeliberationPort {
         _stats.update { it.copy(status = LlmStatus.LOADING, modelName = m.key, lastError = "") }
         val threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 4)
         fun load(kv: Int, flash: Boolean) = runCatching {
-            LlmNativeBridge.nativeLlmLoad(file.absolutePath, threads, nCtx, flash, kv, slotDirFor(ctx, m.key).absolutePath, MAX_SLOTS)
+            LlmNativeBridge.nativeLlmLoad(file.absolutePath, threads, nCtx, flash, kv, slotDirFor(ctx, m.key).absolutePath, MAX_SLOTS, pool)
         }.getOrElse { it.message ?: "erro" }
         var err = load(kvType, true)
         // fallback seguro p/ arquiteturas híbridas (ex.: LFM2.5 conv+atenção): KV f16 e, por fim, sem flash-attn
@@ -563,8 +622,22 @@ object LocalLlmManager : NeuralDeliberationPort {
                 modelSwitches = it.modelSwitches + 1,
                 nativeHeapMb = android.os.Debug.getNativeHeapAllocatedSize() / 1048576.0)
         }
+        publishPool()
         refreshStatus()
         return true
+    }
+
+    /** Caminhos dos llama_model residentes no pool nativo (ativo + estacionados). */
+    private fun poolKeys(): List<String> = LlmQuantPolicy.parsePool(runCatching { LlmNativeBridge.nativeLlmPoolStatus() }.getOrDefault("")).paths
+
+    private fun publishPool() {
+        val st = LlmQuantPolicy.parsePool(runCatching { LlmNativeBridge.nativeLlmPoolStatus() }.getOrDefault(""))
+        val byPath = _models.value.associateBy { File(it.path).absolutePath }
+        _stats.update {
+            it.copy(poolCapacity = st.capacity, poolResident = st.resident, poolHits = st.switches,
+                poolColdLoads = st.coldLoads, poolEvictions = st.evictions,
+                poolKeys = st.paths.map { p -> byPath[p]?.key ?: File(p).name })
+        }
     }
 
     // ------------------------------------------------------------ NeuralDeliberationPort

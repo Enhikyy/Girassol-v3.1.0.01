@@ -19,7 +19,7 @@ import com.enhikyy.girassol.core.forge.LoraSample
 import kotlinx.serialization.Serializable
 
 /** Versão das regras do mundo. Eventos de versões anteriores mantêm suas regras históricas. */
-const val CURRENT_RULES_VERSION = 12
+const val CURRENT_RULES_VERSION = 13
 
 @Serializable
 enum class DistrictType(val label: String) {
@@ -233,8 +233,25 @@ data class Citizen(
     var brierBaselineTick: Long = -1L,
     /** Promoções aprovadas creditadas (BoundedRsiPromotionGate: CMA-ES/RSI ou LoRA do sono). */
     var promotions: Int = 0,
-    var promotionsAtLastReproduction: Int = 0
+    var promotionsAtLastReproduction: Int = 0,
+    /**
+     * v3.7 IRT 2PL: janela (decaimento 0,85/dia) de tentativas/sucessos nos 5 itens de habilidade
+     * (COLHER, RECICLAR, MANTER_USINA, PESQUISAR, CONSTRUIR), habilidade latente θ (±EP) estimada
+     * pelo kernel nativo e linha de base θ0 que a reprodução exige superar.
+     */
+    val irtAttempts: DoubleArray = DoubleArray(IRT_ACTIONS.size),
+    val irtSuccesses: DoubleArray = DoubleArray(IRT_ACTIONS.size),
+    var irtTheta: Double = 0.0,
+    var irtThetaSe: Double = 1.0,
+    var irtTheta0: Double = NativeWorldTick.NO_THETA,
+    var irtTheta0Tick: Long = -1L,
+    /** v3.7 PER: buffer de experiências priorizado (sum-tree nativa, α = 0,6, β anelado). */
+    val replay: MutableList<ReplayExperience> = mutableListOf(),
+    var replayCount: Long = 0L,
+    /** v3.7: léxico individual (gravado no .grs e no pacote de migração); herdado por recombinação. */
+    val lexicon: com.enhikyy.girassol.core.knowledge.EmergentLexicon = com.enhikyy.girassol.core.knowledge.EmergentLexicon.individual()
 ) {
+    val irtCalibrated: Boolean get() = irtTheta0 > NativeWorldTick.NO_THETA / 2
     val acceptorBaseline: Double get() = if (acceptorBaseN >= MERIT_BASELINE_SAMPLES) acceptorBaseSum / acceptorBaseN else -1.0
     val brierBaseline: Double get() = if (brierBaseN >= MERIT_BASELINE_SAMPLES) brierBaseSum / brierBaseN else -1.0
 
@@ -409,7 +426,10 @@ data class WorldState(
     var cmaEs: com.enhikyy.girassol.core.rsi.CmaEsState? = null,
     /** v3.5: biblioteca de conhecimento (Processo 19) e léxico comprimido emergente. */
     val knowledge: com.enhikyy.girassol.core.knowledge.KnowledgeShelf = com.enhikyy.girassol.core.knowledge.KnowledgeShelf(),
-    val lexicon: com.enhikyy.girassol.core.knowledge.EmergentLexicon = com.enhikyy.girassol.core.knowledge.EmergentLexicon(),
+    /** v3.7: parâmetros dos 5 itens IRT 2PL (discriminação a, dificuldade b) calibrados na sociedade. */
+    val irtItemA: DoubleArray = DoubleArray(IRT_ACTIONS.size) { 1.0 },
+    val irtItemB: DoubleArray = DoubleArray(IRT_ACTIONS.size),
+    var perReplays: Long = 0L,
     var acceptorMeanMismatch: Double = 0.0,
     /** Cidadãos recebidos/enviados por MeshSync LAN. */
     var migrantsIn: Int = 0,
@@ -432,6 +452,18 @@ data class WorldState(
     fun day(): Long = tick / TICKS_PER_DAY
     fun inDrought(): Boolean = tick < droughtUntilTick
 }
+
+/** Itens IRT 2PL: ações com habilidade praticada (sucesso/fracasso observado pelo mundo). */
+val IRT_ACTIONS = listOf(ActionType.COLHER, ActionType.RECICLAR, ActionType.MANTER_USINA, ActionType.PESQUISAR, ActionType.CONSTRUIR)
+
+/** Experiência do agente para o Prioritized Experience Replay. */
+@Serializable
+data class ReplayExperience(val action: Int, val tick: Long, val reward: Float, val reflexFeatures: ByteArray, var priority: Double)
+
+const val PER_CAPACITY = 256
+const val PER_BATCH = 32
+const val PER_ALPHA = 0.6
+const val PER_EPS = 1e-3
 
 const val DISTRICT_SIZE = 12
 const val TICKS_PER_DAY = 480L

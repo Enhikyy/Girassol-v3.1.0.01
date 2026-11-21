@@ -237,7 +237,10 @@ class V35Test {
     fun lexiconEmergesInWorld() {
         val core = WorldCore.create(3L, 24)
         repeat(2400) { core.step() }
-        assertTrue("sem fala observada", core.state.lexicon.observedWords > 0)
+        // v3.7: léxico individual por cidadão
+        assertTrue("sem fala observada", core.state.aliveCitizens().sumOf { it.lexicon.observedWords } > 0)
+        val owners = core.state.aliveCitizens().filter { it.lexicon.observedWords > 0 }
+        assertTrue("léxicos não são individuais", owners.size >= 2 && owners.map { it.lexicon.observedWords }.distinct().size > 1)
     }
 
     // ------------------------------------------------------------ MeshSync

@@ -57,7 +57,7 @@ Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmCpuBackend(JNIEn
 
 JNIEXPORT jstring JNICALL
 Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmLoad(
-    JNIEnv* env, jobject, jstring pathStr, jint threads, jint nCtx, jboolean flashAttn, jint kvType, jstring slotDir, jint maxSlots
+    JNIEnv* env, jobject, jstring pathStr, jint threads, jint nCtx, jboolean flashAttn, jint kvType, jstring slotDir, jint maxSlots, jint poolCapacity
 ) {
     girassol::llm::LlmLoadConfig cfg;
     cfg.nThreads = threads;
@@ -66,9 +66,29 @@ Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmLoad(
     cfg.kvType = static_cast<girassol::llm::KvCacheType>(kvType < 0 || kvType > 2 ? 0 : kvType);
     cfg.slotDir = readStr(env, slotDir);
     cfg.maxSlots = maxSlots;
+    cfg.poolCapacity = poolCapacity;
     std::string err;
     const bool ok = gLlm.load(readStr(env, pathStr), cfg, &err);
     return env->NewStringUTF(ok ? "" : err.c_str());
+}
+
+// v3.7: "capacidade|residentes|trocas|cargas_frias|despejos|ativo|caminho:bytes;caminho:bytes"
+JNIEXPORT jstring JNICALL
+Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmPoolStatus(JNIEnv* env, jobject) {
+    const auto st = gLlm.poolStatus();
+    std::string out = std::to_string(st.capacity) + "|" + std::to_string(st.resident) + "|" +
+                      std::to_string(st.switches) + "|" + std::to_string(st.coldLoads) + "|" +
+                      std::to_string(st.evictions) + "|" + st.active + "|";
+    for (size_t i = 0; i < st.paths.size(); ++i) {
+        if (i) out += ";";
+        out += st.paths[i] + ":" + std::to_string(st.bytes[i]);
+    }
+    return env->NewStringUTF(sanitizeUtf8(out).c_str());
+}
+
+JNIEXPORT void JNICALL
+Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmSetPoolCapacity(JNIEnv*, jobject, jint capacity) {
+    gLlm.setPoolCapacity(capacity);
 }
 
 JNIEXPORT void JNICALL

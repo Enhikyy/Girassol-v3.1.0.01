@@ -61,3 +61,30 @@ class LlmQuantPolicyTest {
         assertTrue(LlmQuantPolicy.admission(3_000L * mb, a22, p.nCtx, p.kvType) != null)
     }
 }
+
+class LlmPoolPolicyTest {
+    private val mb = 1024L * 1024
+
+    @Test fun perfil4GbSingleModel8e12Pool() {
+        assertEquals(1, LlmQuantPolicy.profileFor(3631 * mb).poolCapacity)
+        assertEquals(2, LlmQuantPolicy.profileFor(8 * 1024 * mb).poolCapacity)
+        assertEquals(3, LlmQuantPolicy.profileFor(12 * 1024 * mb).poolCapacity)
+    }
+
+    @Test fun poolEncolheQuandoNaoCabeNoOrcamento() {
+        val p12 = LlmQuantPolicy.profileFor(12 * 1024 * mb)
+        val budget = LlmQuantPolicy.budgetFor(12 * 1024 * mb)
+        assertEquals(3, LlmQuantPolicy.fitPool(3, 400 * mb, listOf(400 * mb, 400 * mb), budget, p12.nCtx, p12.kvType))
+        assertTrue(LlmQuantPolicy.fitPool(3, 3000 * mb, listOf(3000 * mb, 3000 * mb), budget, p12.nCtx, p12.kvType) < 3)
+        assertEquals(1, LlmQuantPolicy.fitPool(1, 100 * mb, listOf(100 * mb), budget, p12.nCtx, p12.kvType))
+    }
+
+    @Test fun statusDoPoolNativoDecodifica() {
+        val s = LlmQuantPolicy.parsePool("3|2|5|3|1|/d/a.gguf|/d/a.gguf:1000;/d/b|x.gguf:2000")
+        assertEquals(3, s.capacity); assertEquals(2, s.resident); assertEquals(5L, s.switches)
+        assertEquals(3L, s.coldLoads); assertEquals(1L, s.evictions); assertEquals("/d/a.gguf", s.active)
+        assertEquals(listOf("/d/a.gguf", "/d/b|x.gguf"), s.paths)
+        assertEquals(listOf(1000L, 2000L), s.bytes)
+        assertEquals(1, LlmQuantPolicy.parsePool("").capacity)
+    }
+}

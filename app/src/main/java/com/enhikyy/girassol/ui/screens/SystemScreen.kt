@@ -81,6 +81,8 @@ fun SystemScreen() {
                 KeyValue("Ticks/s alvo · efetivo", "${status.targetTps} · ${status.effectiveTps.f(1)}")
                 KeyValue("Estado térmico", thermalLabel(status.thermalStatus) + if (status.thermalCapped) " (limitado)" else "")
                 KeyValue("Perfil do aparelho", LocalLlmManager.profile.label + " · " + LocalLlmManager.profile.description)
+                KeyValue("Pool de modelos (llama_model)", "${llm.poolResident}/${llm.poolCapacity} residentes · ${llm.poolHits} trocas só de contexto · ${llm.poolColdLoads} cargas · ${llm.poolEvictions} despejos")
+                if (llm.poolKeys.isNotEmpty()) KeyValue("Residentes", llm.poolKeys.joinToString(", "))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     SimulationHub.SPEEDS.forEach { s ->
                         FilterChip(selected = status.targetTps == s, onClick = { SimulationHub.setSpeed(s) }, label = { Text("${s}x") },
@@ -190,7 +192,7 @@ fun SystemScreen() {
                 }
             }
                 HashChainPanel(dash)
-                SectionCard("Voz dos cidadãos") { PocketTtsToggle() }
+                SectionCard("Voz dos cidadãos") { PocketTtsToggle(); VoiceBackendsPanel() }
             }
         }
         item {

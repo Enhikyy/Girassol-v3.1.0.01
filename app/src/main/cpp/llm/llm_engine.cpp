@@ -128,6 +128,11 @@ std::string LlmEngine::runtimeConfig() const {
 
 void LlmEngine::unload() {
     std::lock_guard<std::mutex> lock(mu_);
+    unloadLocked();
+    evictParkedLocked(0);
+}
+
+void LlmEngine::unloadLocked() {
 #if defined(GIRASSOL_HAS_LLAMA)
     if (ctx_) llama_free(ctx_);
     if (adapter_) llama_adapter_lora_free(adapter_);
@@ -142,12 +147,76 @@ void LlmEngine::unload() {
     ctx_ = nullptr;
     model_ = nullptr;
     modelBytes_ = 0;
+    modelPath_.clear();
     desc_.clear();
     chatTemplate_.clear();
     cached_.clear();
     slots_.clear();
     lru_.clear();
     pieceToToken_.clear();
+}
+
+void LlmEngine::freeResidentLocked(Resident& r) {
+#if defined(GIRASSOL_HAS_LLAMA)
+    if (r.adapter) llama_adapter_lora_free(r.adapter);
+    if (r.model) llama_model_free(r.model);
+#endif
+    r.adapter = nullptr;
+    r.model = nullptr;
+}
+
+void LlmEngine::evictParkedLocked(size_t keep) {
+    // LRU: remove os estacionados menos usados até sobrar `keep`
+    while (parked_.size() > keep) {
+        size_t victim = 0;
+        for (size_t i = 1; i < parked_.size(); ++i) if (parked_[i].lastUse < parked_[victim].lastUse) victim = i;
+        freeResidentLocked(parked_[victim]);
+        parked_.erase(parked_.begin() + static_cast<long>(victim));
+        ++evictions_;
+    }
+}
+
+// Estaciona o modelo ativo: libera SOMENTE o llama_context (KV) e mantém os pesos mapeados.
+void LlmEngine::parkActiveLocked() {
+    if (!model_) return;
+#if defined(GIRASSOL_HAS_LLAMA)
+    if (ctx_) llama_free(ctx_);
+#endif
+    ctx_ = nullptr;
+    Resident r;
+    r.model = model_; r.path = modelPath_; r.bytes = modelBytes_; r.desc = desc_; r.chatTemplate = chatTemplate_;
+    r.pieceToToken = std::move(pieceToToken_); r.headDim = headDim_;
+    r.adapter = adapter_; r.adapterScale = adapterScale_; r.adapterPath = adapterPath_;
+    r.lora = std::move(lora_); r.lastLora = lastLora_; r.lastUse = ++useClock_;
+    model_ = nullptr; adapter_ = nullptr;
+    unloadLocked();  // zera o resto do estado ativo (nada mais a liberar)
+    parked_.push_back(std::move(r));
+}
+
+void LlmEngine::unparkLocked(Resident&& r) {
+    model_ = r.model; modelPath_ = r.path; modelBytes_ = r.bytes; desc_ = std::move(r.desc);
+    chatTemplate_ = std::move(r.chatTemplate); pieceToToken_ = std::move(r.pieceToToken); headDim_ = r.headDim;
+    adapter_ = r.adapter; adapterScale_ = r.adapterScale; adapterPath_ = std::move(r.adapterPath);
+    lora_ = std::move(r.lora); lastLora_ = r.lastLora;
+    r.model = nullptr; r.adapter = nullptr;
+}
+
+LlmPoolStatus LlmEngine::poolStatus() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    LlmPoolStatus st;
+    st.capacity = poolCapacity_;
+    st.active = modelPath_;
+    if (model_) { st.paths.push_back(modelPath_); st.bytes.push_back(modelBytes_); }
+    for (const auto& r : parked_) { st.paths.push_back(r.path); st.bytes.push_back(r.bytes); }
+    st.resident = static_cast<int32_t>(st.paths.size());
+    st.switches = switches_; st.coldLoads = coldLoads_; st.evictions = evictions_;
+    return st;
+}
+
+void LlmEngine::setPoolCapacity(int32_t capacity) {
+    std::lock_guard<std::mutex> lock(mu_);
+    poolCapacity_ = capacity < 1 ? 1 : (capacity > 3 ? 3 : capacity);
+    evictParkedLocked(static_cast<size_t>(poolCapacity_ - (model_ ? 1 : 0)));
 }
 
 void LlmEngine::clearSlots() {
@@ -162,7 +231,6 @@ void LlmEngine::clearSlots() {
 }
 
 bool LlmEngine::load(const std::string& path, const LlmLoadConfig& cfg, std::string* err) {
-    unload();
 #if defined(GIRASSOL_HAS_LLAMA)
     std::call_once(gBackendOnce, [] {
         llama_log_set(quietLog, nullptr);
@@ -175,15 +243,76 @@ bool LlmEngine::load(const std::string& path, const LlmLoadConfig& cfg, std::str
     }
 #endif
     std::lock_guard<std::mutex> lock(mu_);
+    poolCapacity_ = cfg.poolCapacity < 1 ? 1 : (cfg.poolCapacity > 3 ? 3 : cfg.poolCapacity);
+    if (poolCapacity_ > 1 && model_) {
+        parkActiveLocked();  // troca: mantém os pesos residentes, só o contexto é liberado
+    } else {
+        unloadLocked();
+        evictParkedLocked(0);
+    }
     cfg_ = cfg;
-    llama_model_params mp = llama_model_default_params();
-    mp.n_gpu_layers = 0;
-    mp.load_mode = LLAMA_LOAD_MODE_MMAP;  // use_mmap: páginas limpas, recuperáveis pelo kernel
-    model_ = llama_model_load_from_file(path.c_str(), mp);
-    if (!model_) {
-        if (err) *err = "falha ao carregar GGUF";
+    auto it = std::find_if(parked_.begin(), parked_.end(), [&](const Resident& r) { return r.path == path; });
+    if (it != parked_.end()) {
+        Resident r = std::move(*it);
+        parked_.erase(it);
+        unparkLocked(std::move(r));
+        ++switches_;
+    } else {
+        // abre espaço no pool antes de mapear outro arquivo
+        evictParkedLocked(static_cast<size_t>(poolCapacity_ - 1));
+        llama_model_params mp = llama_model_default_params();
+        mp.n_gpu_layers = 0;
+        mp.load_mode = LLAMA_LOAD_MODE_MMAP;  // use_mmap: páginas limpas, recuperáveis pelo kernel
+        model_ = llama_model_load_from_file(path.c_str(), mp);
+        if (!model_) {
+            if (err) *err = "falha ao carregar GGUF";
+            return false;
+        }
+        ++coldLoads_;
+        modelPath_ = path;
+        headDim_ = OnDeviceLoraTrainer::headDim(model_);
+        modelBytes_ = llama_model_size(model_);
+        char buf[256] = {0};
+        llama_model_desc(model_, buf, sizeof(buf));
+        desc_ = buf;
+        const char* tmpl = llama_model_chat_template(model_, nullptr);
+        chatTemplate_ = tmpl ? tmpl : "";
+        // Tabela peça→token para o fast-forward: evita o espaço-prefixo que tokenizadores SPM
+        // inserem no início de um texto isolado (que a gramática rejeitaria).
+        pieceToToken_.clear();
+        const llama_vocab* vocab = llama_model_get_vocab(model_);
+        const int32_t nv = llama_vocab_n_tokens(vocab);
+        char pb[64];
+        for (int32_t t = 0; t < nv; ++t) {
+            if (llama_vocab_is_control(vocab, t) || llama_vocab_is_eog(vocab, t)) continue;
+            const int32_t n = llama_token_to_piece(vocab, t, pb, sizeof(pb), 0, false);
+            if (n <= 0 || static_cast<size_t>(n) > kMaxPiece) continue;
+            pieceToToken_.emplace(std::string(pb, static_cast<size_t>(n)), t);
+        }
+    }
+    if (!createContextLocked(err)) {
+        unloadLocked();
         return false;
     }
+    if (!cfg_.slotDir.empty()) {
+        // slots antigos podem ser de outro modelo/config: começa do zero
+        std::error_code ec;
+        std::filesystem::create_directories(cfg_.slotDir, ec);
+        for (const auto& e : std::filesystem::directory_iterator(cfg_.slotDir, ec)) {
+            if (e.path().extension() == ".slot") std::filesystem::remove(e.path(), ec);
+        }
+    }
+    return true;
+#else
+    (void)path; (void)cfg;
+    if (err) *err = "compilado sem llama.cpp";
+    return false;
+#endif
+}
+
+bool LlmEngine::createContextLocked(std::string* err) {
+#if defined(GIRASSOL_HAS_LLAMA)
+    const LlmLoadConfig& cfg = cfg_;
     auto makeCtx = [&](bool flash, KvCacheType kv) {
         llama_context_params cp = llama_context_default_params();
         cp.n_ctx = static_cast<uint32_t>(cfg.nCtx);
@@ -200,67 +329,44 @@ bool LlmEngine::load(const std::string& path, const LlmLoadConfig& cfg, std::str
         cp.abort_callback_data = &abort_;
         return llama_init_from_model(model_, cp);
     };
-    modelPath_ = path;
     flashApplied_ = cfg.flashAttn;
     kvApplied_ = cfg.flashAttn ? cfg.kvType : KvCacheType::F16;
+    kvHeadDimFallback_ = false;
     // Pré-checagem: KV quantizado (Q8_0/Q4_0, bloco de 32) exige head_dim múltiplo de 32.
-    // Modelos F16/FP16 pequenos (~350M) costumam ter head_dim 64, mas arquiteturas com
-    // head_dim 80/96/… ainda são comuns — nesse caso o KV fica em F16 desde o início.
-    headDim_ = OnDeviceLoraTrainer::headDim(model_);
     if (kvApplied_ != KvCacheType::F16 && (headDim_ <= 0 || headDim_ % 32 != 0)) {
         kvApplied_ = KvCacheType::F16;
         kvHeadDimFallback_ = true;
     }
     ctx_ = makeCtx(flashApplied_, kvApplied_);
     if (!ctx_ && flashApplied_ && kvApplied_ != KvCacheType::F16) {
-        // KV quantizado exige head_dim múltiplo do bloco (32): mantém FA com KV F16
         kvApplied_ = KvCacheType::F16;
         ctx_ = makeCtx(true, KvCacheType::F16);
     }
     if (!ctx_ && (flashApplied_ || kvApplied_ != KvCacheType::F16)) {
-        // modelo/arquitetura sem suporte a FA ou KV quantizado: volta ao padrão seguro
         flashApplied_ = false;
         kvApplied_ = KvCacheType::F16;
         ctx_ = makeCtx(false, KvCacheType::F16);
     }
     if (!ctx_) {
-        llama_model_free(model_);
-        model_ = nullptr;
         if (err) *err = "falha ao criar contexto";
         return false;
     }
-    modelBytes_ = llama_model_size(model_);
-    char buf[256] = {0};
-    llama_model_desc(model_, buf, sizeof(buf));
-    desc_ = buf;
-    const char* tmpl = llama_model_chat_template(model_, nullptr);
-    chatTemplate_ = tmpl ? tmpl : "";
-    // Tabela peça→token para o fast-forward: evita o espaço-prefixo que tokenizadores SPM
-    // inserem no início de um texto isolado (que a gramática rejeitaria).
-    pieceToToken_.clear();
-    {
-        const llama_vocab* vocab = llama_model_get_vocab(model_);
-        const int32_t nv = llama_vocab_n_tokens(vocab);
-        char pb[64];
-        for (int32_t t = 0; t < nv; ++t) {
-            if (llama_vocab_is_control(vocab, t) || llama_vocab_is_eog(vocab, t)) continue;
-            const int32_t n = llama_token_to_piece(vocab, t, pb, sizeof(pb), 0, false);
-            if (n <= 0 || static_cast<size_t>(n) > kMaxPiece) continue;
-            pieceToToken_.emplace(std::string(pb, static_cast<size_t>(n)), t);
+    // adaptador LoRA do modelo (residente) volta a valer no contexto novo
+    if (adapter_) {
+        float sc = adapterScale_;
+        if (llama_set_adapters_lora(ctx_, &adapter_, 1, &sc) != 0) {
+            llama_adapter_lora_free(adapter_);
+            adapter_ = nullptr;
+            adapterScale_ = 0.0f;
+            adapterPath_.clear();
         }
     }
-    if (!cfg_.slotDir.empty()) {
-        // slots antigos podem ser de outro modelo/config: começa do zero
-        std::error_code ec;
-        std::filesystem::create_directories(cfg_.slotDir, ec);
-        for (const auto& e : std::filesystem::directory_iterator(cfg_.slotDir, ec)) {
-            if (e.path().extension() == ".slot") std::filesystem::remove(e.path(), ec);
-        }
-    }
+    cached_.clear();
+    slots_.clear();
+    lru_.clear();
     return true;
 #else
-    (void)path; (void)cfg;
-    if (err) *err = "compilado sem llama.cpp";
+    (void)err;
     return false;
 #endif
 }
