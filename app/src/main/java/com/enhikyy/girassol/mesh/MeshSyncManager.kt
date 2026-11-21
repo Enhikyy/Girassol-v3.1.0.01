@@ -149,23 +149,28 @@ object MeshSyncManager {
             return
         }
         udp = sock
-        sock.soTimeout = BEACON_EVERY_MS.toInt()
-        val payload = MeshSyncProtocol.beacon(id, port, deviceName())
-        val bcast = InetAddress.getByName("255.255.255.255")
-        val buf = ByteArray(512)
-        var last = 0L
-        while (currentCoroutineContextActive()) {
-            val now = System.currentTimeMillis()
-            if (now - last >= BEACON_EVERY_MS) {
-                runCatching { sock.send(DatagramPacket(payload, payload.size, bcast, MeshSyncProtocol.BEACON_PORT)) }
-                last = now
+        try {
+            sock.soTimeout = BEACON_EVERY_MS.toInt()
+            val payload = MeshSyncProtocol.beacon(id, port, deviceName())
+            val bcast = InetAddress.getByName("255.255.255.255")
+            val buf = ByteArray(512)
+            var last = 0L
+            while (currentCoroutineContextActive()) {
+                val now = System.currentTimeMillis()
+                if (now - last >= BEACON_EVERY_MS) {
+                    runCatching { sock.send(DatagramPacket(payload, payload.size, bcast, MeshSyncProtocol.BEACON_PORT)) }
+                    last = now
+                }
+                val pk = DatagramPacket(buf, buf.size)
+                val got = runCatching { sock.receive(pk); true }.getOrDefault(false)
+                if (!got) { if (sock.isClosed) return; continue }
+                MeshSyncProtocol.parseBeacon(pk.data, pk.length)?.let { (pid, pport, pname) ->
+                    addPeer(MeshPeer(pid, pname, pk.address.hostAddress ?: return@let, pport, "udp", System.currentTimeMillis()))
+                }
             }
-            val pk = DatagramPacket(buf, buf.size)
-            val got = runCatching { sock.receive(pk); true }.getOrDefault(false)
-            if (!got) { if (sock.isClosed) return; continue }
-            MeshSyncProtocol.parseBeacon(pk.data, pk.length)?.let { (pid, pport, pname) ->
-                addPeer(MeshPeer(pid, pname, pk.address.hostAddress ?: return@let, pport, "udp", System.currentTimeMillis()))
-            }
+        } finally {
+            if (udp === sock) udp = null
+            sock.close()
         }
     }
 
