@@ -233,7 +233,9 @@ data class Citizen(
     var brierBaselineTick: Long = -1L,
     /** Promoções aprovadas creditadas (BoundedRsiPromotionGate: CMA-ES/RSI ou LoRA do sono). */
     var promotions: Int = 0,
-    var promotionsAtLastReproduction: Int = 0
+    var promotionsAtLastReproduction: Int = 0,
+    /** Referências ordenadas do buffer de trabalho deste cidadão (mais antigo → mais recente). */
+    val workingMemoryIds: MutableList<Long> = mutableListOf()
 ) {
     val acceptorBaseline: Double get() = if (acceptorBaseN >= MERIT_BASELINE_SAMPLES) acceptorBaseSum / acceptorBaseN else -1.0
     val brierBaseline: Double get() = if (brierBaseN >= MERIT_BASELINE_SAMPLES) brierBaseSum / brierBaseN else -1.0
