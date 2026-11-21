@@ -1,0 +1,57 @@
+// v4.0 — variante da Aba Mundo para GL por software (emulador / SwiftShader).
+// O caminho "lit" do Filament sai corrompido no tradutor GLES 3.0 do emulador (quadros brancos,
+// cinza uniforme ou pretos), então aqui o sombreamento é feito à mão em material unlit, como na
+// v3: mesmos parâmetros e texturas do world_pbr, Lambert do sol + ambiente do céu já
+// convertidos para luminância de tela pela MESMA câmera física (WorldExposure), AO do ORM e
+// emissivo. Celulares reais continuam no world_pbr (PBR completo).
+material {
+    name : girassol_world_emu,
+    shadingModel : unlit,
+    requires : [ uv0 ],
+    instanced : true,
+    culling : back,
+    parameters : [
+        { type : sampler2d, name : albedoTex, precision : medium },
+        { type : sampler2d, name : ormTex, precision : medium },
+        { type : sampler2d, name : normalTex, precision : medium },
+        { type : sampler2d, name : emissiveTex, precision : medium },
+        { type : float4, name : baseTint },
+        { type : float4, name : uvScale },
+        { type : float4, name : emissiveColor },
+        { type : float4, name : surface },
+        // xyz = direção PARA o sol (mundo), w = luminância difusa do sol por unidade de albedo
+        { type : float4, name : sunDirAmount },
+        // rgb = cor linear do sol
+        { type : float4, name : sunColor },
+        // rgb = luminância difusa do céu por unidade de albedo (já com a cor)
+        { type : float4, name : skyAmbient },
+        { type : float4[64], name : instanceOffsets }
+    ]
+}
+
+vertex {
+    void materialVertex(inout MaterialVertexInputs material) {
+        vec4 o = materialParams.instanceOffsets[getInstanceIndex()];
+        material.worldPosition.xyz += o.xyz;
+    }
+}
+
+fragment {
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+        vec2 uv = getUV0() * materialParams.uvScale.xy + materialParams.uvScale.zw;
+        vec3 base = texture(materialParams_albedoTex, uv).rgb * materialParams.baseTint.rgb;
+        vec3 orm = texture(materialParams_ormTex, uv).rgb;
+        float ao = max(orm.r, materialParams.surface.w);
+        // normal facetada pelas derivadas de tela (orientada para a câmera)
+        highp vec3 wp = getWorldPosition();
+        vec3 fn = normalize(cross(dFdx(wp), dFdy(wp)));
+        if (dot(fn, getWorldCameraPosition() - wp) < 0.0) fn = -fn;
+        float ndl = max(dot(fn, normalize(materialParams.sunDirAmount.xyz)), 0.0);
+        // céu: mais luz nas faces voltadas para cima
+        float up = 0.55 + 0.45 * fn.y;
+        vec3 lit = base * (materialParams.skyAmbient.rgb * up * ao + materialParams.sunColor.rgb * ndl * materialParams.sunDirAmount.w);
+        vec3 e = texture(materialParams_emissiveTex, uv).rgb * materialParams.emissiveColor.rgb * materialParams.emissiveColor.w;
+        material.baseColor = vec4(lit + e, 1.0);
+    }
+}

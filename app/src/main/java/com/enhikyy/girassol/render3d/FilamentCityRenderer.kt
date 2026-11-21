@@ -357,7 +357,9 @@ class FilamentCityRenderer(
         view.setScene(scene)
         view.setCamera(fCamera)
         renderer.setClearOptions(Renderer.ClearOptions().apply { clear = true; clearColor = doubleArrayOf(0.0, 0.0, 0.0, 1.0) })
-        pbrMat = loadMaterial("materials/world_pbr.filamat")
+        // emulador/SwiftShader: o caminho lit sai corrompido no tradutor GLES 3.0 → variante unlit
+        // com o mesmo layout de parâmetros, iluminada pela mesma câmera física (world_emu.mat)
+        pbrMat = loadMaterial(if (WorldGpu.softwareGl) "materials/world_emu.filamat" else "materials/world_pbr.filamat")
         glowMat = loadMaterial("materials/glow.filamat")
         shadowMat = loadMaterial("materials/contact_shadow.filamat")
         postMat = loadMaterial("materials/girassol_dehancer_post.filamat")
@@ -661,7 +663,7 @@ class FilamentCityRenderer(
         activeIbl = ibl
         if (ibl == null) { scene.indirectLight = null; scene.skybox = null; return }
         scene.indirectLight = ibl.light
-        scene.skybox = if (preset == WorldPreset.URBAN_OVERCAST) ibl.skybox else null
+        scene.skybox = if (preset == WorldPreset.URBAN_OVERCAST && !WorldGpu.softwareGl) ibl.skybox else null
         updateIblIntensity()
     }
 
@@ -1143,6 +1145,7 @@ class FilamentCityRenderer(
             lm.setIntensity(li, cur[1])
         }
         for (e in lampEntities) lm.setIntensity(lm.getInstance(e), cur[3])
+        if (WorldGpu.softwareGl) applyEmuLighting(ph)
         updateIblIntensity()
         for ((id, mi) in sharedMis) {
             val spec = WorldMaterials.spec(id)
@@ -1153,8 +1156,42 @@ class FilamentCityRenderer(
         }
         glowMi.setParameter("intensity", 0.10f + 0.30f * (cur[6] / 3f))
         shadowMi.setParameter("opacity", if (ph == TimePhase.NIGHT) 0.35f else 0.55f)
-        if (preset == WorldPreset.LUMON_INTERIOR || activeIbl == null)
+        if (!WorldGpu.softwareGl && (preset == WorldPreset.LUMON_INTERIOR || activeIbl == null))
             renderer.setClearOptions(Renderer.ClearOptions().apply { clear = true; clearColor = doubleArrayOf(0.0, 0.0, 0.0, 1.0) })
+    }
+
+    /**
+     * Emulador: alimenta o world_emu com sol/céu em luminância de tela, derivados da MESMA câmera
+     * física (EV100 interpolado → 1/(1,2·2^EV)) e das mesmas iluminâncias de [WorldExposure].
+     */
+    private fun applyEmuLighting(ph: TimePhase) {
+        val exposure = (1.0 / (1.2 * Math.pow(2.0, cur[0].toDouble()))).toFloat()
+        val sunAmt = cur[1] * exposure / Math.PI.toFloat()
+        val skyAmt = cur[2] * exposure / Math.PI.toFloat()
+        val dir = when (ph) {
+            TimePhase.INTERIOR -> floatArrayOf(0.18f, 1f, 0.12f)
+            TimePhase.NIGHT -> phaseSunDir(TimePhase.NIGHT)
+            else -> SunCycle.at(dayPhase.takeIf { !it.isNaN() } ?: 0.4f).dir
+        }
+        val sc = linear(phaseLight(ph).sunColor)
+        val tint = linear(when (ph) {
+            TimePhase.MORNING -> floatArrayOf(0.86f, 0.92f, 1.0f)
+            TimePhase.AFTERNOON -> floatArrayOf(0.95f, 0.90f, 0.88f)
+            TimePhase.NIGHT -> floatArrayOf(0.70f, 0.78f, 1.0f)
+            TimePhase.INTERIOR -> floatArrayOf(1.0f, 0.98f, 0.94f)
+        })
+        fun set(mi: MaterialInstance) {
+            mi.setParameter("sunDirAmount", dir[0], dir[1], dir[2], sunAmt)
+            mi.setParameter("sunColor", sc[0], sc[1], sc[2], 1f)
+            mi.setParameter("skyAmbient", tint[0] * skyAmt, tint[1] * skyAmt, tint[2] * skyAmt, 1f)
+        }
+        for ((_, mi) in sharedMis) set(mi)
+        for (p in worldParts) p.mi?.let { set(it) }
+        for ((_, mi) in citizenMis) set(mi)
+        // céu do emulador: cor de fundo na mesma escala de tela (sem Skybox/cubemap)
+        val sky = if (preset == WorldPreset.LUMON_INTERIOR) doubleArrayOf(0.02, 0.02, 0.025, 1.0)
+            else doubleArrayOf((tint[0] * skyAmt * 2.2f).toDouble(), (tint[1] * skyAmt * 2.2f).toDouble(), (tint[2] * skyAmt * 2.2f).toDouble(), 1.0)
+        renderer.setClearOptions(Renderer.ClearOptions().apply { clear = true; clearColor = sky })
     }
 
     private fun animateCitizens(dt: Float) {
