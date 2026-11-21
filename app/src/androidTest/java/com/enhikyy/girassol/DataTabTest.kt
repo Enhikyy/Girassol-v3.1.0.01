@@ -29,6 +29,10 @@ class DataTabTest {
         rule.waitUntilAtLeastOneExists(hasTestTag("tab_DADOS"), 60_000)
         rule.onNodeWithTag("tab_DADOS").performClick()
         rule.waitUntilAtLeastOneExists(hasTestTag("data_dashboard"), 10_000)
-        rule.onNodeWithTag("data_dashboard").assertExists()\n        rule.onNodeWithTag("data_period_30").assertIsSelected()\n        rule.onNodeWithTag("data_period_7").performClick()\n        rule.onNodeWithTag("data_period_7").assertIsSelected()\n        rule.onNodeWithTag("data_period_30").assertIsNotSelected()\n        rule.onNodeWithTag("data_period_30").assertExists()
+        rule.onNodeWithTag("data_dashboard").assertExists()
+        rule.onNodeWithTag("data_period_30").assertIsSelected()
+        rule.onNodeWithTag("data_period_7").performClick()
+        rule.onNodeWithTag("data_period_7").assertIsSelected()
+        rule.onNodeWithTag("data_period_30").assertIsNotSelected()
     }
 }
