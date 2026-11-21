@@ -6,6 +6,8 @@ import android.media.AudioFormat
 import android.media.AudioTrack
 import android.util.Log
 import com.enhikyy.girassol.llm.LlmQuantPolicy
+import com.k2fsa.sherpa.onnx.GeneratedAudio
+import com.k2fsa.sherpa.onnx.GenerationConfig
 import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
@@ -34,6 +36,7 @@ object PiperVoice {
     private fun ensure(context: Context, profile: LlmQuantPolicy.DeviceProfile): OfflineTts {
         tts?.let { return it }
         val dir = VoicePacks.verifiedDir(context, VoicePacks.PIPER_PT_BR, profile) ?: error("pacote Piper ausente ou com SHA-256 inválido")
+        tokens = runCatching { tokenSet(dir) }.getOrNull()
         return createEngine(dir).also { tts = it }
     }
 
@@ -42,7 +45,6 @@ object PiperVoice {
         val vits = OfflineTtsVitsModelConfig().apply {
             model = File(dir, "pt_BR-faber-medium.onnx").absolutePath
             tokens = File(dir, "tokens.txt").absolutePath
-            dataDir = File(dir, "espeak-ng-data").absolutePath
         }
         val model = OfflineTtsModelConfig().apply {
             this.vits = vits
@@ -51,6 +53,32 @@ object PiperVoice {
         }
         // assetManager = null → caminhos absolutos no armazenamento interno
         return OfflineTts(null, OfflineTtsConfig().apply { this.model = model })
+    }
+
+    /**
+     * v3.8: o Sherpa-ONNX 2.x não fonetiza mais o texto do Piper (espeak-ng removido); os
+     * fonemas IPA vêm do [PtBrPhonemizer], filtrados pelos símbolos do tokens.txt do modelo.
+     */
+    fun generationConfig(text: String, tokens: Set<Int>? = null): GenerationConfig {
+        val cps = PtBrPhonemizer.codepoints(text).map { s -> if (tokens == null) s else s.filter { it in tokens }.toIntArray() }
+            .filter { it.isNotEmpty() }
+        require(cps.isNotEmpty()) { "texto sem fonemas pronunciáveis" }
+        return GenerationConfig(sid = 0, speed = 1.0f, phonemeCodepoints = cps.toTypedArray())
+    }
+
+    /** Codepoints aceitos pelo modelo (primeira coluna do tokens.txt). */
+    fun tokenSet(dir: File): Set<Int> = File(dir, "tokens.txt").readLines().mapNotNull { line ->
+        val sym = line.substringBeforeLast(' ')
+        if (sym.codePointCount(0, sym.length) == 1) sym.codePointAt(0) else null
+    }.toSet()
+
+    @Volatile private var tokens: Set<Int>? = null
+
+    /** Síntese completa (sem streaming); falha alto se o VITS não produzir amostras. */
+    fun synthesize(engine: OfflineTts, text: String, tokens: Set<Int>? = null): GeneratedAudio {
+        val a = engine.generateWithConfig("", generationConfig(text, tokens))
+        check(a.sampleRate > 0 && a.samples.isNotEmpty()) { "Piper não gerou áudio para \"${text.take(40)}\"" }
+        return a
     }
 
     fun speak(context: Context, profile: LlmQuantPolicy.DeviceProfile, citizenId: String, text: String, pan: Float,
@@ -73,13 +101,16 @@ object PiperVoice {
                 onState(true)
                 val l = ((1f - pan) / 2f).coerceIn(0f, 1f); val r = ((1f + pan) / 2f).coerceIn(0f, 1f)
                 val t = track
-                engine.generateWithCallback(text.take(400), 0, 1.0f) { samples ->
+                var produced = 0
+                val audio = engine.generateWithConfigAndCallback("", generationConfig(text.take(400), tokens)) { samples ->
+                    produced += samples.size
                     VoiceAmplitude.pushFloat(citizenId, samples)
                     val st = FloatArray(samples.size * 2)
                     for (i in samples.indices) { st[2 * i] = samples[i] * l; st[2 * i + 1] = samples[i] * r }
                     t.write(st, 0, st.size, AudioTrack.WRITE_BLOCKING)
                     1
                 }
+                check(produced > 0 || audio.samples.isNotEmpty()) { "Piper não gerou áudio (fonemas rejeitados pelo modelo)" }
                 lastError = ""
             } catch (t: Throwable) {
                 lastError = t.message ?: t.javaClass.simpleName

@@ -67,7 +67,7 @@ class AllTabsTest {
         // Sociedade
         rule.onNodeWithTag("evolution_list").performScrollToNode(hasTestTag("evo_society"))
         rule.onNodeWithTag("evo_society").performClick()
-        rule.waitUntil(10_000) { rule.onAllNodes(hasText("Cliodinâmica (Turchin)")).fetchSemanticsNodes().isNotEmpty() }
+        rule.waitUntil(10_000) { rule.onAllNodes(hasText("CLIODINÂMICA (TURCHIN)")).fetchSemanticsNodes().isNotEmpty() }
         rule.onNodeWithTag("evo_society").performClick()
         // Mente: memória 2 estágios + busca FTS no SQLite real
         rule.onNodeWithTag("evolution_list").performScrollToNode(hasTestTag("evo_mind"))
@@ -88,6 +88,11 @@ class AllTabsTest {
         rule.waitUntil(40_000) {
             runCatching { rule.onNodeWithTag("system_list").performScrollToNode(hasText("Orçamento dinâmico de RAM")); true }.getOrDefault(false)
         }
+        // cadeia SHA-256 e vozes ficam em "Detalhes técnicos do hardware"
+        rule.onNodeWithTag("system_list").performScrollToNode(hasTestTag("hw_details_toggle"))
+        rule.onNodeWithTag("hw_details_toggle").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("system_list").performScrollToNode(hasText("VOZ DOS CIDADÃOS"))
         rule.onNodeWithTag("system_list").performScrollToNode(hasTestTag("v35_hashchain"))
         rule.onNodeWithTag("system_list").performScrollToNode(hasTestTag("verify_hash_chain"))
         rule.onNodeWithTag("verify_hash_chain").performClick()

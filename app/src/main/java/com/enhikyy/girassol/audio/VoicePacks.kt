@@ -59,7 +59,8 @@ object VoicePacks {
             "pt_BR-faber-medium.onnx" to "ee093c2dff254412682496508241ff50ade0cd356288cce1ee1617532fa9fd63",
             "tokens.txt" to "2619c1a9de1bcf928162f40c583caf39368cfd6b2340c7bcad51dc634411ec36"
         ),
-        keepPrefixes = listOf("pt_BR-faber-medium.onnx", "tokens.txt", "espeak-ng-data/")
+        // v3.8: o Sherpa-ONNX 2.x ignora espeak-ng-data (fonemas vêm do PtBrPhonemizer)
+        keepPrefixes = listOf("pt_BR-faber-medium.onnx", "tokens.txt")
     )
 
     val WHISPER_TINY = Pack(

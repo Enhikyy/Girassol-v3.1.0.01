@@ -56,7 +56,9 @@ class VoicePackDeviceTest {
         assertTrue(!VoicePacks.partFile(root, VoicePacks.PIPER_PT_BR).exists())
 
         val tts = PiperVoice.createEngine(piperDir)
-        val audio = try { tts.generate("Olá, bom dia. Hoje vamos colher girassóis na horta.", 0, 1.0f) } finally { tts.release() }
+        val audio = try {
+            PiperVoice.synthesize(tts, "Eu preciso de comida e água para a minha família.", PiperVoice.tokenSet(piperDir))
+        } finally { tts.release() }
         assertEquals(22_050, audio.sampleRate)
         assertTrue("Piper gerou ${audio.samples.size} amostras", audio.samples.size > audio.sampleRate)
         assertTrue(audio.samples.any { kotlin.math.abs(it) > 0.01f })
@@ -74,6 +76,9 @@ class VoicePackDeviceTest {
         val text = try { AudioTranscriber.transcribePcm(rec, pcm) } finally { rec.release() }
         android.util.Log.i("VoicePackDeviceTest", "Whisper: '$text'")
         assertTrue("Whisper não transcreveu a fala do Piper", text.isNotBlank())
+        // fonetizador pt-BR + Piper inteligíveis: ao menos 2 palavras-chave reconhecidas
+        val hits = listOf("preciso", "comida", "água", "família").count { text.lowercase().contains(it) }
+        assertTrue("só $hits palavras reconhecidas em '$text'", hits >= 2)
         root.deleteRecursively()
     }
 }
