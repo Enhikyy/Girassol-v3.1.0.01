@@ -12,9 +12,9 @@ import org.junit.Test
 
 class FourLayerMemoryTest {
 
-    private fun episode(id: Long, content: String) = AssociativeMemoryNode(
+    private fun episode(id: Long, content: String, ownerId: String = "C1") = AssociativeMemoryNode(
         id = id,
-        ownerAgentId = "C1",
+        ownerAgentId = ownerId,
         layer = MemoryLayer.EPISODIC,
         content = content,
         tags = setOf("horta", "COLHER"),
@@ -92,5 +92,65 @@ class FourLayerMemoryTest {
         assertEquals(2, restoredMemories.size)
         assertEquals(3L, restored.citizens.single { it.id == citizen.id }.nextMemoryId)
         assertTrue(restoredMemories.all { it.verifiedByWorldCore })
+    }
+
+    @Test
+    fun workingMemoryIsPerCitizenBoundedAndRestoredWithWorldSnapshot() {
+        val core = WorldCore.create(seed = 77L, initialPopulation = 2)
+        val first = core.state.citizens[0]
+        val second = core.state.citizens[1]
+        first.memories += (1L..12L).map { id -> episode(id, "horta colheita irrigação episódio $id", first.id) }
+        second.memories += (101L..112L).map { id -> episode(id, "horta socialização conversa episódio $id", second.id) }
+        first.nextMemoryId = 13L
+        second.nextMemoryId = 113L
+
+        val engine = FourLayerMemoryAndSleepEngine()
+        repeat(3) { pass ->
+            engine.retrieveTwoStage(
+                nodes = first.memories,
+                currentTick = 200L + pass,
+                queryText = "horta colheita irrigação",
+                queryTags = setOf("horta", "COLHER"),
+                queryEntities = setOf("HORTA_1"),
+                topK = 4,
+                workingCapacity = 5,
+                workingMemoryIds = first.workingMemoryIds
+            )
+        }
+        engine.retrieveTwoStage(
+            nodes = second.memories,
+            currentTick = 210L,
+            queryText = "horta socialização conversa",
+            queryTags = setOf("horta", "SOCIAL"),
+            queryEntities = setOf("HORTA_1"),
+            topK = 4,
+            workingCapacity = 5,
+            workingMemoryIds = second.workingMemoryIds
+        )
+
+        val secondBeforeFirstChangesAgain = second.workingMemoryIds.toList()
+        engine.retrieveTwoStage(
+            nodes = first.memories,
+            currentTick = 220L,
+            queryText = "colheita irrigação sementes",
+            queryTags = setOf("horta", "COLHER"),
+            queryEntities = setOf("HORTA_1"),
+            topK = 4,
+            workingCapacity = 5,
+            workingMemoryIds = first.workingMemoryIds
+        )
+
+        assertTrue(first.workingMemoryIds.size <= 5)
+        assertTrue(second.workingMemoryIds.size <= 5)
+        assertEquals(first.workingMemoryIds.size, first.workingMemoryIds.distinct().size)
+        assertEquals(secondBeforeFirstChangesAgain, second.workingMemoryIds)
+        assertTrue(first.workingMemoryIds.all { id -> first.memories.any { it.id == id } })
+        assertTrue(second.workingMemoryIds.all { id -> second.memories.any { it.id == id } })
+
+        val restored = WorldSnapshotCodec.decode(WorldSnapshotCodec.encode(core.state))
+        val restoredFirst = restored.citizens.single { it.id == first.id }
+        val restoredSecond = restored.citizens.single { it.id == second.id }
+        assertEquals(first.workingMemoryIds, restoredFirst.workingMemoryIds)
+        assertEquals(second.workingMemoryIds, restoredSecond.workingMemoryIds)
     }
 }
