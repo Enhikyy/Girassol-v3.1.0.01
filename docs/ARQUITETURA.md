@@ -232,8 +232,10 @@ a importação depois.
   laboratório (Severance/Lumon) e a praça/horta mais próxima (Modernismo Tropical); o `CityMeshBuilder` desenha
   carpete úmido, divisórias com papel de parede, forro rebaixado e luminárias fluorescentes. É só visual: não
   altera física, replay nem goldens.
-- PBR KTX2: `concreto_brutalista.ktx2` e `carpete_backrooms.ktx2` (RGBA8 com mipmaps, RGB = albedo de detalhe,
-  A = rugosidade) amostrados em projeção triplanar com normal por derivadas de tela.
+- PBR KTX2: `concreto_brutalista.ktx2` e `carpete_backrooms.ktx2` (RGBA8, RGB = albedo de detalhe, A = rugosidade)
+  amostrados em projeção triplanar com normal por derivadas de tela. O nível 0 é enviado à GPU e os mipmaps são
+  gerados lá (`generateMipmaps`), porque o `setImage` Java do Filament 1.75.1 calcula errado o tamanho dos
+  níveis > 0; se a textura falhar, uma neutra 1×1 entra no lugar e o 3D segue.
 - Cidadãos articulados: 7 ossos (tronco, cabeça, boca, braços, pernas) com skinning rígido;
   `CitizenRig.pose` combina `CitizenGrowth.proportions` (altura, cabeça, membros), a cadência
   `gaitCyclesPerTick` × TPS efetivo, digitação nos terminais CRT e a amplitude RMS do Pocket-TTS.
