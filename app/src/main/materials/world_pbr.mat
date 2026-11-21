@@ -1,0 +1,54 @@
+// v4.0 — PBR da Aba Mundo (URBAN_OVERCAST / LUMON_INTERIOR).
+// Texturas procedurais C++20 (ProceduralWorldAssets): albedo sRGB + ORM (R=AO, G=rugosidade,
+// B=metálico) + normal em espaço tangente + máscara emissiva, todas com mipmaps completos.
+// Instanciação: cada renderable pode ter até 64 instâncias; o deslocamento por instância
+// (xyz) vem de instanceOffsets[getInstanceIndex()] e é somado à posição de mundo.
+// reflections: screenspace → SSR (poças com rugosidade 0.12) quando a View o habilita.
+material {
+    name : girassol_world_pbr,
+    shadingModel : lit,
+    requires : [ uv0, tangents ],
+    reflections : screenspace,
+    specularAmbientOcclusion : simple,
+    multiBounceAmbientOcclusion : true,
+    flipUV : false,
+    instanced : true,
+    parameters : [
+        { type : sampler2d, name : albedoTex, precision : medium },
+        { type : sampler2d, name : ormTex, precision : medium },
+        { type : sampler2d, name : normalTex, precision : medium },
+        { type : sampler2d, name : emissiveTex, precision : medium },
+        { type : float4, name : baseTint },
+        { type : float4, name : uvScale },
+        { type : float4, name : emissiveColor },
+        { type : float4, name : surface },
+        { type : float4[64], name : instanceOffsets }
+    ]
+}
+
+vertex {
+    void materialVertex(inout MaterialVertexInputs material) {
+        vec4 o = materialParams.instanceOffsets[getInstanceIndex()];
+        material.worldPosition.xyz += o.xyz;
+    }
+}
+
+fragment {
+    void material(inout MaterialInputs material) {
+        vec2 uv = getUV0() * materialParams.uvScale.xy + materialParams.uvScale.zw;
+        // surface = (força da normal, viés de rugosidade, escala de metálico, AO mínimo)
+        vec3 n = texture(materialParams_normalTex, uv).xyz * 2.0 - 1.0;
+        n.xy *= materialParams.surface.x;
+        material.normal = normalize(n);
+        prepareMaterial(material);
+        vec4 a = texture(materialParams_albedoTex, uv);
+        material.baseColor = vec4(a.rgb * materialParams.baseTint.rgb, 1.0);
+        vec3 orm = texture(materialParams_ormTex, uv).rgb;
+        material.ambientOcclusion = max(orm.r, materialParams.surface.w);
+        material.roughness = clamp(orm.g + materialParams.surface.y, 0.045, 1.0);
+        material.metallic = clamp(orm.b * materialParams.surface.z, 0.0, 1.0);
+        vec3 e = texture(materialParams_emissiveTex, uv).rgb;
+        // emissiveColor.rgb = cor linear, .w = intensidade (≈ nits relativos à exposição)
+        material.emissive = vec4(e * materialParams.emissiveColor.rgb * materialParams.emissiveColor.w, 0.0);
+    }
+}

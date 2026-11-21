@@ -108,6 +108,8 @@ add_library(girassol_core SHARED
     jni/girassol_gea_jni.cpp
     jni/world_tick_jni.cpp
     jni/cognition_jni.cpp
+    jni/world_assets_jni.cpp
+    render/ProceduralWorldAssets.cpp
     world/world_tick.cpp
     world/cognition.cpp
     hardware/soc_hardware_probe.cpp

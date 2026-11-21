@@ -14,6 +14,8 @@ sleep 45
 adb shell settings put global hide_error_dialogs 1 || true
 adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS >/dev/null 2>&1 || true
 adb install -r -g "$APK"; adb install -r -g "$TAPK"
+# SwiftShader (GL por software) com o pipeline completo: tela 720×1600 para manter o vídeo fluido
+adb shell wm size 720x1600; adb shell wm density 320; sleep 3
 adb shell wm size; adb shell wm density
 adb logcat -c || true
 adb logcat -v threadtime > "$OUT/logcat.txt" 2>&1 & LP=$!
@@ -40,27 +42,55 @@ shot() { dismiss_anr; adb exec-out screencap -p > "$OUT/$1.png"; echo "captura $
 W=$(adb shell wm size | grep -oE '[0-9]+x[0-9]+' | tail -1); SW=${W%x*}; SH=${W#*x}
 CX=$((SW/2)); CY=$((SH*45/100))
 step() { adb shell am broadcast -a girassol.demo.STEP --es step "$1" >/dev/null; [ "$1" = pick ] || waitstep "OK_$1"; }
+# vídeo em segmentos (limite de 180 s do screenrecord); concatenados com ffmpeg no fim
+record_loop() { for i in 1 2 3; do adb shell screenrecord --time-limit 175 --bit-rate 8000000 /sdcard/seg$i.mp4 || break; [ -f "$OUT/.stop" ] && break; done; }
 waitstep POVOADO; sleep 3; dismiss_anr
 tap_text "Biosfera"; sleep 15
 shot 01_biosfera_3d
-adb shell screenrecord --time-limit 170 --bit-rate 8000000 /sdcard/biosfera3d.mp4 & RP=$!
+rm -f "$OUT/.stop"; record_loop & RP=$!
 sleep 8; shot 02_cidadaos_andando
 step pick; waitstep CARTAO
 XY=$(grep -o "PASSO CARTAO [-0-9]* [-0-9]*" "$OUT/logcat.txt" | tail -1 | awk '{print $3, $4}')
 echo "cidadão projetado em: $XY"
 case "$XY" in -1*|"") echo "sem projeção";; *) adb shell input tap $XY;; esac
 sleep 5; shot 03_cartao_cidadao
+tap_text "fechar"; sleep 2
+step orbit
 adb shell input swipe $((CX-SW/4)) $((SH/3)) $((CX+SW/4)) $((SH/3)) 1800; sleep 6; shot 04_orbita
+step tilt; sleep 4
 adb shell input swipe $CX $((SH/3)) $CX $((SH/3+SH/14)) 1200; sleep 6; shot 05_inclinacao
-step 8x; sleep 15; shot 06_8x_manha
-sleep 15; shot 07_8x_tarde
-sleep 15; shot 08_8x_noite
-step 2d; sleep 10; shot 09_modo_2d
-step 3d; step 1x
-wait $RP 2>/dev/null; sleep 3
-adb pull /sdcard/biosfera3d.mp4 "$OUT/biosfera3d.mp4" || true
+step orbit; step 8x
+step ate:0.33; sleep 10; shot 06_8x_manha
+step ate:0.68; sleep 10; shot 07_8x_tarde
+step ate:0.90; sleep 10; shot 08_8x_noite
+step ate:0.40; sleep 6
+step cam2d; sleep 8; shot 09_modo_2d
+step 3d; step orbit; sleep 6
+step pov; sleep 10
+adb shell input swipe $((CX+SW/6)) $((SH/2)) $((CX-SW/6)) $((SH/2)) 1500; sleep 6; shot 10_pov_primeira_pessoa
+step interior; step tilt; sleep 14; shot 11_interior_brutalista
+step pov; sleep 10; shot 12_interior_pov
+step orbit; sleep 6
+step urban; sleep 10
+step 1x
+touch "$OUT/.stop"; adb shell pkill -INT screenrecord || true; wait $RP 2>/dev/null; sleep 3
+segs=""
+for i in 1 2 3; do adb pull /sdcard/seg$i.mp4 "$OUT/seg$i.mp4" >/dev/null 2>&1 && segs="$segs $OUT/seg$i.mp4"; done
+if command -v ffmpeg >/dev/null && [ -n "$segs" ]; then
+  : > "$OUT/segs.txt"; for f in $segs; do echo "file '$(basename "$f")'" >> "$OUT/segs.txt"; done
+  (cd "$OUT" && ffmpeg -y -loglevel error -f concat -safe 0 -i segs.txt -c copy biosfera3d.mp4) || cp $(echo $segs | awk '{print $1}') "$OUT/biosfera3d.mp4"
+else
+  cp $(echo $segs | awk '{print $1}') "$OUT/biosfera3d.mp4" 2>/dev/null || true
+fi
+rm -f "$OUT"/seg*.mp4 "$OUT/segs.txt" "$OUT/.stop"
 step fim; wait $IP 2>/dev/null
 kill $LP 2>/dev/null
-grep -E "BiosferaDemo|Filament|Choreographer" "$OUT/logcat.txt" | head -200 > "$OUT/logcat_resumo.txt" || true
+{
+  echo "== Resumo do logcat (Biosfera 3D v4.0) =="
+  echo "-- passos do roteiro"; grep -E "BiosferaDemo" "$OUT/logcat.txt" | sed -E 's/^.*PASSO/PASSO/'
+  echo "-- calibração e pipeline"; grep -E "GpuCalibration|GirassolFilament" "$OUT/logcat.txt" | grep -vE "fps=" | head -60
+  echo "-- quadros por segundo (amostras de 1 s: ambiente, câmera, fase, cidadãos)"; grep -E "GirassolFilament.*fps=" "$OUT/logcat.txt" | sed -E 's/^.*(fps=)/\1/' | awk 'NR%3==1' | head -120
+  echo "-- erros fatais"; grep -E "FATAL EXCEPTION|AndroidRuntime: |SIGSEGV|JNI DETECTED ERROR" "$OUT/logcat.txt" | head -40 || true
+} > "$OUT/logcat_resumo.txt"
 ls -la "$OUT"; tail -5 "$OUT/instrument.txt"
 true

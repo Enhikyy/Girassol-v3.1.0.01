@@ -31,6 +31,7 @@
 static int gFailures = 0;
 int runWorldTickTests();
 int runCognitionTests();
+int runWorldAssetsTests();
 #define CHECK(cond, msg)                                              \
     do {                                                              \
         if (!(cond)) {                                                \
@@ -526,6 +527,7 @@ int main() {
     llmTest();
     gFailures += runWorldTickTests();
     gFailures += runCognitionTests();
+    gFailures += runWorldAssetsTests();
 
     std::printf(gFailures == 0 ? "TODOS OS TESTES NATIVOS PASSARAM\n" : "%d FALHA(S)\n", gFailures);
     return gFailures == 0 ? 0 : 1;

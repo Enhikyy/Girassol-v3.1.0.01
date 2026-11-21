@@ -90,6 +90,9 @@ import com.enhikyy.girassol.render3d.Filament3DView
 import com.enhikyy.girassol.render3d.EffectLevel
 import com.enhikyy.girassol.render3d.GpuCalibration
 import com.enhikyy.girassol.render3d.RenderMode
+import com.enhikyy.girassol.render3d.CameraMode
+import com.enhikyy.girassol.render3d.WorldPreset
+import com.enhikyy.girassol.render3d.WorldViewState
 import com.enhikyy.girassol.render3d.RenderModePolicy
 import com.enhikyy.girassol.render3d.WorldPickRegistry
 import com.enhikyy.girassol.sim.SimulationHub
@@ -170,7 +173,7 @@ fun WorldScreen(onOpenCitizen: (String) -> Unit, onOpenMenu: () -> Unit = {}) {
         SpeechBalloons(s, projected, selected, balloonWindow(tps), onTap = focusCitizen)
 
         // HUD superior: pílulas de vidro (menu + relógio/população) e ETA da próxima geração
-        Column(Modifier.align(Alignment.TopStart).statusBarsPadding().padding(start = 12.dp, top = 8.dp, end = 124.dp),
+        Column(Modifier.align(Alignment.TopStart).statusBarsPadding().padding(start = 12.dp, top = 8.dp, end = 176.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(
                 Modifier.liquidGlass(Shapes.Capsule, tone = GlassTone.REGULAR, elevation = 12.dp)
@@ -205,18 +208,45 @@ fun WorldScreen(onOpenCitizen: (String) -> Unit, onOpenMenu: () -> Unit = {}) {
             }
         }
 
-        // alternador 3D | 2D em vidro
-        Row(
-            Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(end = 12.dp, top = 10.dp)
-                .liquidGlass(Shapes.Capsule, tone = GlassTone.REGULAR, elevation = 12.dp).padding(3.dp),
-            verticalAlignment = Alignment.CenterVertically
+        // v4.0: barra flutuante Ambiente (Urbano | Interior) + Câmera (Órbita | Inclinação | POV 1ª Pessoa | 2D)
+        val worldPreset by WorldViewState.preset.collectAsStateWithLifecycle()
+        val camMode by WorldViewState.camera.collectAsStateWithLifecycle()
+        val pov by WorldViewState.pov.collectAsStateWithLifecycle()
+        val is3d = eff.mode == RenderMode.MODE_3D
+        val go3d: (CameraMode) -> Unit = { m -> filamentFailure = null; WorldViewState.setCamera(m); RenderModePolicy.set(context, RenderMode.MODE_3D) }
+        Column(
+            Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(end = 12.dp, top = 10.dp),
+            horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            SegmentPill("3D", eff.mode == RenderMode.MODE_3D, Modifier.testTag("world_mode_3d")) {
-                filamentFailure = null; RenderModePolicy.set(context, RenderMode.MODE_3D)
+            Row(
+                Modifier.liquidGlass(Shapes.Capsule, tone = GlassTone.REGULAR, elevation = 12.dp).padding(3.dp).testTag("world_env_bar"),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                for (p in WorldPreset.entries) SegmentPill(p.label, worldPreset == p, Modifier.testTag("world_env_${p.name.lowercase()}")) {
+                    WorldViewState.setPreset(p)
+                }
+                Box(Modifier.size(6.dp).testTag("world_mode_label").semantics { contentDescription = "modo:${eff.mode.name}" })
             }
-            SegmentPill("2D", eff.mode == RenderMode.ECO_2D, Modifier.testTag("world_mode_2d")) { RenderModePolicy.set(context, RenderMode.ECO_2D) }
-            Box(Modifier.size(6.dp).testTag("world_mode_label").semantics { contentDescription = "modo:${eff.mode.name}" })
+            Row(
+                Modifier.padding(top = 58.dp).liquidGlass(Shapes.Capsule, tone = GlassTone.REGULAR, elevation = 12.dp).padding(3.dp).testTag("world_camera_bar"),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                SegmentPill(CameraMode.ORBIT.label, is3d && camMode == CameraMode.ORBIT, Modifier.testTag("world_mode_3d"), compact = true) { go3d(CameraMode.ORBIT) }
+                SegmentPill(CameraMode.TILT.label, is3d && camMode == CameraMode.TILT, Modifier.testTag("world_cam_tilt"), compact = true) { go3d(CameraMode.TILT) }
+                SegmentPill(CameraMode.FIRST_PERSON_POV.label, is3d && camMode == CameraMode.FIRST_PERSON_POV, Modifier.testTag("world_cam_pov"), compact = true) {
+                    WorldViewState.enterPov(selected); go3d(CameraMode.FIRST_PERSON_POV)
+                }
+                SegmentPill(CameraMode.TOP_2D.label, !is3d, Modifier.testTag("world_mode_2d"), compact = true) {
+                    WorldViewState.setCamera(CameraMode.TOP_2D); RenderModePolicy.set(context, RenderMode.ECO_2D)
+                }
+            }
+            val t = pov
+            if (is3d && camMode == CameraMode.FIRST_PERSON_POV && t != null) PovMinimap(t, Modifier.padding(top = 4.dp))
         }
+        val tp = pov
+        if (is3d && camMode == CameraMode.FIRST_PERSON_POV && tp != null)
+            PovHud(tp, "${SimClock.label(s.tick)} · ${SimClock.period(s.tick)}",
+                Modifier.align(Alignment.TopStart).statusBarsPadding().padding(start = 12.dp, top = 150.dp, end = 148.dp))
 
         // rodapé: cartão do cidadão + barra rápida (fica acima da navegação flutuante e do teclado)
         Column(
@@ -227,7 +257,8 @@ fun WorldScreen(onOpenCitizen: (String) -> Unit, onOpenMenu: () -> Unit = {}) {
             val agent = selected?.let { id -> s.agents.firstOrNull { it.id == id } }
             val summary = agent?.let { a -> dash?.citizens?.firstOrNull { it.id == a.id } }
             if (agent != null) AgentCard(agent, summary?.energy, summary?.social, CitizenText.nearestPlace(s.objects, agent.fx, agent.fz),
-                onClose = { selected = null }) { onOpenCitizen(agent.id) }
+                onClose = { selected = null },
+                onPov = { WorldViewState.enterPov(agent.id); filamentFailure = null; RenderModePolicy.set(context, RenderMode.MODE_3D) }) { onOpenCitizen(agent.id) }
             else if (s.population == 0) {
                 Button(
                     onClick = { importer(null) }, shape = Shapes.Capsule,
@@ -281,11 +312,11 @@ private fun realTime(ticks: Long, tps: Double): String {
 }
 
 @Composable
-private fun SegmentPill(label: String, on: Boolean, modifier: Modifier, onClick: () -> Unit) {
-    Text(label, style = MaterialTheme.typography.labelMedium, color = if (on) Lumon.Background else Lumon.CreamDim,
+private fun SegmentPill(label: String, on: Boolean, modifier: Modifier, compact: Boolean = false, onClick: () -> Unit) {
+    Text(label, style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium, maxLines = 1, color = if (on) Lumon.Background else Lumon.CreamDim,
         modifier = modifier.clip(Shapes.Capsule).background(if (on) Lumon.Sunflower else Color.Transparent)
             .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 6.dp))
+            .padding(horizontal = if (compact) 9.dp else 14.dp, vertical = 6.dp))
 }
 
 @Composable
@@ -513,7 +544,7 @@ private fun lerpMood(m: Double): Color {
 }
 
 @Composable
-private fun AgentCard(a: AgentView, energy: Double?, social: Double?, place: String, onClose: () -> Unit, onOpen: () -> Unit) {
+private fun AgentCard(a: AgentView, energy: Double?, social: Double?, place: String, onClose: () -> Unit, onPov: () -> Unit, onOpen: () -> Unit) {
     Column(
         Modifier.fillMaxWidth().liquidGlass(Shapes.Card, tone = GlassTone.DENSE, elevation = 18.dp)
             .padding(horizontal = 18.dp, vertical = 14.dp).testTag("agent_card"),
@@ -533,6 +564,9 @@ private fun AgentCard(a: AgentView, energy: Double?, social: Double?, place: Str
         LabeledBar("Bem-estar", a.meanNeed)
         if (energy != null) LabeledBar("Energia", energy, Lumon.Sunflower)
         if (social != null) LabeledBar("Social", social, Lumon.Violet)
-        TextButton(onClick = onOpen) { Text("Abrir ficha") }
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onOpen) { Text("Abrir ficha") }
+            TextButton(onClick = onPov, modifier = Modifier.testTag("agent_card_pov")) { Text("POV 1ª Pessoa") }
+        }
     }
 }

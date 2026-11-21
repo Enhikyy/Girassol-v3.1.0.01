@@ -94,10 +94,7 @@ fun Filament3DView(
             val (w, h) = r.viewSize()
             if (w > 1f && h > 1f) {
                 val out = HashMap<String, Offset>()
-                for ((id, p) in r.agentPositions()) {
-                    val s = r.camera.project(V3(p.x, p.y + Raycast.AGENT_HEIGHT * 0.5f, p.z), w, h) ?: continue
-                    if (s.first in 0f..w && s.second in 0f..h) out[id] = Offset(s.first, s.second)
-                }
+                for ((id, s) in r.projectAgents(w, h)) out[id] = Offset(s.first, s.second)
                 WorldPickRegistry.mode = "3D"
                 WorldPickRegistry.positions = out
                 onProjected(out)
@@ -118,6 +115,7 @@ fun Filament3DView(
                         // Sentinela: se o driver abortar o processo durante a compilação dos
                         // shaders deste nível, a próxima abertura desce um nível.
                         GpuCalibration.markRendering(ctx.applicationContext, level)
+                        r.fpsGovernorEnabled = !GpuCalibration.isForced(ctx.applicationContext)
                         r.onFpsLow = { from -> GpuCalibration.onFpsDowngrade(from)?.let { r.setEffectLevel(it); activeLevel = it } }
                         r.init()
                         r.update(snapshot)
@@ -150,12 +148,10 @@ fun Filament3DView(
                             val pan = event.calculatePan()
                             if (pressed >= 2) {
                                 multi = true
-                                r.camera.zoom(event.calculateZoom())
-                                r.camera.rotate(event.calculateRotation())
-                                r.camera.pan(pan.x, pan.y, size.height.toFloat())
+                                r.onPinch(event.calculateZoom(), event.calculateRotation(), pan.x, pan.y, size.height.toFloat())
                             } else if (pressed == 1) {
                                 moved += pan.getDistance()
-                                if (moved > slop) r.camera.orbit(pan.x, pan.y, size.height.toFloat())
+                                if (moved > slop) r.onDrag(pan.x, pan.y, size.height.toFloat())
                             }
                             event.changes.firstOrNull { it.id == down.id }?.let { lastPos = it.position }
                             if (moved > slop || multi) event.changes.forEach { if (it.positionChanged()) it.consume() }

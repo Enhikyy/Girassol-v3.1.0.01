@@ -1,18 +1,19 @@
 package com.enhikyy.girassol.render3d
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.Choreographer
 import android.view.Surface
 import android.view.SurfaceView
 import com.enhikyy.girassol.audio.VoiceAmplitude
 import com.enhikyy.girassol.core.render.CitizenRig
-import com.enhikyy.girassol.core.render.CpuSkinning
 import com.enhikyy.girassol.core.render.Mat4
-import com.enhikyy.girassol.core.world.ActionType
 import com.enhikyy.girassol.core.world.AgentView
-import com.enhikyy.girassol.sim.SimulationHub
 import com.enhikyy.girassol.core.world.WorldRenderSnapshot
+import com.enhikyy.girassol.nativebridge.ProceduralAssetsNative
+import com.enhikyy.girassol.sim.SimulationHub
 import com.google.android.filament.Box
 import com.google.android.filament.Camera
 import com.google.android.filament.ColorGrading
@@ -20,6 +21,7 @@ import com.google.android.filament.Engine
 import com.google.android.filament.EntityManager
 import com.google.android.filament.Filament
 import com.google.android.filament.IndexBuffer
+import com.google.android.filament.LightManager
 import com.google.android.filament.Material
 import com.google.android.filament.MaterialInstance
 import com.google.android.filament.RenderableManager
@@ -40,10 +42,16 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import kotlin.math.cos
+import kotlin.math.pow
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 /** Telemetria do viewport 3D, lida pela faixa de status e pela aba Sistema. */
 data class Render3dStats(val active: Boolean = false, val fps: Double = 0.0, val vertices: Int = 0, val citizens: Int = 0, val error: String = "",
-    val effectLevel: String = "")
+    val effectLevel: String = "", val preset: String = "", val camera: String = "", val phase: String = "", val instances: Int = 0)
 
 object Render3dTelemetry {
     private val _stats = MutableStateFlow(Render3dStats())
@@ -53,9 +61,12 @@ object Render3dTelemetry {
 }
 
 /**
- * Viewport 3D Google Filament da aba Mundo. Toda chamada ao Engine ocorre na thread
- * principal (Choreographer). Limitado a ~30 FPS para operação contínua sem estrangulamento
- * térmico; resolução dinâmica reduz a escala de renderização se a GPU não acompanhar.
+ * v4.0 — viewport Filament de alta fidelidade da Aba Mundo: presets URBAN_OVERCAST e
+ * LUMON_INTERIOR com PBR (texturas C++20 1024² + mips), IBL procedural por fase do dia,
+ * sombras em cascata + contato em espaço de tela, SSAO, SSR, TAA + FXAA, ACES, bloom e a
+ * passada analógica girassol_dehancer_post. Cidadãos articulados por ossos (entidades filhas),
+ * câmeras Órbita / Inclinação / POV em primeira pessoa. Toda chamada ao Engine ocorre na
+ * thread principal (Choreographer); a geração de texturas/IBL roda numa thread de fundo.
  */
 class FilamentCityRenderer(
     private val context: Context,
@@ -64,53 +75,75 @@ class FilamentCityRenderer(
 ) {
     companion object {
         private const val TAG = "GirassolFilament"
-        /** Calibração v3.6 anti-clarão (Mali-G57 MC2 / Adreno): ver docs/RENDER_CALIBRATION.md. */
-        const val CAMERA_APERTURE = 16f
-        const val CAMERA_SHUTTER = 1f / 125f
-        const val CAMERA_ISO = 100f
-        const val BLOOM_STRENGTH = 0.18f
-        /** Limiar do bright-pass em luz linear da cena (≥ 1.15) e seu equivalente pós-Filmic. */
-        const val BLOOM_THRESHOLD_LINEAR = 1.15f
-        const val BRIGHT_KNEE_LDR = 0.82f
-        /** Clamp das altas luzes antes do bloom do Filament (mínimo aceito pela API: 10). */
-        const val BLOOM_HIGHLIGHT_CLAMP = 10f
+        /** Emissivo noturno de referência (usado também pelo [SunCycle] do Modo Eco 2D). */
         const val NIGHT_EMISSIVE = 1.4f
+        const val BRIGHT_KNEE_LDR = 0.82f
+        const val PRIMARY_TEX = 1024
+        const val SECONDARY_TEX = 512
+        const val CITIZEN_FAR_M = 60f
         private const val TARGET_FRAME_NS = 1_000_000_000L / 30
         @Volatile private var filamentReady = false
         fun ensureFilament(): Boolean {
             if (!filamentReady) filamentReady = runCatching { Filament.init(); true }.getOrElse { Log.w(TAG, "Filament indisponível", it); false }
             return filamentReady
         }
+
+        /** Iluminação física por fase: EV100 da câmera, luz direcional (lux), IBL (lux no plano horizontal). */
+        data class PhaseLight(val ev100: Float, val sunLux: Float, val sunColor: FloatArray, val iblLux: Float, val lampLumens: Float,
+            val windows: Float, val billboard: Float, val streetLamp: Float, val fogDensity: Float)
+
+        fun phaseLight(p: TimePhase): PhaseLight = when (p) {
+            TimePhase.MORNING -> PhaseLight(12.2f, 15000f, floatArrayOf(1.0f, 0.97f, 0.92f), 12000f, 0f, 0.20f, 0.60f, 0.05f, 0.010f)
+            TimePhase.AFTERNOON -> PhaseLight(12.0f, 21000f, floatArrayOf(1.0f, 0.80f, 0.58f), 8000f, 0f, 0.60f, 0.90f, 0.30f, 0.012f)
+            TimePhase.NIGHT -> PhaseLight(4.6f, 2f, floatArrayOf(0.62f, 0.72f, 1.0f), 6f, 12000f, 1.60f, 1.40f, 3.0f, 0.016f)
+            TimePhase.INTERIOR -> PhaseLight(8.2f, 650f, floatArrayOf(1.0f, 0.98f, 0.94f), 300f, 0f, 0f, 0f, 0f, 0f)
+        }
+
+        /** Direção representativa do sol (para o céu procedural) por fase. */
+        fun phaseSunDir(p: TimePhase): FloatArray = when (p) {
+            TimePhase.MORNING -> floatArrayOf(-0.62f, 0.48f, -0.36f)
+            TimePhase.AFTERNOON -> floatArrayOf(0.74f, 0.22f, -0.34f)
+            TimePhase.NIGHT -> floatArrayOf(0.30f, 0.80f, 0.40f)
+            TimePhase.INTERIOR -> floatArrayOf(0f, 1f, 0f)
+        }
     }
 
-    /** Nível de efeito ativo (ver [EffectLevel]); pode descer em runtime via [setEffectLevel]. */
     var level: EffectLevel = initialLevel
         private set
     private var headless = false
-    private var framedPopulation = false
     private var lastSnapshot: WorldRenderSnapshot? = null
     private val fpsGovernor = FpsGovernor()
     /** Chamado quando o FPS fica abaixo do piso por tempo prolongado (thread principal). */
     var onFpsLow: ((EffectLevel) -> Unit)? = null
+    /** Desliga o governador de FPS (roteiro de demonstração com nível forçado). */
+    var fpsGovernorEnabled = true
 
     val camera = OrbitCamera()
+    private val fpc = FirstPersonCamera()
+    private var tiltDist = 26f
     private lateinit var engine: Engine
     private lateinit var renderer: Renderer
     private lateinit var scene: Scene
     private lateinit var view: View
     private lateinit var fCamera: Camera
-    private lateinit var colorGrading: ColorGrading
     private val uiHelper = UiHelper(UiHelper.ContextErrorPolicy.DONT_CHECK)
     private var swapChain: SwapChain? = null
-    private lateinit var cityMat: Material
+    private lateinit var pbrMat: Material
     private lateinit var glowMat: Material
-    private lateinit var cityMi: MaterialInstance
+    private lateinit var shadowMat: Material
     private lateinit var glowMi: MaterialInstance
-    private lateinit var concreteTex: Texture
-    private lateinit var carpetTex: Texture
+    private lateinit var shadowMi: MaterialInstance
+    private lateinit var texWhite: Texture
+    private lateinit var texBlack: Texture
+    private lateinit var texOrm: Texture
+    private lateinit var texNormal: Texture
+    private val surfaces = HashMap<Int, WorldGpu.SurfaceTextures>()
+    private val gradings = HashMap<WorldPreset, ColorGrading>()
+    private val ibls = HashMap<TimePhase, WorldGpu.Ibl>()
+    private val iblPending = HashSet<TimePhase>()
+    private var activeIbl: WorldGpu.Ibl? = null
 
-    // Passada analógica girassol_dehancer_post: a View da cidade renderiza num RenderTarget e
-    // uma segunda View desenha um triângulo de tela cheia com bloom/halação/sombras/grão.
+    // passada analógica girassol_dehancer_post (View da cena → RenderTarget → triângulo de tela cheia)
     private lateinit var postMat: Material
     private lateinit var postMi: MaterialInstance
     private lateinit var postScene: Scene
@@ -121,28 +154,51 @@ class FilamentCityRenderer(
     private var rtColor: Texture? = null; private var rtDepth: Texture? = null; private var renderTarget: RenderTarget? = null
     private var postActive = false
     private val startNs = System.nanoTime()
+
+    // ---- cena estática do preset ativo
+    private class GpuPart(val entity: Int, val vb: VertexBuffer, val ib: IndexBuffer, val mi: MaterialInstance?, val spec: MatSpec)
+    private val worldParts = ArrayList<GpuPart>()
+    private val sharedMis = HashMap<String, MaterialInstance>()
+    private var world: WorldScene? = null
+    private var preset: WorldPreset = WorldViewState.preset.value
+    private var sceneKey = Long.MIN_VALUE
+    private var glowEntity = 0; private var glowVb: VertexBuffer? = null; private var glowIb: IndexBuffer? = null
+    private var sunEntity = 0
+    private var sunShadowKey = ""
+    private val lampEntities = ArrayList<Int>()
+
+    // ---- cidadãos articulados
+    private class BoneGpu(val vb: VertexBuffer, val ib: IndexBuffer, val count: Int, val slot: CitizenModel.Slot, val box: Box)
+    private val boneGpu = ArrayList<List<BoneGpu>>()
+    private var shadowVb: VertexBuffer? = null; private var shadowIb: IndexBuffer? = null
+    private val citizenMis = HashMap<String, MaterialInstance>()
+    private class CitizenGpu(val root: Int, val bones: IntArray, val shadow: Int, var hidden: Boolean = false)
+    private val citizens = HashMap<String, CitizenGpu>()
     private val rigStates = HashMap<String, CitizenRig.State>()
     private val agentViews = HashMap<String, AgentView>()
     private val boneScratch = FloatArray(CitizenRig.BONES * 16)
-    private lateinit var agentMesh: CityMeshBuilder.RiggedMesh
-    private lateinit var skinScratch: FloatArray
-    /** Malha própria por cidadão: posições reescritas a cada quadro pelo skinning na CPU. */
-    private class AgentGpu(val entity: Int, val mi: MaterialInstance, val vb: VertexBuffer, val positions: Array<ByteBuffer>) {
-        /** Buffer duplo: o driver do Filament lê o envio anterior de forma assíncrona. */
-        var flip = 0
-    }
-
-    private var cityEntity = 0; private var cityVb: VertexBuffer? = null; private var cityIb: IndexBuffer? = null
-    private var glowEntity = 0; private var glowVb: VertexBuffer? = null; private var glowIb: IndexBuffer? = null
-    private lateinit var agentIb: IndexBuffer
-    private var agentIndexCount = 0
-    private val agentEntities = HashMap<String, AgentGpu>()
+    /** Posição visual (metros da simulação, interpolada) e altura do piso suavizada. */
     private val visual = HashMap<String, FloatArray>()
     private var targets: Map<String, FloatArray> = emptyMap()
-    private var meshKey = Long.MIN_VALUE
-    private var vertexCount = 0
+    private val walking = HashMap<String, Float>()
+    private val scenePos = HashMap<String, V3>()
+
+    // ---- tempo/luz
+    private var dayPhase = Float.NaN
+    private var dayTarget = 0.5f
+    private var phase = TimePhase.MORNING
+    private var cur = phaseLight(TimePhase.MORNING).let { floatArrayOf(it.ev100, it.sunLux, it.iblLux, it.lampLumens, it.windows, it.billboard, it.streetLamp, it.fogDensity) }
+    private var pose = CameraPose(V3(0f, 40f, 40f), V3(0f, 0f, 0f), 42f)
+    private var cameraMode = CameraMode.ORBIT
+    private var povId: String? = null
+    private var povPublishNs = 0L
+
+    // ---- geração de fundo
+    private val worker: ExecutorService? by lazy { if (headless) null else Executors.newSingleThreadExecutor { r -> Thread(r, "girassol-world-assets").apply { isDaemon = true } } }
+    private val main = Handler(Looper.getMainLooper())
+    @Volatile private var generation = 0
+
     private var widthPx = 1; private var heightPx = 1
-    private var night = false
     private var lastFrameNs = 0L
     private var fpsWindowStart = 0L
     private var fpsFrames = 0
@@ -178,10 +234,8 @@ class FilamentCityRenderer(
                 widthPx = width.coerceAtLeast(1); heightPx = height.coerceAtLeast(1)
                 view.setViewport(Viewport(0, 0, widthPx, heightPx))
                 configurePost()
-                updateProjection()
             }
         })
-        // v3.9: TextureView compõe com a árvore de Views — o Liquid Glass consegue desfocar a cena 3D real
         when (sv) {
             is android.view.TextureView -> uiHelper.attachTo(sv)
             is SurfaceView -> uiHelper.attachTo(sv)
@@ -191,7 +245,7 @@ class FilamentCityRenderer(
         Render3dTelemetry.set(Render3dStats(active = true, effectLevel = level.label))
     }
 
-    /** Modo fora da tela (sonda de GPU): swap chain headless com os mesmos materiais e pós. */
+    /** Modo fora da tela (sonda de GPU): mesmos materiais e pós; sem geração assíncrona. */
     fun initHeadless(width: Int, height: Int) {
         headless = true
         initCore()
@@ -199,7 +253,6 @@ class FilamentCityRenderer(
         widthPx = width; heightPx = height
         view.setViewport(Viewport(0, 0, width, height))
         configurePost()
-        updateProjection()
         initialized = true
     }
 
@@ -211,10 +264,11 @@ class FilamentCityRenderer(
         var attempts = 0
         while (done < frames && attempts < frames * 4) {
             attempts++
-            night = done % 2 == 1
-            applyDayNight()
-            val eye = camera.eye(); val tgt = camera.target()
-            fCamera.lookAt(eye.x.toDouble(), eye.y.toDouble(), eye.z.toDouble(), tgt.x.toDouble(), tgt.y.toDouble(), tgt.z.toDouble(), 0.0, 1.0, 0.0)
+            if (dayPhase.isNaN()) dayPhase = 0.4f
+            dayPhase = if (done % 2 == 0) 0.4f else 0.9f
+            dayTarget = dayPhase
+            stepLighting(1f)
+            updateCamera(0.033f)
             if (renderer.beginFrame(sc, System.nanoTime())) {
                 renderViews()
                 renderer.endFrame()
@@ -226,7 +280,6 @@ class FilamentCityRenderer(
         return done
     }
 
-    /** v3.8: heap nativo medido em torno da criação do Engine/materiais/texturas/malhas. */
     private var nativeFootprint = 0L
 
     private fun initCore() {
@@ -240,32 +293,383 @@ class FilamentCityRenderer(
         view.setScene(scene)
         view.setCamera(fCamera)
         renderer.setClearOptions(Renderer.ClearOptions().apply { clear = true; clearColor = doubleArrayOf(0.0, 0.0, 0.0, 1.0) })
-        // v3.6: exposição física f/16 · 1/125 s · ISO 100 (EV100 15, "sunny 16"). Os materiais
-        // são unlit (cor de base não é atenuada), então ela só domina emissivos/brilhos.
-        fCamera.setExposure(CAMERA_APERTURE, CAMERA_SHUTTER, CAMERA_ISO)
-        cityMat = loadMaterial("materials/city.filamat")
+        pbrMat = loadMaterial("materials/world_pbr.filamat")
         glowMat = loadMaterial("materials/glow.filamat")
+        shadowMat = loadMaterial("materials/contact_shadow.filamat")
         postMat = loadMaterial("materials/girassol_dehancer_post.filamat")
-        concreteTex = PbrTextures.load(context, engine, PbrTextures.CONCRETE)
-        carpetTex = PbrTextures.load(context, engine, PbrTextures.CARPET)
-        cityMi = cityMat.createInstance().apply { setParameter("tint", 1f, 1f, 1f, 1f); setParameter("emissiveBoost", 1.2f); setParameter("sunDir", 0f, 1f, 0f); setParameter("sunAmount", 0f); bindDetail(this) }
-        glowMi = glowMat.createInstance().apply { setParameter("size", 0.55f); setParameter("intensity", 1.0f) }
-        agentMesh = CityMeshBuilder.citizenMesh()
-        skinScratch = FloatArray(agentMesh.positions.size)
-        agentIb = indexBuffer(agentMesh.indices)
-        agentIndexCount = agentMesh.indices.size
+        glowMi = glowMat.createInstance().apply { setParameter("size", 1.1f); setParameter("intensity", 0.4f) }
+        shadowMi = shadowMat.createInstance().apply { setParameter("opacity", 0.55f) }
+        texWhite = WorldGpu.solid(engine, 255, 255, 255, 255, srgb = true)
+        texBlack = WorldGpu.solid(engine, 0, 0, 0, 255, srgb = true)
+        texOrm = WorldGpu.solid(engine, 255, 0, 255, 255, srgb = false)
+        texNormal = WorldGpu.solid(engine, 128, 128, 255, 255, srgb = false)
+        buildCitizenGeometry()
         initPostPass()
         applyEffectLevel(level)
         nativeFootprint = (android.os.Debug.getNativeHeapAllocatedSize() - heapBefore).coerceAtLeast(FilamentMemory.MIN_ENGINE_BYTES)
         FilamentMemory.add(nativeFootprint)
     }
 
-    /** Texturas PBR KTX2 triplanares (concreto/carpete); intensidade cai nos níveis baixos. */
-    private fun bindDetail(mi: MaterialInstance) {
-        mi.setParameter("concreteTex", concreteTex, PbrTextures.sampler)
-        mi.setParameter("carpetTex", carpetTex, PbrTextures.sampler)
-        mi.setParameter("detail", if (level == EffectLevel.NONE) 0f else 1f, 0.5f)
+    // ================================================================== materiais
+
+    private fun profile(): CinematicProfile = CinematicProfile.forLevel(preset, level)
+
+    /** Albedo aproximado enquanto a textura procedural da superfície ainda não chegou. */
+    private fun fallbackAlbedo(surface: Int): FloatArray = when (surface) {
+        ProceduralAssetsNative.WET_ASPHALT -> floatArrayOf(0.035f, 0.037f, 0.040f)
+        ProceduralAssetsNative.FACADE -> floatArrayOf(0.14f, 0.16f, 0.17f)
+        ProceduralAssetsNative.SIDEWALK -> floatArrayOf(0.22f, 0.22f, 0.21f)
+        ProceduralAssetsNative.CONCRETE -> floatArrayOf(0.26f, 0.26f, 0.25f)
+        ProceduralAssetsNative.CARPET -> floatArrayOf(0.0065f, 0.030f, 0.018f)
+        ProceduralAssetsNative.COFFER -> floatArrayOf(0.62f, 0.64f, 0.62f)
+        ProceduralAssetsNative.PARTITION -> floatArrayOf(0.67f, 0.71f, 0.68f)
+        ProceduralAssetsNative.BILLBOARD -> floatArrayOf(0.05f, 0.05f, 0.06f)
+        ProceduralAssetsNative.GRASS -> floatArrayOf(0.05f, 0.09f, 0.03f)
+        else -> floatArrayOf(0.3f, 0.3f, 0.3f)
     }
+
+    private fun configureMi(mi: MaterialInstance, spec: MatSpec) {
+        val tex = if (spec.surface >= 0) surfaces[spec.surface] else null
+        mi.setParameter("albedoTex", tex?.albedo ?: texWhite, WorldGpu.repeatSampler)
+        mi.setParameter("ormTex", tex?.orm ?: texOrm, WorldGpu.repeatSampler)
+        mi.setParameter("normalTex", tex?.normal ?: texNormal, WorldGpu.repeatSampler)
+        mi.setParameter("emissiveTex", tex?.emissive ?: if (spec.emissive != null && spec.surface < 0) texWhite else texBlack, WorldGpu.repeatSampler)
+        val t = spec.tint
+        val base = if (spec.surface >= 0 && tex == null) fallbackAlbedo(spec.surface) else floatArrayOf(1f, 1f, 1f)
+        mi.setParameter("baseTint", t[0] * base[0], t[1] * base[1], t[2] * base[2], 1f)
+        mi.setParameter("uvScale", 1f / spec.metersU, 1f / spec.metersV, 0f, 0f)
+        if (tex != null) mi.setParameter("surface", spec.normalStrength, 0f, 1f, 0.05f)
+        else if (spec.surface >= 0) mi.setParameter("surface", 0f, fallbackRough(spec.surface), 0f, 0.05f)
+        else mi.setParameter("surface", 0f, spec.rough, spec.metal, 0.05f)
+        val e = spec.emissive ?: floatArrayOf(0f, 0f, 0f)
+        mi.setParameter("emissiveColor", e[0], e[1], e[2], emissiveIntensity(spec.emissiveDriver))
+    }
+
+    private fun fallbackRough(surface: Int): Float = when (surface) {
+        ProceduralAssetsNative.WET_ASPHALT -> 0.5f
+        ProceduralAssetsNative.CARPET -> 0.9f
+        ProceduralAssetsNative.PARTITION -> 0.68f
+        else -> 0.8f
+    }
+
+    private fun emissiveIntensity(d: EmissiveDriver): Float = when (d) {
+        EmissiveDriver.NONE -> 0f
+        EmissiveDriver.WINDOWS -> cur[4]
+        EmissiveDriver.BILLBOARD -> cur[5]
+        EmissiveDriver.STREET_LAMP -> cur[6]
+        EmissiveDriver.CEILING -> 1.15f
+        EmissiveDriver.MONITOR -> 1.0f
+        EmissiveDriver.BADGE -> 0.8f
+    }
+
+    private fun zeroOffsets(mi: MaterialInstance) = mi.setParameter("instanceOffsets", MaterialInstance.FloatElement.FLOAT4, FloatArray(4), 0, 1)
+
+    private fun sharedMi(spec: MatSpec): MaterialInstance = sharedMis.getOrPut(spec.id) {
+        pbrMat.createInstance().also { configureMi(it, spec); zeroOffsets(it) }
+    }
+
+    // ================================================================== cena estática
+
+    private fun destroyRenderable(entity: Int) {
+        if (entity == 0) return
+        scene.removeEntity(entity)
+        engine.destroyEntity(entity)
+        EntityManager.get().destroy(entity)
+    }
+
+    private fun clearWorld() {
+        for (p in worldParts) {
+            destroyRenderable(p.entity)
+            engine.destroyVertexBuffer(p.vb); engine.destroyIndexBuffer(p.ib)
+            p.mi?.let { engine.destroyMaterialInstance(it) }
+        }
+        worldParts.clear()
+        for ((_, mi) in sharedMis) engine.destroyMaterialInstance(mi)
+        sharedMis.clear()
+        destroyRenderable(glowEntity); glowEntity = 0
+        glowVb?.let { engine.destroyVertexBuffer(it) }; glowIb?.let { engine.destroyIndexBuffer(it) }; glowVb = null; glowIb = null
+        for (e in lampEntities) { scene.removeEntity(e); engine.destroyEntity(e); EntityManager.get().destroy(e) }
+        lampEntities.clear()
+        if (sunEntity != 0) { scene.removeEntity(sunEntity); engine.destroyEntity(sunEntity); EntityManager.get().destroy(sunEntity); sunEntity = 0 }
+        world = null
+    }
+
+    private fun box(m: LitMesh): Box {
+        val (mn, mx) = m.bounds()
+        return Box((mn.x + mx.x) / 2, (mn.y + mx.y) / 2, (mn.z + mx.z) / 2, (mx.x - mn.x) / 2 + 0.05f, (mx.y - mn.y) / 2 + 0.05f, (mx.z - mn.z) / 2 + 0.05f)
+    }
+
+    private fun buildWorld(s: WorldRenderSnapshot) {
+        clearWorld()
+        val citySize = s.widthTiles * TILE_M
+        val w = if (preset == WorldPreset.URBAN_OVERCAST) UrbanSceneBuilder.build(s.widthTiles, s.tiles, s.objects)
+        else LumonHallBuilder.build(citySize)
+        world = w
+        val shadows = profile().castShadows
+        for (part in w.parts) {
+            if (part.mesh.vertexCount == 0) continue
+            val spec = WorldMaterials.spec(part.mat)
+            val vb = WorldGpu.litVertexBuffer(engine, part.mesh); val ib = WorldGpu.indexBuffer(engine, part.mesh.indices)
+            val e = EntityManager.get().create()
+            RenderableManager.Builder(1).boundingBox(box(part.mesh))
+                .geometry(0, RenderableManager.PrimitiveType.TRIANGLES, vb, ib, 0, part.mesh.indices.size)
+                .material(0, sharedMi(spec)).castShadows(shadows && part.castShadows).receiveShadows(true)
+                .layerMask(0xff, part.layer)
+                .build(engine, e)
+            scene.addEntity(e)
+            worldParts += GpuPart(e, vb, ib, null, spec)
+        }
+        for (ip in w.instanced) {
+            if (ip.offsets.isEmpty() || ip.mesh.vertexCount == 0) continue
+            val spec = WorldMaterials.spec(ip.mat)
+            for (chunk in ip.offsets.chunked(64)) {
+                val mi = pbrMat.createInstance().also { configureMi(it, spec) }
+                val arr = FloatArray(chunk.size * 4)
+                for ((i, o) in chunk.withIndex()) { arr[i * 4] = o.x; arr[i * 4 + 1] = o.y; arr[i * 4 + 2] = o.z }
+                mi.setParameter("instanceOffsets", MaterialInstance.FloatElement.FLOAT4, arr, 0, chunk.size)
+                val vb = WorldGpu.litVertexBuffer(engine, ip.mesh); val ib = WorldGpu.indexBuffer(engine, ip.mesh.indices)
+                val e = EntityManager.get().create()
+                RenderableManager.Builder(1).boundingBox(box(ip.mesh)).culling(false).instances(chunk.size)
+                    .geometry(0, RenderableManager.PrimitiveType.TRIANGLES, vb, ib, 0, ip.mesh.indices.size)
+                    .material(0, mi).castShadows(shadows && ip.castShadows).receiveShadows(true)
+                    .layerMask(0xff, ip.layer)
+                    .build(engine, e)
+                engine.transformManager.let { tm -> tm.create(e); tm.setTransform(tm.getInstance(e), Mat4.rotY(ip.yaw)) }
+                scene.addEntity(e)
+                worldParts += GpuPart(e, vb, ib, mi, spec)
+            }
+        }
+        buildGlows(w)
+        buildLights(w)
+        Render3dTelemetry.update { it.copy(vertices = w.vertexCount, instances = w.instanceCount, preset = preset.label) }
+        Log.i(TAG, "cena ${preset.name}: ${w.parts.size} partes, ${w.instanceCount} instâncias, ${w.vertexCount} vértices")
+    }
+
+    private fun buildGlows(w: WorldScene) {
+        if (w.glows.isEmpty() || !level.halationSprites) return
+        val n = minOf(w.glows.size, 256)
+        val pos = FloatArray(n * 12); val uv = FloatArray(n * 8); val col = FloatArray(n * 16); val idx = IntArray(n * 6)
+        val corners = floatArrayOf(0f, 0f, 1f, 0f, 1f, 1f, 0f, 1f)
+        for (s in 0 until n) {
+            val c = w.glows[s]
+            for (k in 0 until 4) {
+                val v = s * 4 + k
+                pos[v * 3] = c.x; pos[v * 3 + 1] = c.y; pos[v * 3 + 2] = c.z
+                uv[v * 2] = corners[k * 2]; uv[v * 2 + 1] = corners[k * 2 + 1]
+                col[v * 4] = 1f; col[v * 4 + 1] = 0.68f; col[v * 4 + 2] = 0.38f; col[v * 4 + 3] = 1f
+            }
+            val b = s * 4
+            idx[s * 6] = b; idx[s * 6 + 1] = b + 1; idx[s * 6 + 2] = b + 2; idx[s * 6 + 3] = b; idx[s * 6 + 4] = b + 2; idx[s * 6 + 5] = b + 3
+        }
+        val vb = VertexBuffer.Builder().bufferCount(3).vertexCount(n * 4)
+            .attribute(VertexBuffer.VertexAttribute.POSITION, 0, VertexBuffer.AttributeType.FLOAT3, 0, 12)
+            .attribute(VertexBuffer.VertexAttribute.UV0, 1, VertexBuffer.AttributeType.FLOAT2, 0, 8)
+            .attribute(VertexBuffer.VertexAttribute.COLOR, 2, VertexBuffer.AttributeType.FLOAT4, 0, 16)
+            .build(engine)
+        vb.setBufferAt(engine, 0, WorldGpu.floatBuffer(pos)); vb.setBufferAt(engine, 1, WorldGpu.floatBuffer(uv)); vb.setBufferAt(engine, 2, WorldGpu.floatBuffer(col))
+        val ib = WorldGpu.indexBuffer(engine, idx)
+        glowVb = vb; glowIb = ib
+        glowEntity = EntityManager.get().create()
+        RenderableManager.Builder(1).boundingBox(Box(0f, 0f, 0f, 1f, 1f, 1f)).culling(false)
+            .geometry(0, RenderableManager.PrimitiveType.TRIANGLES, vb, ib, 0, idx.size)
+            .material(0, glowMi).castShadows(false).receiveShadows(false).priority(7).layerMask(0xff, WorldLayers.WORLD)
+            .build(engine, glowEntity)
+        scene.addEntity(glowEntity)
+    }
+
+    private fun shadowOptions(p: CinematicProfile, interior: Boolean) = LightManager.ShadowOptions().apply {
+        mapSize = p.shadowMapSize
+        shadowCascades = p.shadowCascades
+        screenSpaceContactShadows = p.screenSpaceContactShadows
+        stepCount = p.contactShadowSteps
+        maxShadowDistance = 0.4f
+        shadowFar = if (interior) 60f else 140f
+        stable = false
+        constantBias = 0.001f
+        normalBias = 1.0f
+        if (interior) { penumbraScale = 2.2f; penumbraRatioScale = 1.4f }
+    }
+
+    private fun buildLights(w: WorldScene) {
+        val p = profile()
+        val interior = preset == WorldPreset.LUMON_INTERIOR
+        sunEntity = EntityManager.get().create()
+        LightManager.Builder(LightManager.Type.DIRECTIONAL)
+            .color(1f, 1f, 1f).intensity(cur[1]).direction(-0.3f, -0.9f, 0.2f)
+            .castShadows(p.castShadows).shadowOptions(shadowOptions(p, interior))
+            .build(engine, sunEntity)
+        scene.addEntity(sunEntity)
+        sunShadowKey = "${preset.name}/${level.name}"
+        if (!interior) {
+            for (lamp in w.lamps.take(64)) {
+                val e = EntityManager.get().create()
+                LightManager.Builder(LightManager.Type.POINT).color(1.0f, 0.72f, 0.42f).intensity(0f)
+                    .position(lamp.x, lamp.y, lamp.z).falloff(16f).castShadows(false).build(engine, e)
+                scene.addEntity(e)
+                lampEntities += e
+            }
+        }
+    }
+
+    // ================================================================== texturas / IBL
+
+    /** Pede as superfícies do preset (thread de fundo) e o IBL da fase. */
+    private fun requestAssets() {
+        val ex = worker ?: return
+        if (!ProceduralAssetsNative.isLoaded || level == EffectLevel.NONE) return
+        val gen = generation
+        for (kind in WorldMaterials.surfacesFor(preset)) {
+            if (surfaces.containsKey(kind)) continue
+            val size = when (kind) {
+                ProceduralAssetsNative.WET_ASPHALT, ProceduralAssetsNative.FACADE, ProceduralAssetsNative.CARPET, ProceduralAssetsNative.COFFER ->
+                    if (level == EffectLevel.FULL) PRIMARY_TEX else SECONDARY_TEX
+                else -> SECONDARY_TEX
+            }
+            val withEmissive = kind == ProceduralAssetsNative.FACADE || kind == ProceduralAssetsNative.BILLBOARD || kind == ProceduralAssetsNative.COFFER
+            ex.execute {
+                val d = WorldGpu.generateSurface(kind, size, 0x6172A5L + kind * 7919L) ?: return@execute
+                main.post {
+                    if (!initialized || gen != generation || surfaces.containsKey(kind)) return@post
+                    surfaces[kind] = WorldGpu.upload(engine, d, withEmissive)
+                    refreshMaterials()
+                    Log.i(TAG, "superfície $kind ${size}² enviada (${ProceduralAssetsNative.mipLevels(size)} mips)")
+                }
+            }
+        }
+    }
+
+    private fun refreshMaterials() {
+        for ((id, mi) in sharedMis) configureMi(mi, WorldMaterials.spec(id))
+        for (p in worldParts) p.mi?.let { configureMi(it, p.spec) }
+    }
+
+    private fun ensureIbl(ph: TimePhase) {
+        if (ibls.containsKey(ph)) return
+        if (!ProceduralAssetsNative.isLoaded) return
+        val overcast = if (ph == TimePhase.INTERIOR) 0f else 0.62f
+        // 32² síncrono (≈ poucos ms) para nunca renderizar sem luz ambiente; 256² chega em seguida
+        WorldGpu.generateIbl(ph, phaseSunDir(ph), overcast, 32, 16)?.let { ibls[ph] = WorldGpu.uploadIbl(engine, it, phaseLight(ph).iblLux) }
+        val ex = worker ?: return
+        val face = profile().iblFaceSize
+        if (face <= 32 || !iblPending.add(ph)) return
+        val gen = generation
+        ex.execute {
+            val d = WorldGpu.generateIbl(ph, phaseSunDir(ph), overcast, face, 48) ?: return@execute
+            main.post {
+                iblPending.remove(ph)
+                if (!initialized || gen != generation) return@post
+                val old = ibls[ph]
+                val n = WorldGpu.uploadIbl(engine, d, phaseLight(ph).iblLux)
+                ibls[ph] = n
+                if (activeIbl === old) applyIbl(n)
+                old?.destroy(engine)
+                Log.i(TAG, "IBL ${ph.label} ${face}² + SH3 enviado")
+            }
+        }
+    }
+
+    private fun applyIbl(ibl: WorldGpu.Ibl?) {
+        activeIbl = ibl
+        if (ibl == null) { scene.indirectLight = null; scene.skybox = null; return }
+        scene.indirectLight = ibl.light
+        scene.skybox = if (preset == WorldPreset.URBAN_OVERCAST) ibl.skybox else null
+        updateIblIntensity()
+    }
+
+    private fun updateIblIntensity() {
+        val ibl = activeIbl ?: return
+        // E(+Y) = intensidade · π · SH(+Y) → intensidade que dá a iluminância alvo
+        val k = (cur[2] / Math.PI.toFloat()) / ibl.upIrradiance
+        ibl.light.intensity = k
+    }
+
+    // ================================================================== cidadãos
+
+    private fun buildCitizenGeometry() {
+        for (bone in CitizenModel.bones) {
+            boneGpu += bone.map { bp ->
+                BoneGpu(WorldGpu.litVertexBuffer(engine, bp.mesh), WorldGpu.indexBuffer(engine, bp.mesh.indices), bp.mesh.indices.size, bp.slot, box(bp.mesh))
+            }
+        }
+        val sm = CitizenModel.contactShadowMesh()
+        val vb = VertexBuffer.Builder().bufferCount(2).vertexCount(sm.vertexCount)
+            .attribute(VertexBuffer.VertexAttribute.POSITION, 0, VertexBuffer.AttributeType.FLOAT3, 0, 12)
+            .attribute(VertexBuffer.VertexAttribute.UV0, 1, VertexBuffer.AttributeType.FLOAT2, 0, 8)
+            .build(engine)
+        vb.setBufferAt(engine, 0, WorldGpu.floatBuffer(sm.positions)); vb.setBufferAt(engine, 1, WorldGpu.floatBuffer(sm.uvs))
+        shadowVb = vb; shadowIb = WorldGpu.indexBuffer(engine, sm.indices)
+    }
+
+    private fun citizenMi(slot: CitizenModel.Slot, rgb: FloatArray): MaterialInstance {
+        val key = "${slot.name}:${rgb.contentHashCode()}"
+        return citizenMis.getOrPut(key) {
+            pbrMat.createInstance().also { mi ->
+                mi.setParameter("albedoTex", texWhite, WorldGpu.repeatSampler)
+                mi.setParameter("ormTex", texOrm, WorldGpu.repeatSampler)
+                mi.setParameter("normalTex", texNormal, WorldGpu.repeatSampler)
+                mi.setParameter("emissiveTex", if (slot == CitizenModel.Slot.BADGE) texWhite else texBlack, WorldGpu.repeatSampler)
+                mi.setParameter("baseTint", rgb[0], rgb[1], rgb[2], 1f)
+                mi.setParameter("uvScale", 1f, 1f, 0f, 0f)
+                val rough = when (slot) { CitizenModel.Slot.SKIN -> 0.55f; CitizenModel.Slot.HAIR -> 0.7f; CitizenModel.Slot.SHOES -> 0.45f; else -> 0.85f }
+                mi.setParameter("surface", 0f, rough, 0f, 0.1f)
+                if (slot == CitizenModel.Slot.BADGE) mi.setParameter("emissiveColor", 0.3f, 0.85f, 1f, 0.8f) else mi.setParameter("emissiveColor", 0f, 0f, 0f, 0f)
+                zeroOffsets(mi)
+            }
+        }
+    }
+
+    private fun createCitizen(a: AgentView): CitizenGpu {
+        val em = EntityManager.get()
+        val tm = engine.transformManager
+        val root = em.create()
+        tm.create(root)
+        val pal = CitizenModel.palette(a.id)
+        val badge = floatArrayOf(0.02f, 0.05f, 0.06f)
+        val bones = IntArray(CitizenRig.BONES)
+        val shadows = profile().castShadows
+        for (b in 0 until CitizenRig.BONES) {
+            val e = em.create()
+            tm.create(e, tm.getInstance(root), Mat4.identity())
+            val parts = boneGpu[b]
+            val builder = RenderableManager.Builder(parts.size).boundingBox(parts.first().box)
+            for ((i, g) in parts.withIndex()) {
+                val rgb = when (g.slot) {
+                    CitizenModel.Slot.SKIN -> pal.skin; CitizenModel.Slot.SHIRT -> pal.shirt; CitizenModel.Slot.TROUSERS -> pal.trousers
+                    CitizenModel.Slot.SHOES -> pal.shoes; CitizenModel.Slot.HAIR -> pal.hair; CitizenModel.Slot.BADGE -> badge
+                }
+                builder.geometry(i, RenderableManager.PrimitiveType.TRIANGLES, g.vb, g.ib, 0, g.count).material(i, citizenMi(g.slot, rgb))
+            }
+            builder.culling(false).castShadows(shadows).receiveShadows(true).layerMask(0xff, WorldLayers.CITIZENS).build(engine, e)
+            scene.addEntity(e)
+            bones[b] = e
+        }
+        val sh = em.create()
+        RenderableManager.Builder(1).boundingBox(Box(0f, 0f, 0f, 0.6f, 0.05f, 0.6f))
+            .geometry(0, RenderableManager.PrimitiveType.TRIANGLES, shadowVb!!, shadowIb!!, 0, 6)
+            .material(0, shadowMi).castShadows(false).receiveShadows(false).priority(5).layerMask(0xff, WorldLayers.CITIZENS)
+            .build(engine, sh)
+        tm.create(sh)
+        scene.addEntity(sh)
+        return CitizenGpu(root, bones, sh)
+    }
+
+    private fun destroyCitizen(c: CitizenGpu) {
+        for (b in c.bones) destroyRenderable(b)
+        destroyRenderable(c.shadow)
+        engine.transformManager.destroy(c.root)
+        EntityManager.get().destroy(c.root)
+    }
+
+    private fun setCitizenHidden(c: CitizenGpu, hidden: Boolean) {
+        if (c.hidden == hidden) return
+        c.hidden = hidden
+        val rm = engine.renderableManager
+        val layer = if (hidden) WorldLayers.HIDDEN else WorldLayers.CITIZENS
+        for (b in c.bones) rm.setLayerMask(rm.getInstance(b), 0xff, layer)
+        rm.setLayerMask(rm.getInstance(c.shadow), 0xff, layer)
+    }
+
+    // ================================================================== pós-processamento
 
     private fun initPostPass() {
         postScene = engine.createScene()
@@ -276,14 +680,13 @@ class FilamentCityRenderer(
         postView.setPostProcessingEnabled(false)
         postView.setShadowingEnabled(false)
         postMi = postMat.createInstance()
-        // triângulo de tela cheia em espaço de dispositivo (vertexDomain: device)
         val vb = VertexBuffer.Builder().bufferCount(2).vertexCount(3)
             .attribute(VertexBuffer.VertexAttribute.POSITION, 0, VertexBuffer.AttributeType.FLOAT3, 0, 12)
             .attribute(VertexBuffer.VertexAttribute.UV0, 1, VertexBuffer.AttributeType.FLOAT2, 0, 8)
             .build(engine)
-        vb.setBufferAt(engine, 0, floatBuffer(floatArrayOf(-1f, -1f, 0f, 3f, -1f, 0f, -1f, 3f, 0f)))
-        vb.setBufferAt(engine, 1, floatBuffer(floatArrayOf(0f, 0f, 2f, 0f, 0f, 2f)))
-        val ib = indexBuffer(intArrayOf(0, 1, 2))
+        vb.setBufferAt(engine, 0, WorldGpu.floatBuffer(floatArrayOf(-1f, -1f, 0f, 3f, -1f, 0f, -1f, 3f, 0f)))
+        vb.setBufferAt(engine, 1, WorldGpu.floatBuffer(floatArrayOf(0f, 0f, 2f, 0f, 0f, 2f)))
+        val ib = WorldGpu.indexBuffer(engine, intArrayOf(0, 1, 2))
         postVb = vb; postIb = ib
         postEntity = EntityManager.get().create()
         RenderableManager.Builder(1)
@@ -294,16 +697,15 @@ class FilamentCityRenderer(
         postScene.addEntity(postEntity)
     }
 
-    /** Intensidades (bloom, halação, densidade das sombras, grão) por nível de efeito. */
+    /** (bloom do bright-pass, halação, densidade das sombras, grão Kodak 500T) por nível. */
     private fun postStrength(l: EffectLevel): FloatArray? = when (l) {
-        // v3.6: bloom ≤ 0.18 e halação sutil — o FX completo estourava em branco na Mali-G57
-        EffectLevel.FULL -> floatArrayOf(BLOOM_STRENGTH, 0.15f, 0.40f, 0.045f)
-        EffectLevel.REDUCED -> floatArrayOf(0.14f, 0.12f, 0.34f, 0.04f)
-        EffectLevel.MINIMAL -> floatArrayOf(0f, 0.10f, 0.30f, 0.035f)
+        // o bloom principal é o do Filament (perfil); aqui só um véu residual para não dobrar
+        EffectLevel.FULL -> floatArrayOf(0.06f, 0.15f, 0.36f, 0.045f)
+        EffectLevel.REDUCED -> floatArrayOf(0.05f, 0.12f, 0.32f, 0.04f)
+        EffectLevel.MINIMAL -> floatArrayOf(0f, 0.10f, 0.28f, 0.035f)
         EffectLevel.NONE -> null
     }
 
-    /** (Re)cria o RenderTarget no tamanho do viewport e liga/desliga a passada analógica. */
     private fun configurePost() {
         val strength = postStrength(level)
         renderTarget?.let { view.setRenderTarget(null); engine.destroyRenderTarget(it) }; renderTarget = null
@@ -343,67 +745,78 @@ class FilamentCityRenderer(
         }
     }
 
-    /**
-     * Pós-processamento "Kodak 500T / 70 mm" graduado por [EffectLevel]: bloom suave, sombras
-     * profundas, balanço tungstênio, vinheta, névoa liminar e FXAA só nos níveis que a GPU
-     * comprovadamente compila (sonda isolada).
-     */
+    private fun grading(p: WorldPreset): ColorGrading = gradings.getOrPut(p) {
+        val prof = CinematicProfile.of(p)
+        ColorGrading.Builder()
+            .toneMapper(ToneMapper.ACES())
+            .contrast(prof.contrast)
+            .saturation(prof.saturation)
+            .shadowsMidtonesHighlights(prof.shadowsTint, floatArrayOf(1f, 1f, 1f, 0f), floatArrayOf(1f, 1f, 1f, 0f), floatArrayOf(0f, 0.333f, 0.55f, 1f))
+            .build(engine)
+    }
+
+    /** Aplica o [CinematicProfile] efetivo (preset × nível de efeito) à View. */
     private fun applyEffectLevel(l: EffectLevel) {
-        view.setShadowingEnabled(false)
+        val p = CinematicProfile.forLevel(preset, l)
+        view.setShadowingEnabled(p.castShadows)
         if (!l.postProcessing) {
             view.setPostProcessingEnabled(false)
             return
         }
         view.setPostProcessingEnabled(true)
-        view.setAntiAliasing(if (l.fxaa) View.AntiAliasing.FXAA else View.AntiAliasing.NONE)
+        view.setAntiAliasing(if (p.fxaa) View.AntiAliasing.FXAA else View.AntiAliasing.NONE)
+        view.setTemporalAntiAliasingOptions(View.TemporalAntiAliasingOptions().apply { enabled = p.taa; feedback = 0.12f; filterWidth = 1.0f })
+        view.setScreenSpaceReflectionsOptions(View.ScreenSpaceReflectionsOptions().apply {
+            enabled = p.ssrEnabled; thickness = p.ssrThickness; bias = p.ssrBias; maxDistance = p.ssrMaxDistance; stride = p.ssrStride
+        })
+        view.setAmbientOcclusionOptions(View.AmbientOcclusionOptions().apply {
+            enabled = p.ssaoEnabled; resolution = p.ssaoResolution; bilateralThreshold = p.ssaoBilateralThreshold
+            radius = p.ssaoRadius; intensity = p.ssaoIntensity
+            quality = if (p.ssaoHighQuality) View.QualityLevel.HIGH else View.QualityLevel.LOW
+            lowPassFilter = if (p.ssaoHighQuality) View.QualityLevel.HIGH else View.QualityLevel.MEDIUM
+            upsampling = if (p.ssaoHighQuality) View.QualityLevel.HIGH else View.QualityLevel.LOW
+        })
+        view.setShadowType(if (l == EffectLevel.FULL) View.ShadowType.DPCF else View.ShadowType.PCF)
         view.setDithering(if (l.temporalDithering) View.Dithering.TEMPORAL else View.Dithering.NONE)
         view.setBloomOptions(View.BloomOptions().apply {
-            // threshold ligado e altas luzes limitadas antes do bloom (sem lens flare/starburst)
-            enabled = l.bloomLevels > 0; strength = BLOOM_STRENGTH; levels = l.bloomLevels.coerceAtLeast(1); resolution = if (l.bloomLevels >= 6) 256 else 192
-            threshold = true; highlight = BLOOM_HIGHLIGHT_CLAMP; lensFlare = false; starburst = false
+            enabled = p.bloomEnabled; strength = p.bloomStrength; levels = p.bloomLevels; resolution = p.bloomResolution
+            threshold = true; highlight = p.effectiveBloomHighlight; lensFlare = false; starburst = false
         })
         view.setVignetteOptions(View.VignetteOptions().apply {
-            enabled = l.vignette; midPoint = 0.42f; roundness = 0.55f; feather = 0.62f; color = floatArrayOf(0f, 0f, 0f, 1f)
+            enabled = l.vignette; midPoint = 0.48f; roundness = 0.6f; feather = 0.62f; color = floatArrayOf(0f, 0f, 0f, 1f)
         })
-        view.setFogOptions(View.FogOptions().apply {
-            enabled = l.fog; distance = 14f; density = 0.028f; maximumOpacity = 0.75f; height = 0f; heightFalloff = 0.35f
-            color = floatArrayOf(0.10f, 0.085f, 0.06f)
-        })
-        view.setDynamicResolutionOptions(View.DynamicResolutionOptions().apply {
-            // com o RenderTarget da passada analógica a resolução fica fixa (o RT tem o tamanho do viewport)
-            enabled = l.dynamicResolution && postStrength(l) == null; minScale = 0.55f; maxScale = 1.0f; quality = View.QualityLevel.LOW
-        })
-        if (l.colorGrading) {
-            if (!::colorGrading.isInitialized) colorGrading = ColorGrading.Builder()
-                .toneMapper(ToneMapper.Filmic())
-                .whiteBalance(-0.10f, 0.03f)
-                .shadowsMidtonesHighlights(
-                    floatArrayOf(0.94f, 1.0f, 1.08f, 0f),
-                    floatArrayOf(1.03f, 1.0f, 0.97f, 0f),
-                    floatArrayOf(1.08f, 1.0f, 0.90f, 0f),
-                    floatArrayOf(0f, 0.30f, 0.55f, 1f))
-                .curves(floatArrayOf(1.18f, 1.18f, 1.12f), floatArrayOf(1f, 1f, 1f), floatArrayOf(1f, 1f, 1f))
-                .contrast(1.12f)
-                .saturation(0.88f)
-                .vibrance(1.05f)
-                .build(engine)
-            view.setColorGrading(colorGrading)
-        } else {
-            view.setColorGrading(null)
-        }
+        applyFog(p)
+        view.setDynamicResolutionOptions(View.DynamicResolutionOptions().apply { enabled = false; minScale = p.resolutionScale; maxScale = p.resolutionScale })
+        view.setColorGrading(if (l.colorGrading) grading(preset) else null)
     }
 
-    /** Troca o nível em runtime (fallback por FPS): reaplica o pós e os sprites de halação. */
+    private fun applyFog(p: CinematicProfile = profile()) {
+        if (!level.postProcessing) return
+        view.setFogOptions(View.FogOptions().apply {
+            enabled = p.fog
+            distance = 18f; cutOffDistance = 1e6f; maximumOpacity = 0.82f
+            height = 0f; heightFalloff = 0.06f; density = cur[7]
+            inScatteringStart = 0f; inScatteringSize = if (phase == TimePhase.NIGHT) -1f else 40f
+            fogColorFromIbl = activeIbl != null
+            color = floatArrayOf(0.42f, 0.46f, 0.48f)
+        })
+    }
+
+    /** Troca o nível em runtime (fallback por FPS ou nível forçado). */
     fun setEffectLevel(l: EffectLevel) {
         if (!initialized || l == level) return
         level = l
         applyEffectLevel(l)
         configurePost()
-        bindDetail(cityMi)
-        for ((_, g) in agentEntities) bindDetail(g.mi)
-        lastSnapshot?.let { rebuildCity(it) }
+        lastSnapshot?.let { buildWorld(it); rebuildCitizens() }
         fpsGovernor.reset()
         Render3dTelemetry.update { it.copy(effectLevel = l.label) }
+    }
+
+    private fun rebuildCitizens() {
+        for ((_, c) in citizens) destroyCitizen(c)
+        citizens.clear()
+        lastSnapshot?.let { updateCitizens(it) }
     }
 
     private fun loadMaterial(asset: String): Material {
@@ -413,264 +826,289 @@ class FilamentCityRenderer(
         return Material.Builder().payload(buf, bytes.size).build(engine)
     }
 
-    private fun floatBuffer(a: FloatArray): ByteBuffer {
-        val b = ByteBuffer.allocateDirect(a.size * 4).order(ByteOrder.nativeOrder())
-        b.asFloatBuffer().put(a)
-        return b
-    }
-
-    private fun colorVertexBuffer(pos: FloatArray, col: FloatArray): VertexBuffer {
-        val n = pos.size / 3
-        val vb = VertexBuffer.Builder().bufferCount(2).vertexCount(n)
-            .attribute(VertexBuffer.VertexAttribute.POSITION, 0, VertexBuffer.AttributeType.FLOAT3, 0, 12)
-            .attribute(VertexBuffer.VertexAttribute.COLOR, 1, VertexBuffer.AttributeType.FLOAT4, 0, 16)
-            .build(engine)
-        vb.setBufferAt(engine, 0, floatBuffer(pos))
-        vb.setBufferAt(engine, 1, floatBuffer(col))
-        return vb
-    }
-
-    /**
-     * Cidadão articulado: posição e cor. O skinning rígido (1 osso por vértice) é feito na CPU
-     * ([CpuSkinning]) porque a variante de skinning do Filament estoura o limite de 256 vetores
-     * de uniformes do vertex shader em GPUs modestas (e no SwiftShader), abortando o link.
-     */
-    private fun riggedVertexBuffer(m: CityMeshBuilder.RiggedMesh): VertexBuffer {
-        val n = m.positions.size / 3
-        val vb = VertexBuffer.Builder().bufferCount(2).vertexCount(n)
-            .attribute(VertexBuffer.VertexAttribute.POSITION, 0, VertexBuffer.AttributeType.FLOAT3, 0, 12)
-            .attribute(VertexBuffer.VertexAttribute.COLOR, 1, VertexBuffer.AttributeType.FLOAT4, 0, 16)
-            .build(engine)
-        vb.setBufferAt(engine, 0, floatBuffer(m.positions))
-        vb.setBufferAt(engine, 1, floatBuffer(m.colors))
-        return vb
-    }
-
-    private fun indexBuffer(idx: IntArray): IndexBuffer {
-        val ib = IndexBuffer.Builder().indexCount(idx.size).bufferType(IndexBuffer.Builder.IndexType.UINT).build(engine)
-        val b = ByteBuffer.allocateDirect(idx.size * 4).order(ByteOrder.nativeOrder())
-        b.asIntBuffer().put(idx)
-        ib.setBuffer(engine, b)
-        return ib
-    }
-
-    private fun destroyPostEntity() {
-        if (postEntity == 0) return
-        postScene.removeEntity(postEntity)
-        engine.renderableManager.destroy(postEntity)
-        EntityManager.get().destroy(postEntity)
-        postEntity = 0
-    }
-
-    private fun destroyAgent(g: AgentGpu) {
-        destroyRenderable(g.entity)
-        engine.destroyMaterialInstance(g.mi)
-        engine.destroyVertexBuffer(g.vb)
-    }
-
-    private fun destroyRenderable(entity: Int) {
-        if (entity == 0) return
-        scene.removeEntity(entity)
-        engine.destroyEntity(entity)
-        engine.renderableManager.destroy(entity)
-        engine.transformManager.destroy(entity)
-        EntityManager.get().destroy(entity)
-    }
-
-    private fun rebuildCity(s: WorldRenderSnapshot) {
-        destroyRenderable(cityEntity); cityEntity = 0
-        cityVb?.let { engine.destroyVertexBuffer(it) }; cityIb?.let { engine.destroyIndexBuffer(it) }
-        destroyRenderable(glowEntity); glowEntity = 0
-        glowVb?.let { engine.destroyVertexBuffer(it) }; glowIb?.let { engine.destroyIndexBuffer(it) }
-        val mesh = CityMeshBuilder.build(s.widthTiles, s.tiles, s.objects)
-            .merge(CityMeshBuilder.scenery(s.widthTiles, s.tiles))
-        vertexCount = mesh.vertexCount
-        val vb = colorVertexBuffer(mesh.positions, mesh.colors); val ib = indexBuffer(mesh.indices)
-        cityVb = vb; cityIb = ib
-        val (mn, mx) = mesh.bounds()
-        cityEntity = EntityManager.get().create()
-        RenderableManager.Builder(1)
-            .boundingBox(Box((mn.x + mx.x) / 2, (mn.y + mx.y) / 2, (mn.z + mx.z) / 2, (mx.x - mn.x) / 2 + 0.1f, (mx.y - mn.y) / 2 + 0.1f, (mx.z - mn.z) / 2 + 0.1f))
-            .geometry(0, RenderableManager.PrimitiveType.TRIANGLES, vb, ib, 0, mesh.indices.size)
-            .material(0, cityMi).castShadows(false).receiveShadows(false)
-            .build(engine, cityEntity)
-        scene.addEntity(cityEntity)
-
-        val glow = CityMeshBuilder.glowSprites(s.widthTiles, s.tiles, s.objects)
-        if (glow.count > 0 && level.halationSprites) {
-            val gvb = VertexBuffer.Builder().bufferCount(3).vertexCount(glow.count * 4)
-                .attribute(VertexBuffer.VertexAttribute.POSITION, 0, VertexBuffer.AttributeType.FLOAT3, 0, 12)
-                .attribute(VertexBuffer.VertexAttribute.UV0, 1, VertexBuffer.AttributeType.FLOAT2, 0, 8)
-                .attribute(VertexBuffer.VertexAttribute.COLOR, 2, VertexBuffer.AttributeType.FLOAT4, 0, 16)
-                .build(engine)
-            gvb.setBufferAt(engine, 0, floatBuffer(glow.positions))
-            gvb.setBufferAt(engine, 1, floatBuffer(glow.uvs))
-            gvb.setBufferAt(engine, 2, floatBuffer(glow.colors))
-            val gib = indexBuffer(glow.indices)
-            glowVb = gvb; glowIb = gib
-            glowEntity = EntityManager.get().create()
-            val w = s.widthTiles.toFloat()
-            RenderableManager.Builder(1)
-                .boundingBox(Box(w / 2, 4f, w / 2, w / 2 + 3f, 8f, w / 2 + 3f))
-                .geometry(0, RenderableManager.PrimitiveType.TRIANGLES, gvb, gib, 0, glow.indices.size)
-                .material(0, glowMi).castShadows(false).receiveShadows(false).priority(7)
-                .build(engine, glowEntity)
-            scene.addEntity(glowEntity)
-        }
-    }
+    // ================================================================== estado do mundo
 
     /** Recebe o snapshot imutável publicado pelo SimulationHub (thread principal). */
     fun update(s: WorldRenderSnapshot) {
         if (!initialized) return
         lastSnapshot = s
-        camera.boundsW = s.widthTiles.toFloat()
-        val key = s.widthTiles.toLong() * 1_000_003L + s.tiles.contentHashCode() * 31L + s.objects.size
-        if (key != meshKey) {
-            if (meshKey == Long.MIN_VALUE) camera.frameCity(s.widthTiles)
-            meshKey = key
-            rebuildCity(s)
+        val wantPreset = WorldViewState.preset.value
+        val key = s.widthTiles.toLong() * 1_000_003L + s.tiles.contentHashCode() * 31L + s.objects.size + wantPreset.ordinal * 7L
+        if (key != sceneKey || wantPreset != preset) {
+            val first = sceneKey == Long.MIN_VALUE
+            val presetChanged = wantPreset != preset
+            preset = wantPreset
+            sceneKey = key
+            if (presetChanged) { generation++; applyEffectLevel(level) }
+            buildWorld(s)
+            if (first || presetChanged) frameCamera(s)
+            requestAssets()
         }
-        // v3.6: com poucos cidadãos (Adão e Eva), enquadra o grupo uma vez em vez do centro da cidade
-        if (!framedPopulation && s.agents.isNotEmpty() && s.agents.size <= 6) {
-            camera.targetX = s.agents.map { it.x + 0.5f }.average().toFloat()
-            camera.targetZ = s.agents.map { it.z + 0.5f }.average().toFloat()
-            camera.distance = 24f.coerceIn(camera.minDistance, camera.maxDistance)
-            framedPopulation = true
-        }
-        night = s.night
         dayTarget = SunCycle.dayFraction(s.tick)
         if (dayPhase.isNaN()) dayPhase = dayTarget
-        applyDayNight()
-        val newTargets = HashMap<String, FloatArray>(s.agents.size * 2)
-        val rm = engine.renderableManager
-        for (a in s.agents) {
-            newTargets[a.id] = floatArrayOf(a.fx, 0f, a.fz)
-            val e = agentEntities[a.id] ?: run {
-                val ent = EntityManager.get().create()
-                val mi = cityMat.createInstance()
-                mi.setParameter("emissiveBoost", 0f)
-                bindDetail(mi)
-                engine.transformManager.create(ent)
-                val vb = riggedVertexBuffer(agentMesh)
-                RenderableManager.Builder(1)
-                    .boundingBox(Box(0f, 0.75f, 0f, 0.6f, 0.9f, 0.6f))
-                    .geometry(0, RenderableManager.PrimitiveType.TRIANGLES, vb, agentIb, 0, agentIndexCount)
-                    .material(0, mi).castShadows(false).receiveShadows(false)
-                    .build(engine, ent)
-                scene.addEntity(ent)
-                visual[a.id] = floatArrayOf(a.fx, 0f, a.fz)
-                val pb = Array(2) { ByteBuffer.allocateDirect(agentMesh.positions.size * 4).order(ByteOrder.nativeOrder()) }
-                AgentGpu(ent, mi, vb, pb).also { agentEntities[a.id] = it }
-            }
-            agentViews[a.id] = a
-            val c = actionRgb(a.action)
-            val glow = if (night) 1.12f else 1f
-            val moodLift = (0.85f + 0.15f * a.mood.toFloat())
-            e.mi.setParameter("tint", c[0] * glow * moodLift, c[1] * glow * moodLift, c[2] * glow * moodLift, 1f)
-        }
-        val gone = agentEntities.keys.filter { it !in newTargets }
-        for (id in gone) {
-            val g = agentEntities.remove(id) ?: continue
-            destroyAgent(g)
-            visual.remove(id); rigStates.remove(id); agentViews.remove(id)
-        }
-        targets = newTargets
-        Render3dTelemetry.update { it.copy(vertices = vertexCount, citizens = agentEntities.size) }
+        updateCitizens(s)
     }
 
-    /** v3.9: fração do dia (0..1) suavizada por quadro — o sol anda contínuo mesmo a 1 tick/s. */
-    private var dayPhase = Float.NaN
-    private var dayTarget = 0.5f
+    private fun frameCamera(s: WorldRenderSnapshot) {
+        val w = world ?: return
+        val cx = (w.mapX(s.widthTiles * TILE_M / 2)) / TILE_M
+        val cz = (w.mapZ(s.widthTiles * TILE_M / 2)) / TILE_M
+        if (preset == WorldPreset.URBAN_OVERCAST) {
+            camera.boundsW = s.widthTiles.toFloat()
+            camera.frameCity(s.widthTiles)
+            tiltDist = 26f
+            if (s.agents.isNotEmpty() && s.agents.size <= 6) {
+                camera.targetX = s.agents.map { it.fx }.average().toFloat()
+                camera.targetZ = s.agents.map { it.fz }.average().toFloat()
+                camera.distance = 18f.coerceIn(camera.minDistance, camera.maxDistance)
+            }
+        } else {
+            camera.boundsW = LumonHallBuilder.HALL_W / TILE_M
+            camera.targetX = cx; camera.targetZ = cz
+            camera.distance = 14f
+            tiltDist = 13f
+        }
+    }
 
-    /** Foco animado num cidadão (toque no balão, atalho da cápsula). */
+    private fun updateCitizens(s: WorldRenderSnapshot) {
+        val newTargets = HashMap<String, FloatArray>(s.agents.size * 2)
+        for (a in s.agents) {
+            newTargets[a.id] = floatArrayOf(a.fx * TILE_M, 0f, a.fz * TILE_M)
+            if (!citizens.containsKey(a.id)) {
+                citizens[a.id] = createCitizen(a)
+                if (!visual.containsKey(a.id)) visual[a.id] = floatArrayOf(a.fx * TILE_M, Float.NaN, a.fz * TILE_M)
+            }
+            agentViews[a.id] = a
+        }
+        val gone = citizens.keys.filter { it !in newTargets }
+        for (id in gone) {
+            citizens.remove(id)?.let { destroyCitizen(it) }
+            visual.remove(id); rigStates.remove(id); agentViews.remove(id); walking.remove(id); scenePos.remove(id)
+        }
+        targets = newTargets
+        Render3dTelemetry.update { it.copy(citizens = citizens.size) }
+    }
+
+    /** Foco animado num cidadão (toque no balão, atalho da cápsula); no POV troca o cidadão. */
     fun focusCitizen(id: String): Boolean {
-        val p = visual[id] ?: lastSnapshot?.agents?.firstOrNull { it.id == id }?.let { floatArrayOf(it.fx, 0f, it.fz) } ?: return false
-        camera.focusOn(p[0], p[2], 14f)
+        if (cameraMode == CameraMode.FIRST_PERSON_POV) { WorldViewState.setPovCitizen(id); return citizens.containsKey(id) }
+        val p = scenePos[id] ?: return false
+        camera.focusOn(p.x / TILE_M, p.z / TILE_M, if (preset == WorldPreset.URBAN_OVERCAST) 9f else 7f)
         return true
     }
 
-    private fun applyDayNight() {
-        if (!dayPhase.isNaN()) {
-            val sun = SunCycle.at(dayPhase)
-            cityMi.setParameter("tint", sun.tint[0], sun.tint[1], sun.tint[2], 1f)
-            cityMi.setParameter("emissiveBoost", sun.emissive)
-            cityMi.setParameter("sunDir", sun.dir[0], sun.dir[1], sun.dir[2])
-            cityMi.setParameter("sunAmount", sun.amount)
-            glowMi.setParameter("intensity", sun.glow)
-            renderer.setClearOptions(Renderer.ClearOptions().apply { clear = true; clearColor = doubleArrayOf(sun.sky[0].toDouble(), sun.sky[1].toDouble(), sun.sky[2].toDouble(), 1.0) })
-            return
-        }
-        if (night) {
-            // v3.6: emissivo noturno 6.0 → 1.4 e brilho 2.4 → 0.55 (janelas e postes acesos sem cegar)
-            cityMi.setParameter("tint", 0.42f, 0.46f, 0.62f, 1f); cityMi.setParameter("emissiveBoost", NIGHT_EMISSIVE); glowMi.setParameter("intensity", 0.55f)
-        } else {
-            cityMi.setParameter("tint", 0.96f, 0.93f, 0.86f, 1f); cityMi.setParameter("emissiveBoost", 0.8f); glowMi.setParameter("intensity", 0.22f)
+    // ================================================================== câmera e gestos
+
+    /** Um dedo: Órbita orbita; Inclinação gira em torno do alvo; POV olha ao redor. */
+    fun onDrag(dx: Float, dy: Float, viewH: Float) = when (cameraMode) {
+        CameraMode.FIRST_PERSON_POV -> fpc.drag(dx, dy, viewH)
+        CameraMode.TILT -> { camera.yaw -= dx * 3.2f / viewH.coerceAtLeast(1f) }
+        else -> camera.orbit(dx, dy, viewH)
+    }
+
+    /** Dois dedos: pinça, giro e deslocamento. */
+    fun onPinch(zoom: Float, rotationDeg: Float, panX: Float, panY: Float, viewH: Float) {
+        when (cameraMode) {
+            CameraMode.FIRST_PERSON_POV -> fpc.drag(panX, panY, viewH)
+            CameraMode.TILT -> {
+                if (zoom > 0f) tiltDist = (tiltDist / zoom).coerceIn(4f, 60f)
+                camera.rotate(rotationDeg); camera.pan(panX, panY, viewH)
+            }
+            else -> { camera.zoom(zoom); camera.rotate(rotationDeg); camera.pan(panX, panY, viewH) }
         }
     }
 
-    private fun actionRgb(a: ActionType?): FloatArray {
-        fun l(r: Float, g: Float, b: Float) = floatArrayOf(CityMeshBuilder.srgbToLinear(r), CityMeshBuilder.srgbToLinear(g), CityMeshBuilder.srgbToLinear(b))
-        return when (a) {
-            ActionType.COMER, ActionType.COLHER -> l(0.61f, 0.83f, 0.42f)
-            ActionType.DESCANSAR -> l(0.43f, 0.55f, 0.79f)
-            ActionType.BANHO -> l(0.50f, 0.84f, 0.94f)
-            ActionType.RECICLAR, ActionType.CONSTRUIR -> l(0.88f, 0.57f, 0.37f)
-            ActionType.MANTER_USINA -> l(1.0f, 0.83f, 0.36f)
-            ActionType.PESQUISAR, ActionType.ESTUDAR -> l(0.69f, 0.65f, 1.0f)
-            ActionType.SOCIALIZAR, ActionType.CONTRIBUIR -> l(0.95f, 0.63f, 0.72f)
-            ActionType.EXPLORAR -> l(0.91f, 0.87f, 0.78f)
-            ActionType.OCIOSO, null -> l(0.66f, 0.64f, 0.56f)
-        }
+    private fun choosePovCitizen(): String? {
+        val want = WorldViewState.povCitizen.value
+        if (want != null && citizens.containsKey(want)) return want
+        val tx = camera.targetX * TILE_M; val tz = camera.targetZ * TILE_M
+        val best = scenePos.minByOrNull { (_, p) -> (p.x - tx) * (p.x - tx) + (p.z - tz) * (p.z - tz) }?.key
+        if (best != null) WorldViewState.setPovCitizen(best)
+        return best
     }
 
-    /** Posições visuais atuais (interpoladas) para o raycast de seleção e os balões de fala. */
-    fun agentPositions(): Map<String, V3> = visual.mapValues { (_, p) -> V3(p[0], p[1], p[2]) }
-    fun viewSize(): Pair<Float, Float> = widthPx.toFloat() to heightPx.toFloat()
+    private fun updateCamera(dt: Float) {
+        val w = world
+        val mode = WorldViewState.camera.value.let { if (it == CameraMode.TOP_2D) CameraMode.ORBIT else it }
+        if (mode != cameraMode) { if (mode == CameraMode.FIRST_PERSON_POV) fpc.reset(); cameraMode = mode }
+        val ceiling = w?.ceilingY
+        val newPov = if (mode == CameraMode.FIRST_PERSON_POV) choosePovCitizen() else null
+        if (newPov != povId) {
+            povId?.let { id -> citizens[id]?.let { setCitizenHidden(it, false) } }
+            newPov?.let { id -> citizens[id]?.let { setCitizenHidden(it, true) } }
+            if (newPov != null) fpc.reset()
+            povId = newPov
+        }
+        camera.animate(dt)
+        pose = when {
+            mode == CameraMode.FIRST_PERSON_POV && newPov != null && scenePos[newPov] != null -> {
+                val p = scenePos[newPov]!!
+                val st = rigStates[newPov]
+                val a = agentViews[newPov]
+                val h = com.enhikyy.girassol.core.world.CitizenGrowth.proportions(a?.maturity ?: 1f).height
+                fpc.pose(p, st?.yaw ?: 0f, h, st?.phase ?: 0f, walking[newPov] ?: 0f, ceiling)
+            }
+            mode == CameraMode.TILT -> {
+                val pitch = Math.toRadians(if (preset == WorldPreset.URBAN_OVERCAST) 9.0 else 6.0).toFloat()
+                val tgt = V3(camera.targetX * TILE_M, 1.5f, camera.targetZ * TILE_M)
+                var eye = tgt + V3(sin(camera.yaw) * cos(pitch), sin(pitch), cos(camera.yaw) * cos(pitch)) * tiltDist
+                eye = V3(eye.x, eye.y.coerceIn(1.7f, (ceiling ?: 1e9f) - 0.35f), eye.z)
+                CameraPose(eye, tgt, 50f, near = 0.1f, far = 700f)
+            }
+            else -> CameraPose(camera.eye() * TILE_M, camera.target() * TILE_M, camera.fovDeg, near = 0.3f, far = 900f)
+        }
+        val e = pose.eye; val t = pose.target
+        fCamera.lookAt(e.x.toDouble(), e.y.toDouble(), e.z.toDouble(), t.x.toDouble(), t.y.toDouble(), t.z.toDouble(), 0.0, 1.0, 0.0)
+        fCamera.setProjection(pose.fovDeg.toDouble(), widthPx.toDouble() / heightPx, pose.near.toDouble(), pose.far.toDouble(), Camera.Fov.VERTICAL)
+        // teto visível só com o olho abaixo dele (órbita de cima vê o salão como maquete)
+        val showCeiling = ceiling == null || e.y < ceiling + 0.3f
+        view.setVisibleLayers(0xff, WorldLayers.WORLD or WorldLayers.CITIZENS or (if (showCeiling) WorldLayers.CEILING else 0))
+    }
 
-    /** Raycast 3D (AABB) com tolerância de ~24 dp em espaço de tela. */
+    /** Pose atual da câmera (órbita, inclinação ou POV). */
+    fun currentPose(): CameraPose = pose
+
+    /** Raycast em tela com tolerância de ~24 dp (ignora o dono do POV). */
     fun pick(sx: Float, sy: Float): String? {
-        val agents = agentPositions()
-        val id = Raycast.pickWithSlop(camera, sx, sy, widthPx.toFloat(), heightPx.toFloat(), agents, 24f * context.resources.displayMetrics.density)
-        if (id == null) Log.d(TAG, "pick vazio: viewport ${widthPx}x$heightPx, ${agents.size} cidadãos")
+        val centers = scenePos.filterKeys { it != povId }.mapValues { (_, p) -> V3(p.x, p.y + 1.0f, p.z) }
+        val id = ScreenPick.pick(pose, sx, sy, widthPx.toFloat(), heightPx.toFloat(), centers, 24f * context.resources.displayMetrics.density)
+        if (id == null) Log.d(TAG, "pick vazio: viewport ${widthPx}x$heightPx, ${centers.size} cidadãos")
         return id
     }
 
-    private fun updateProjection() {
-        fCamera.setProjection(camera.fovDeg.toDouble(), widthPx.toDouble() / heightPx, 0.3, 600.0, Camera.Fov.VERTICAL)
+    /** Posições projetadas (px) da cabeça de cada cidadão visível — balões de fala e testes. */
+    fun projectAgents(w: Float, h: Float): Map<String, Pair<Float, Float>> {
+        val out = HashMap<String, Pair<Float, Float>>()
+        for ((id, p) in scenePos) {
+            if (id == povId) continue
+            if ((p - pose.eye).length() > 260f) continue
+            val s = pose.project(V3(p.x, p.y + 1.25f, p.z), w, h) ?: continue
+            if (s.first in 0f..w && s.second in 0f..h) out[id] = s
+        }
+        return out
     }
 
-    private fun renderFrame(frameTimeNanos: Long, dt: Float) {
+    /** Posições na cena (metros) dos cidadãos. */
+    fun agentPositions(): Map<String, V3> = HashMap(scenePos)
+    fun viewSize(): Pair<Float, Float> = widthPx.toFloat() to heightPx.toFloat()
+
+    // ================================================================== quadro
+
+    private fun lerpTo(i: Int, v: Float, k: Float) { cur[i] += (v - cur[i]) * k }
+
+    /** Avança luz/exposição/emissivos rumo à fase atual. [k] = fração de aproximação (1 = imediato). */
+    private fun stepLighting(k: Float) {
+        if (!dayPhase.isNaN()) {
+            var d = dayTarget - dayPhase
+            if (d > 0.5f) d -= 1f; if (d < -0.5f) d += 1f
+            dayPhase = (dayPhase + d * k.coerceAtMost(1f) + 1f) % 1f
+        }
+        val ph = TimePhase.of(if (dayPhase.isNaN()) 0.4f else dayPhase, preset)
+        if (ph != phase || activeIbl?.phase != ph) {
+            phase = ph
+            ensureIbl(ph)
+            applyIbl(ibls[ph])
+            applyFog()
+            Render3dTelemetry.update { it.copy(phase = ph.label) }
+        }
+        val pl = phaseLight(ph)
+        val kk = k.coerceIn(0f, 1f)
+        lerpTo(0, pl.ev100, kk); lerpTo(1, pl.sunLux, kk); lerpTo(2, pl.iblLux, kk); lerpTo(3, pl.lampLumens, kk)
+        lerpTo(4, pl.windows, kk); lerpTo(5, pl.billboard, kk); lerpTo(6, pl.streetLamp, kk); lerpTo(7, pl.fogDensity, kk)
+        // exposição física: f/1, ISO 100 → t = 2^−EV100
+        fCamera.setExposure(1f, 2.0.pow(-cur[0].toDouble()).toFloat(), 100f)
+        val lm = engine.lightManager
+        if (sunEntity != 0) {
+            val li = lm.getInstance(sunEntity)
+            val dir = when (ph) {
+                TimePhase.INTERIOR -> floatArrayOf(0.18f, 1f, 0.12f)
+                TimePhase.NIGHT -> phaseSunDir(TimePhase.NIGHT)
+                else -> SunCycle.at(dayPhase.takeIf { !it.isNaN() } ?: 0.4f).dir
+            }
+            val n = sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2])
+            lm.setDirection(li, -dir[0] / n, -dir[1] / n, -dir[2] / n)
+            lm.setColor(li, pl.sunColor[0], pl.sunColor[1], pl.sunColor[2])
+            lm.setIntensity(li, cur[1])
+        }
+        for (e in lampEntities) lm.setIntensity(lm.getInstance(e), cur[3])
+        updateIblIntensity()
+        for ((id, mi) in sharedMis) {
+            val spec = WorldMaterials.spec(id)
+            if (spec.emissiveDriver != EmissiveDriver.NONE) { val c = spec.emissive!!; mi.setParameter("emissiveColor", c[0], c[1], c[2], emissiveIntensity(spec.emissiveDriver)) }
+        }
+        for (p in worldParts) if (p.mi != null && p.spec.emissiveDriver != EmissiveDriver.NONE) {
+            val c = p.spec.emissive!!; p.mi.setParameter("emissiveColor", c[0], c[1], c[2], emissiveIntensity(p.spec.emissiveDriver))
+        }
+        glowMi.setParameter("intensity", 0.10f + 0.30f * (cur[6] / 3f))
+        shadowMi.setParameter("opacity", if (ph == TimePhase.NIGHT) 0.35f else 0.55f)
+        if (preset == WorldPreset.LUMON_INTERIOR || activeIbl == null)
+            renderer.setClearOptions(Renderer.ClearOptions().apply { clear = true; clearColor = doubleArrayOf(0.0, 0.0, 0.0, 1.0) })
+    }
+
+    private fun animateCitizens(dt: Float) {
+        val w = world ?: return
         val tm = engine.transformManager
         val k = (dt * 6f).coerceAtMost(1f)
         val tps = SimulationHub.status.value.effectiveTps.toFloat()
         val now = System.nanoTime()
-        for ((id, g) in agentEntities) {
+        val eye = pose.eye
+        for ((id, c) in citizens) {
             val v = visual[id] ?: continue
             val t = targets[id] ?: continue
             v[0] += (t[0] - v[0]) * k; v[2] += (t[2] - v[2]) * k
+            val sx = w.mapX(v[0]); val sz = w.mapZ(v[2])
+            val floor = w.floorAt(sx, sz)
+            v[1] = if (v[1].isNaN()) floor else v[1] + (floor - v[1]) * (dt * 10f).coerceAtMost(1f)
+            val p = V3(sx, v[1], sz)
+            scenePos[id] = p
             val a = agentViews[id]
             val st = rigStates.getOrPut(id) { CitizenRig.State() }
-            // cinemática sincronizada: velocidade ORCA/RVO2, digitação CRT e amplitude do Pocket-TTS
-            val root = CitizenRig.pose(st, CitizenRig.Input(
-                maturity = a?.maturity ?: 1f, vx = a?.vx ?: 0f, vz = a?.vz ?: 0f, ticksPerSecond = tps,
-                typing = a?.typing == true, amplitude = VoiceAmplitude.level(id, now), dt = dt), boneScratch)
-            val m = Mat4.mul(Mat4.translate(v[0], v[1], v[2]), root)
-            tm.setTransform(tm.getInstance(g.entity), m)
-            CpuSkinning.skin(agentMesh.positions, agentMesh.bones, boneScratch, skinScratch)
-            val pb = g.positions[g.flip]; g.flip = g.flip xor 1
-            pb.clear(); pb.asFloatBuffer().put(skinScratch); pb.rewind()
-            g.vb.setBufferAt(engine, 0, pb)
+            val far = (p - eye).length() > CITIZEN_FAR_M * (if (preset == WorldPreset.URBAN_OVERCAST) 2.5f else 1.5f)
+            val inp = CitizenRig.Input(maturity = a?.maturity ?: 1f, vx = a?.vx ?: 0f, vz = a?.vz ?: 0f, ticksPerSecond = tps,
+                typing = a?.typing == true, amplitude = VoiceAmplitude.level(id, now), dt = dt)
+            val speed = sqrt(inp.vx * inp.vx + inp.vz * inp.vz)
+            walking[id] = (speed * tps / 0.6f).coerceIn(0f, 1f)
+            val root = CitizenRig.pose(st, inp, boneScratch)
+            val m = Mat4.mul(Mat4.translate(p.x, p.y, p.z), Mat4.mul(Mat4.scale(CitizenModel.SCALE, CitizenModel.SCALE, CitizenModel.SCALE), root))
+            tm.setTransform(tm.getInstance(c.root), m)
+            if (!far || id == povId) for (b in 0 until CitizenRig.BONES) {
+                System.arraycopy(boneScratch, b * 16, boneM, 0, 16)
+                tm.setTransform(tm.getInstance(c.bones[b]), boneM)
+            }
+            val hs = com.enhikyy.girassol.core.world.CitizenGrowth.proportions(a?.maturity ?: 1f).height
+            val r = 0.95f * hs * CitizenModel.SCALE / 1.35f
+            tm.setTransform(tm.getInstance(c.shadow), Mat4.mul(Mat4.translate(p.x, p.y + 0.015f, p.z), Mat4.scale(r, 1f, r)))
         }
-        camera.animate(dt)
-        if (!dayPhase.isNaN()) {
-            var d = dayTarget - dayPhase
-            if (d > 0.5f) d -= 1f; if (d < -0.5f) d += 1f
-            dayPhase = (dayPhase + d * (dt * 1.5f).coerceAtMost(1f) + 1f) % 1f
-            applyDayNight()
+    }
+    private val boneM = FloatArray(16)
+
+    private fun publishPov() {
+        val id = povId
+        val s = lastSnapshot
+        if (id == null || s == null || cameraMode != CameraMode.FIRST_PERSON_POV) { WorldViewState.publishPov(null); return }
+        val a = agentViews[id] ?: return
+        val v = visual[id] ?: return
+        val st = rigStates[id]
+        val dIdx = ((a.fx / 12f).toInt()) to ((a.fz / 12f).toInt())
+        val district = s.districts.firstOrNull { it.dx == dIdx.first && it.dz == dIdx.second }
+        val sector = district?.type?.label ?: "Periferia"
+        val neigh = ArrayList<Pair<Float, Float>>()
+        for ((oid, ov) in visual) if (oid != id) {
+            val dx = ov[0] - v[0]; val dz = ov[2] - v[2]
+            if (dx * dx + dz * dz < 48f * 48f) neigh += dx to dz
         }
-        val eye = camera.eye(); val tgt = camera.target()
-        fCamera.lookAt(eye.x.toDouble(), eye.y.toDouble(), eye.z.toDouble(), tgt.x.toDouble(), tgt.y.toDouble(), tgt.z.toDouble(), 0.0, 1.0, 0.0)
-        updateProjection()
+        val heading = Math.toDegrees(((st?.yaw ?: 0f) + fpc.yawOffset).toDouble()).toFloat()
+        WorldViewState.publishPov(PovTelemetry(id, a.name, v[0], v[2], ((heading % 360f) + 360f) % 360f, sector,
+            a.action?.name?.lowercase()?.replace('_', ' ') ?: "ocioso", a.thought, neigh, s.widthTiles * TILE_M))
+    }
+
+    private fun renderFrame(frameTimeNanos: Long, dt: Float) {
+        // troca de ambiente pedida pela UI (sem esperar o próximo snapshot)
+        if (WorldViewState.preset.value != preset) lastSnapshot?.let { update(it) }
+        updateCamera(dt)
+        animateCitizens(dt)
+        stepLighting(dt * 1.5f)
+        if (frameTimeNanos - povPublishNs > 100_000_000L) { povPublishNs = frameTimeNanos; publishPov() }
         val sc = swapChain ?: return
         if (!uiHelper.isReadyToRender) return
         if (renderer.beginFrame(sc, frameTimeNanos)) {
@@ -683,8 +1121,9 @@ class FilamentCityRenderer(
         if (span >= 1_000_000_000L) {
             val fps = fpsFrames / (span / 1e9)
             fpsFrames = 0; fpsWindowStart = frameTimeNanos
-            Render3dTelemetry.update { it.copy(active = true, fps = fps, effectLevel = level.label) }
-            if (fpsGovernor.onSecond(fps)) onFpsLow?.invoke(level)
+            Render3dTelemetry.update { it.copy(active = true, fps = fps, effectLevel = level.label, camera = cameraMode.label, phase = phase.label, preset = preset.label) }
+            Log.i(TAG, "fps=%.1f nivel=%s ambiente=%s camera=%s fase=%s cidadaos=%d".format(fps, level.name, preset.name, cameraMode.name, phase.name, citizens.size))
+            if (fpsGovernorEnabled && fpsGovernor.onSecond(fps)) onFpsLow?.invoke(level)
         }
         onFrame?.invoke()
     }
@@ -697,7 +1136,6 @@ class FilamentCityRenderer(
 
     fun pause() {
         running = false
-        // Modo headless (sonda de GPU) roda numa thread sem Looper: não há Choreographer nem telemetria.
         if (headless) return
         Choreographer.getInstance().removeFrameCallback(frameCallback)
         Render3dTelemetry.update { it.copy(fps = 0.0) }
@@ -707,24 +1145,34 @@ class FilamentCityRenderer(
         pause()
         if (!initialized) return
         initialized = false
-        if (!headless) uiHelper.detach()
-        for ((_, g) in agentEntities) destroyAgent(g)
-        agentEntities.clear(); visual.clear(); rigStates.clear(); agentViews.clear()
+        generation++
+        if (!headless) { uiHelper.detach(); WorldViewState.publishPov(null) }
+        runCatching { worker?.shutdownNow() }
+        for ((_, c) in citizens) destroyCitizen(c)
+        citizens.clear(); visual.clear(); rigStates.clear(); agentViews.clear(); scenePos.clear()
+        clearWorld()
+        for ((_, mi) in citizenMis) engine.destroyMaterialInstance(mi)
+        citizenMis.clear()
+        for (bone in boneGpu) for (g in bone) { engine.destroyVertexBuffer(g.vb); engine.destroyIndexBuffer(g.ib) }
+        boneGpu.clear()
+        shadowVb?.let { engine.destroyVertexBuffer(it) }; shadowIb?.let { engine.destroyIndexBuffer(it) }
+        scene.indirectLight = null; scene.skybox = null
+        for ((_, i) in ibls) i.destroy(engine)
+        ibls.clear(); activeIbl = null
+        for ((_, s) in surfaces) s.destroy(engine)
+        surfaces.clear()
         view.setRenderTarget(null)
         renderTarget?.let { engine.destroyRenderTarget(it) }; rtColor?.let { engine.destroyTexture(it) }; rtDepth?.let { engine.destroyTexture(it) }
-        destroyPostEntity()
+        if (postEntity != 0) { postScene.removeEntity(postEntity); engine.destroyEntity(postEntity); EntityManager.get().destroy(postEntity); postEntity = 0 }
         postVb?.let { engine.destroyVertexBuffer(it) }; postIb?.let { engine.destroyIndexBuffer(it) }
         engine.destroyMaterialInstance(postMi); engine.destroyMaterial(postMat)
         engine.destroyView(postView); engine.destroyScene(postScene)
         postCamera.entity.let { engine.destroyCameraComponent(it); EntityManager.get().destroy(it) }
-        destroyRenderable(cityEntity); destroyRenderable(glowEntity)
-        cityVb?.let { engine.destroyVertexBuffer(it) }; cityIb?.let { engine.destroyIndexBuffer(it) }
-        glowVb?.let { engine.destroyVertexBuffer(it) }; glowIb?.let { engine.destroyIndexBuffer(it) }
-        engine.destroyIndexBuffer(agentIb)
-        engine.destroyMaterialInstance(cityMi); engine.destroyMaterialInstance(glowMi)
-        engine.destroyMaterial(cityMat); engine.destroyMaterial(glowMat)
-        engine.destroyTexture(concreteTex); engine.destroyTexture(carpetTex)
-        if (::colorGrading.isInitialized) engine.destroyColorGrading(colorGrading)
+        engine.destroyMaterialInstance(glowMi); engine.destroyMaterialInstance(shadowMi)
+        engine.destroyMaterial(pbrMat); engine.destroyMaterial(glowMat); engine.destroyMaterial(shadowMat)
+        engine.destroyTexture(texWhite); engine.destroyTexture(texBlack); engine.destroyTexture(texOrm); engine.destroyTexture(texNormal)
+        for ((_, g) in gradings) engine.destroyColorGrading(g)
+        gradings.clear()
         swapChain?.let { engine.destroySwapChain(it) }; swapChain = null
         engine.destroyView(view); engine.destroyScene(scene); engine.destroyRenderer(renderer)
         val camEntity = fCamera.entity

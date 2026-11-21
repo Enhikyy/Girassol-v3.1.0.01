@@ -1,0 +1,25 @@
+// v4.0 — sombra de contato dos cidadãos com o chão (disco radial suave sob os pés).
+// Complementa as sombras em cascata e o screenSpaceContactShadows do sol: garante
+// ancoragem visual mesmo nos níveis de efeito sem shadow map.
+material {
+    name : girassol_contact_shadow,
+    shadingModel : unlit,
+    requires : [ uv0 ],
+    blending : transparent,
+    depthWrite : false,
+    culling : none,
+    flipUV : false,
+    parameters : [
+        { type : float, name : opacity }
+    ]
+}
+
+fragment {
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+        vec2 p = getUV0() * 2.0 - 1.0;
+        float r = length(p);
+        float a = (1.0 - smoothstep(0.25, 1.0, r)) * materialParams.opacity;
+        material.baseColor = vec4(0.0, 0.0, 0.0, a);
+    }
+}

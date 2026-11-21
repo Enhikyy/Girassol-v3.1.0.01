@@ -31,6 +31,7 @@ REQUIRED = {
     "com/k2fsa/sherpa/onnx/GeneratedAudio": ["samples", "sampleRate"],
     "com/k2fsa/sherpa/onnx/GenerationConfig": ["phonemeCodepoints", "sid", "speed"],
     "com/enhikyy/girassol/nativebridge/GeaNativeBridge": [],
+    "com/enhikyy/girassol/nativebridge/ProceduralAssetsNative": ["nativeMipChainBytes", "nativeGenerateSurface", "nativeCubemapBytes", "nativeGenerateIbl"],
     "com/enhikyy/girassol/nativebridge/LlmNativeBridge": ["nativeLlmLoad", "nativeLlmGenerate", "nativeLlmEvictParked", "nativeLlmPoolStatus"],
     "com/enhikyy/girassol/core/world/NativeWorldTick": ["nativeStreamSeed", "nativeStepNeeds", "nativeStepDaily"],
     "com/enhikyy/girassol/core/world/NativeCognition": ["nativePerceive", "nativeCognitionBatch", "nativeVerifyChain", "nativeLedgerZeroSum"],

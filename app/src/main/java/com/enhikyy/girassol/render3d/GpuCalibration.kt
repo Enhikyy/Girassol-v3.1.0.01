@@ -65,6 +65,12 @@ object GpuCalibration {
         if (!force && _state.value.status != GpuCalStatus.IDLE) return
         val driver = _state.value.driver ?: GlInfo.query()
         val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        // v4.0: nível forçado (roteiro de demonstração/teste instrumentado) — ignora sonda e GL por software
+        EffectLevel.fromId(prefs.getInt(FORCE_LEVEL, -1))?.let { lvl ->
+            _state.value = GpuCalibrationState(GpuCalStatus.DONE, lvl, lvl, "nível forçado (${lvl.label})", driver)
+            Log.i(TAG, "nível de efeitos forçado: ${lvl.label}")
+            return
+        }
         if (driver == null || driver.isSoftware || isSoftwareGl()) {
             val lvl = EffectLevel.NONE
             _state.value = GpuCalibrationState(GpuCalStatus.DONE, lvl, lvl, "GL por software (${driver?.renderer ?: "sem EGL"})", driver)
@@ -104,6 +110,16 @@ object GpuCalibration {
             Log.i(TAG, "calibração: ${chosen?.label ?: "3D indisponível"} — $log")
         }
     }
+
+    const val FORCE_LEVEL = "force_level"
+
+    /** Força um nível de efeitos (−1/null remove). Usado pelo roteiro de demonstração. */
+    fun forceLevel(context: Context, level: EffectLevel?) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt(FORCE_LEVEL, level?.id ?: -1).commit()
+    }
+
+    fun isForced(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(FORCE_LEVEL, -1) >= 0
 
     fun recalibrate(context: Context) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
