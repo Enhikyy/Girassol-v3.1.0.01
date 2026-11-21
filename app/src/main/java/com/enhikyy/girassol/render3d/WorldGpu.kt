@@ -51,6 +51,9 @@ internal object WorldGpu {
      * ORM/normal gerados pela GPU (generateMipmaps). Em GPU real: anisotropia 8 e cadeia do C++.
      */
     @Volatile var softwareGl = false
+    /** Interruptores de diagnóstico (demo no emulador): desligam o envio de superfícies/IBL. */
+    @Volatile var allowSurfaces = true
+    @Volatile var allowIbl = true
     private val hwSampler = TextureSampler(TextureSampler.MinFilter.LINEAR_MIPMAP_LINEAR, TextureSampler.MagFilter.LINEAR,
         TextureSampler.WrapMode.REPEAT).apply { anisotropy = 8f }
     private val swSampler = TextureSampler(TextureSampler.MinFilter.LINEAR_MIPMAP_LINEAR, TextureSampler.MagFilter.LINEAR,

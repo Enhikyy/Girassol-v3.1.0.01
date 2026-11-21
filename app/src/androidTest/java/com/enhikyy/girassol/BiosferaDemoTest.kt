@@ -40,6 +40,11 @@ class BiosferaDemoTest {
         //    completo não roda em tempo real; o nível ao vivo vem de -e nivel (padrão: mínimo).
         val live = when (InstrumentationRegistry.getArguments().getString("nivel")) { "completo" -> EffectLevel.FULL; "reduzido" -> EffectLevel.REDUCED; else -> EffectLevel.MINIMAL }
         GpuCalibration.forceLevel(ctx, live)
+        // emulador: interface ao vivo sem texturas/IBL procedurais (o envio derruba o SwiftShader)
+        if (com.enhikyy.girassol.render3d.isSoftwareGl()) {
+            com.enhikyy.girassol.render3d.WorldGpu.allowSurfaces = false
+            com.enhikyy.girassol.render3d.WorldGpu.allowIbl = false
+        }
         GpuCalibration.ensure(ctx, force = true)
         WorldViewState.setPreset(WorldPreset.URBAN_OVERCAST)
         WorldViewState.setCamera(CameraMode.ORBIT)

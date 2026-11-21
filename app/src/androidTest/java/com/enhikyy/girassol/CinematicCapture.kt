@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.util.Log
 import com.enhikyy.girassol.core.world.WorldCore
 import com.enhikyy.girassol.core.world.WorldRenderSnapshot
+import com.enhikyy.girassol.render3d.WorldGpu
 import com.enhikyy.girassol.render3d.CameraMode
 import com.enhikyy.girassol.render3d.EffectLevel
 import com.enhikyy.girassol.render3d.FilamentCityRenderer
@@ -62,6 +63,13 @@ object CinematicCapture {
         try {
             WorldViewState.setPreset(WorldPreset.URBAN_OVERCAST)
             WorldViewState.setCamera(CameraMode.ORBIT)
+            // emulador (SwiftShader): o envio de texturas derruba o tradutor GL; bisseção por nível —
+            // mínimo sem superfícies nem IBL, reduzido com IBL SH3, completo com tudo
+            if (com.enhikyy.girassol.render3d.isSoftwareGl()) {
+                WorldGpu.allowSurfaces = level == EffectLevel.FULL
+                WorldGpu.allowIbl = level != EffectLevel.MINIMAL
+            }
+            mark("CAPTURA_INICIO_$tag superficies=${WorldGpu.allowSurfaces} ibl=${WorldGpu.allowIbl}")
             r.initCapture(W, H)
             r.tpsOverride = 4f
             r.update(WorldRenderSnapshot.of(core.state))

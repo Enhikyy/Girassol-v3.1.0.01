@@ -559,7 +559,7 @@ class FilamentCityRenderer(
     private fun requestAssets() {
         val ex = worker
         if (ex == null && !syncAssets) return
-        if (!ProceduralAssetsNative.isLoaded || level == EffectLevel.NONE) return
+        if (!ProceduralAssetsNative.isLoaded || level == EffectLevel.NONE || !WorldGpu.allowSurfaces) return
         val gen = generation
         for (kind in WorldMaterials.surfacesFor(preset)) {
             if (surfaces.containsKey(kind)) continue
@@ -597,7 +597,7 @@ class FilamentCityRenderer(
 
     private fun ensureIbl(ph: TimePhase) {
         if (ibls.containsKey(ph)) return
-        if (!ProceduralAssetsNative.isLoaded) return
+        if (!ProceduralAssetsNative.isLoaded || !WorldGpu.allowIbl) return
         val overcast = if (ph == TimePhase.INTERIOR) 0f else 0.62f
         if (syncAssets) {
             val face = if (WorldGpu.softwareGl) minOf(64, profile().iblFaceSize) else profile().iblFaceSize
