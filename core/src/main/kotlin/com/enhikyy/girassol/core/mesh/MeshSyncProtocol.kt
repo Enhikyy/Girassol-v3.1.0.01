@@ -44,6 +44,10 @@ object MeshSyncProtocol {
     const val PROTOCOL_VERSION = 1
     const val PBKDF2_ITERATIONS = 60_000
     const val MAX_FRAME = 64 shl 20
+    /** Limite máximo de um bloco produzido pelo content-defined chunking. */
+    const val MAX_CHUNK = 65_536
+    /** Limite por recurso em uma migração autenticada. */
+    const val MAX_MIGRANT_BALANCE = 1_000_000.0
     private val SALT = "girassol-meshsync-v1".toByteArray()
     private val cbor = Cbor { ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -202,24 +206,90 @@ object MeshSyncProtocol {
     fun manifestOf(raw: ByteArray, seed: Long, tick: Long) = Manifest(seed, tick, raw.size, Sha256.bytes(raw).toHex(), cdcChunks(raw))
 
     /** Blocos que o receptor não possui (a partir do seu snapshot-base, se houver). */
+    /** Valida metadados recebidos antes de confiar em offsets ou reservar memória. */
+    private fun validateManifest(manifest: Manifest) {
+        if (manifest.totalBytes !in 0..MAX_FRAME) {
+            throw MeshSyncException("totalBytes do manifesto fora do limite (0..$MAX_FRAME)")
+        }
+        if (!manifest.sha256.matches(Regex("[0-9a-f]{64}"))) {
+            throw MeshSyncException("SHA-256 do manifesto inválido")
+        }
+        var expectedOffset = 0L
+        for (chunk in manifest.chunks) {
+            if (chunk.offset.toLong() != expectedOffset) {
+                throw MeshSyncException("offset descontínuo no manifesto")
+            }
+            if (chunk.length !in 1..MAX_CHUNK) {
+                throw MeshSyncException("tamanho de bloco inválido: ${chunk.length}")
+            }
+            if (!chunk.hash.matches(Regex("[0-9a-f]{64}"))) {
+                throw MeshSyncException("hash de bloco inválido")
+            }
+            expectedOffset += chunk.length.toLong()
+            if (expectedOffset > manifest.totalBytes.toLong()) {
+                throw MeshSyncException("blocos excedem totalBytes do manifesto")
+            }
+        }
+        if (expectedOffset != manifest.totalBytes.toLong()) {
+            throw MeshSyncException("blocos não cobrem totalBytes do manifesto")
+        }
+    }
+
     fun missing(manifest: Manifest, base: ByteArray?): List<String> {
-        val have = base?.let { b -> cdcChunks(b).map { it.hash }.toHashSet() } ?: hashSetOf()
+        validateManifest(manifest)
+        // O snapshot-base local pode estar truncado/corrompido; não derrube a sessão por isso.
+        val have = base?.let { b -> runCatching { cdcChunks(b).map { it.hash }.toHashSet() }.getOrNull() } ?: hashSetOf()
         return manifest.chunks.map { it.hash }.filter { it !in have }.distinct()
     }
 
     fun packBlocks(raw: ByteArray, manifest: Manifest, want: List<String>): Blocks {
+        validateManifest(manifest)
+        if (raw.size != manifest.totalBytes || Sha256.bytes(raw).toHex() != manifest.sha256) {
+            throw MeshSyncException("snapshot local não corresponde ao manifesto")
+        }
+        if (want.size != want.distinct().size) throw MeshSyncException("lista WANT contém hashes repetidos")
         val byHash = manifest.chunks.associateBy { it.hash }
         val bos = ByteArrayOutputStream()
-        GZIPOutputStream(bos).use { gz -> val d = DataOutputStream(gz); for (h in want) { val c = byHash[h] ?: continue; d.writeInt(c.length); d.write(raw, c.offset, c.length) } }
-        return Blocks(want.filter { it in byHash }, bos.toByteArray())
+        GZIPOutputStream(bos).use { gz ->
+            val d = DataOutputStream(gz)
+            for (h in want) {
+                val chunk = byHash[h] ?: throw MeshSyncException("WANT contém bloco desconhecido")
+                val bytes = raw.copyOfRange(chunk.offset, chunk.offset + chunk.length)
+                if (Sha256.bytes(bytes).toHex() != h) throw MeshSyncException("chunk local não confere com o manifesto")
+                d.writeInt(chunk.length)
+                d.write(bytes)
+            }
+        }
+        return Blocks(want, bos.toByteArray())
     }
 
     /** Remonta o CBOR bruto e o devolve como `.grs` (GRS3 + SHA-256) validado. */
     fun assemble(manifest: Manifest, base: ByteArray?, blocks: Blocks): ByteArray {
+        validateManifest(manifest)
+        val byHash = manifest.chunks.associateBy { it.hash }
+        if (blocks.hashes.size > manifest.chunks.size ||
+            blocks.hashes.size != blocks.hashes.distinct().size ||
+            blocks.hashes.any { it !in byHash }) {
+            throw MeshSyncException("lista de hashes dos blocos inválida")
+        }
         val pool = HashMap<String, ByteArray>()
         base?.let { b -> for (c in cdcChunks(b)) pool[c.hash] = b.copyOfRange(c.offset, c.offset + c.length) }
+        var received = 0L
         DataInputStream(GZIPInputStream(ByteArrayInputStream(blocks.gz))).use { d ->
-            for (h in blocks.hashes) { val n = d.readInt(); val buf = ByteArray(n); d.readFully(buf); pool[h] = buf }
+            for (h in blocks.hashes) {
+                val expectedLength = byHash.getValue(h).length
+                val n = d.readInt()
+                if (n != expectedLength || n > MAX_CHUNK) {
+                    throw MeshSyncException("bloco de $n bytes rejeitado; esperado $expectedLength")
+                }
+                received += n.toLong()
+                if (received > manifest.totalBytes.toLong()) throw MeshSyncException("blocos excedem totalBytes do manifesto")
+                val buf = ByteArray(n)
+                d.readFully(buf)
+                if (Sha256.bytes(buf).toHex() != h) throw MeshSyncException("hash do bloco recebido não confere")
+                pool[h] = buf
+            }
+            if (d.read() != -1) throw MeshSyncException("dados excedentes após os blocos declarados")
         }
         val out = ByteArrayOutputStream(manifest.totalBytes)
         for (c in manifest.chunks) {
@@ -261,6 +331,12 @@ object MeshSyncProtocol {
     fun decodeMigrant(b: ByteArray): MigrationPacket {
         val p = cbor.decodeFromByteArray(MigrationPacket.serializer(), b)
         if (citizenDigest(p.citizen, p.wallet) != p.sha256) throw MeshSyncException("pacote de migração adulterado")
+        // SHA-256 detecta corrupção, mas não impede um par malicioso de recalcular o digest.
+        for ((resource, quantity) in p.wallet) {
+            if (resource.isBlank() || resource.length > 64) throw MeshSyncException("recurso inválido no pacote")
+            if (!quantity.isFinite() || quantity < 0.0) throw MeshSyncException("saldo inválido de $resource")
+            if (quantity > MAX_MIGRANT_BALANCE) throw MeshSyncException("saldo de $resource acima do teto")
+        }
         return p
     }
 }

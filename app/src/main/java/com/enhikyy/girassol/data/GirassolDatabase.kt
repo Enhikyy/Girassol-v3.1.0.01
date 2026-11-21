@@ -30,6 +30,12 @@ class GirassolDatabase(private val context: Context) :
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        // Reaplica o esquema canônico em bancos existentes; todas as declarações usam IF NOT EXISTS.
+        // Sem isso, tabelas introduzidas após a instalação original ficam ausentes em upgrades.
+        val schema = context.assets.open("schema.sql").bufferedReader().use { it.readText() }
+        splitStatements(schema)
+            .filterNot { it.startsWith("PRAGMA", ignoreCase = true) }
+            .forEach { db.execSQL(it) }
         EXTRA_TABLES.forEach { db.execSQL(it) }
         WorldStateHashChain.SQLITE_TRIGGERS.forEach { db.execSQL(it) }
         EpisodicFts.ensure(db)
