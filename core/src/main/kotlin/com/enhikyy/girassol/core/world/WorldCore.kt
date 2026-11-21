@@ -1446,13 +1446,49 @@ class WorldCore(
                 state.stressEvents.lastOrNull { it.targetId == claim.claimKey && it.resolvedTick < 0 }?.let { it.quarantinedBy++ }
             }
         }
-        // comércio de alimento por crédito (partidas dobradas)
+        // Comércio bilateral: preço subjetivo considera fome, inventário, escassez e preços prévios.
         val aFood = state.ledger.getBalance(a.id, FOOD)
         val bFood = state.ledger.getBalance(b.id, FOOD)
-        if (a.needs.getValue(Need.FOME) < 0.45 && aFood < 1.0 && bFood > 4.0 && state.ledger.getBalance(a.id, CREDIT) >= 3.0) {
-            val h = emit("COMERCIO", a.id, "vendedor=${b.id};alimento=2;credito=3")
-            if (state.ledger.transfer(b.id, a.id, FOOD, 2.0, state.tick, h)) state.ledger.transfer(a.id, b.id, CREDIT, 3.0, state.tick, h)
-            tie.recordTrustOutcome("comercio", true)
+        val aCredit = state.ledger.getBalance(a.id, CREDIT)
+        val communalFood = state.ledger.getBalance(COMMUNAL_COMMONS, FOOD)
+        val tradeQuantity = 2.0
+        if (a.needs.getValue(Need.FOME) < 0.45 && aFood < 1.0 && bFood > 4.0) {
+            val quote = SubjectiveMarket.quote(
+                ledger = state.ledger,
+                resourceType = FOOD,
+                currencyType = CREDIT,
+                quantity = tradeQuantity,
+                buyerNeed = a.needs.getValue(Need.FOME),
+                buyerInventory = aFood,
+                sellerInventory = bFood,
+                communalInventory = communalFood
+            )
+            if (quote != null && aCredit >= quote.totalPrice) {
+                val h = emit(
+                    "COMERCIO",
+                    a.id,
+                    "vendedor=${b.id};recurso=$FOOD;qtd=${tradeQuantity.fmt(2)};" +
+                        "moeda=$CREDIT;preco_unitario=${quote.unitPrice.fmt(2)};" +
+                        "total=${quote.totalPrice.fmt(2)};referencia=${quote.referenceUnitPrice.fmt(2)}"
+                )
+                if (state.ledger.exchange(
+                    firstFrom = b.id,
+                    firstTo = a.id,
+                    firstResource = FOOD,
+                    firstQuantity = tradeQuantity,
+                    secondFrom = a.id,
+                    secondTo = b.id,
+                    secondResource = CREDIT,
+                    secondQuantity = quote.totalPrice,
+                    tick = state.tick,
+                    eventHash = h
+                )) {
+                    tie.recordTrustOutcome("comercio", true)
+                } else {
+                    state.stressEvents.lastOrNull { it.targetId == b.id && it.resolvedTick < 0 }?.let { it.quarantinedBy++ }
+                    tie.recordTrustOutcome("comercio", false)
+                }
+            }
         }
     }
 
