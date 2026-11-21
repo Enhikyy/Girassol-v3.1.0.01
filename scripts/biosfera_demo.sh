@@ -39,25 +39,27 @@ waitstep() { for i in $(seq 1 300); do grep -q "PASSO $1" "$OUT/logcat.txt" && r
 shot() { dismiss_anr; adb exec-out screencap -p > "$OUT/$1.png"; echo "captura $1"; }
 W=$(adb shell wm size | grep -oE '[0-9]+x[0-9]+' | tail -1); SW=${W%x*}; SH=${W#*x}
 CX=$((SW/2)); CY=$((SH*45/100))
+step() { adb shell am broadcast -a girassol.demo.STEP --es step "$1" >/dev/null; [ "$1" = pick ] || waitstep "OK_$1"; }
 waitstep POVOADO; sleep 3; dismiss_anr
 tap_text "Biosfera"; sleep 15
 shot 01_biosfera_3d
-adb shell screenrecord --time-limit 150 --bit-rate 8000000 /sdcard/biosfera3d.mp4 & RP=$!
+adb shell screenrecord --time-limit 170 --bit-rate 8000000 /sdcard/biosfera3d.mp4 & RP=$!
 sleep 8; shot 02_cidadaos_andando
-adb shell input swipe $((CX-SW/4)) $CY $((CX+SW/4)) $CY 1800; sleep 6; shot 03_orbita
-adb shell input swipe $CX $((CY-SH/10)) $CX $((CY+SH/12)) 1500; sleep 6; shot 04_inclinacao
-waitstep VELOCIDADE_8X; sleep 12; shot 05_8x_manha
-sleep 12; shot 06_8x_dia
-sleep 12; shot 07_8x_tarde
-waitstep CARTAO
+step pick; waitstep CARTAO
 XY=$(grep -o "PASSO CARTAO [-0-9]* [-0-9]*" "$OUT/logcat.txt" | tail -1 | awk '{print $3, $4}')
 echo "cidadão projetado em: $XY"
-case "$XY" in -1*|"") echo "sem projeção";; *) adb shell input tap $(echo $XY | awk '{print $1, $2+8}');; esac
-sleep 4; shot 08_cartao_cidadao
-waitstep FIM
+case "$XY" in -1*|"") echo "sem projeção";; *) adb shell input tap $XY;; esac
+sleep 5; shot 03_cartao_cidadao
+adb shell input swipe $((CX-SW/4)) $((SH/3)) $((CX+SW/4)) $((SH/3)) 1800; sleep 6; shot 04_orbita
+adb shell input swipe $CX $((SH/3)) $CX $((SH/3+SH/14)) 1200; sleep 6; shot 05_inclinacao
+step 8x; sleep 15; shot 06_8x_manha
+sleep 15; shot 07_8x_tarde
+sleep 15; shot 08_8x_noite
+step 2d; sleep 10; shot 09_modo_2d
+step 3d; step 1x
 wait $RP 2>/dev/null; sleep 3
 adb pull /sdcard/biosfera3d.mp4 "$OUT/biosfera3d.mp4" || true
-wait $IP 2>/dev/null
+step fim; wait $IP 2>/dev/null
 kill $LP 2>/dev/null
 grep -E "BiosferaDemo|Filament|Choreographer" "$OUT/logcat.txt" | head -200 > "$OUT/logcat_resumo.txt" || true
 ls -la "$OUT"; tail -5 "$OUT/instrument.txt"

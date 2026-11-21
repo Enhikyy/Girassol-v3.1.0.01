@@ -37,18 +37,32 @@ class BiosferaDemoTest {
                 SimulationHub.spawnFounder("gael.gguf", "Gael Jacarandá", "M")
             }
             mark("POVOADO")
-            Thread.sleep(60_000)             // host: aba Biosfera, capturas, órbita e inclinação
-            SimulationHub.setSpeed(8)
-            mark("VELOCIDADE_8X")
-            Thread.sleep(40_000)             // ~13 h de mundo: amanhecer → dia → entardecer
-            val dm = ctx.resources.displayMetrics
-            val p = WorldPickRegistry.positions.values.minByOrNull {
-                kotlin.math.hypot(it.x - dm.widthPixels / 2f, it.y - dm.heightPixels * 0.45f)
+            // o host comanda cada passo: am broadcast -a girassol.demo.STEP --es step <8x|1x|pick|2d|3d|fim>
+            val steps = java.util.concurrent.LinkedBlockingQueue<String>()
+            val rx = object : android.content.BroadcastReceiver() {
+                override fun onReceive(c: android.content.Context?, i: android.content.Intent?) { i?.getStringExtra("step")?.let(steps::put) }
             }
-            mark("CARTAO ${p?.x?.toInt() ?: -1} ${p?.y?.toInt() ?: -1}")
-            Thread.sleep(15_000)
-            SimulationHub.setSpeed(1)
-            mark("FIM")
+            ctx.registerReceiver(rx, android.content.IntentFilter("girassol.demo.STEP"), android.content.Context.RECEIVER_EXPORTED)
+            try {
+                val dm = ctx.resources.displayMetrics
+                while (true) {
+                    val step = steps.poll(8, java.util.concurrent.TimeUnit.MINUTES) ?: break
+                    when (step) {
+                        "8x" -> SimulationHub.setSpeed(8)
+                        "1x" -> SimulationHub.setSpeed(1)
+                        "2d" -> RenderModePolicy.set(ctx, RenderMode.ECO_2D)
+                        "3d" -> RenderModePolicy.set(ctx, RenderMode.MODE_3D)
+                        "pick" -> {
+                            val p = WorldPickRegistry.positions.values.minByOrNull {
+                                kotlin.math.hypot(it.x - dm.widthPixels / 2f, it.y - dm.heightPixels * 0.45f)
+                            }
+                            mark("CARTAO ${p?.x?.toInt() ?: -1} ${p?.y?.toInt() ?: -1}"); continue
+                        }
+                    }
+                    mark("OK_$step")
+                    if (step == "fim") break
+                }
+            } finally { ctx.unregisterReceiver(rx); SimulationHub.setSpeed(1) }
         }
     }
 }
