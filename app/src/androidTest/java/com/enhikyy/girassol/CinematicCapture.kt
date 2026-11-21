@@ -77,6 +77,9 @@ object CinematicCapture {
             val bmp = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888)
             val row = ByteArray(W * 4)
             val flipped = ByteBuffer.allocateDirect(W * H * 4)
+            // com o pós do Filament ligado o readPixels sai com origem embaixo; no SwiftShader (pós
+            // desligado, cena direto no alvo de captura) o quadro já sai de cima para baixo
+            val flipRows = !com.enhikyy.girassol.render3d.isSoftwareGl()
             for (seg in script) {
                 WorldViewState.setPreset(seg.preset)
                 if (seg.camera == CameraMode.FIRST_PERSON_POV) WorldViewState.enterPov(null) else WorldViewState.setCamera(seg.camera)
@@ -88,9 +91,9 @@ object CinematicCapture {
                     val tf = System.currentTimeMillis()
                     val px = r.captureFrame(dt, seg.day, read = true) ?: continue
                     if (n < 3 || n % 10 == 0) Log.i(TAG, "[$tag] quadro $n: ${System.currentTimeMillis() - tf} ms")
-                    // readPixels: origem embaixo → inverte as linhas
+                    // readPixels: origem embaixo → inverte as linhas (exceto SwiftShader, ver flipRows)
                     flipped.clear()
-                    for (y in H - 1 downTo 0) { px.position(y * W * 4); px.get(row); flipped.put(row) }
+                    for (k in 0 until H) { val y = if (flipRows) H - 1 - k else k; px.position(y * W * 4); px.get(row); flipped.put(row) }
                     flipped.flip(); bmp.copyPixelsFromBuffer(flipped)
                     File(frames, "f_%04d.png".format(n++)).outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
                     seg.stills[i]?.let { name ->
@@ -102,7 +105,7 @@ object CinematicCapture {
                             r.captureFrame(0f, seg.day, read = true)?.let { raw ->
                                 mark("CAPTURA_MEDIA $tag ${name}_sem_pos ${meanRgb(raw)}")
                                 flipped.clear()
-                                for (y in H - 1 downTo 0) { raw.position(y * W * 4); raw.get(row); flipped.put(row) }
+                                for (k in 0 until H) { val y = if (flipRows) H - 1 - k else k; raw.position(y * W * 4); raw.get(row); flipped.put(row) }
                                 flipped.flip(); bmp.copyPixelsFromBuffer(flipped)
                                 File(out, "diag_${name}_sem_pos.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
                             }
