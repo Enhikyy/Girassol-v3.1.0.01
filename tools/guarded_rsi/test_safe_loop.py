@@ -19,7 +19,10 @@ class GuardedLoopTests(unittest.TestCase):
             dev_eval=lambda item: item["dev"],
             heldout_eval=lambda item: item["held"],
             monitor=lambda item: item["risk"],
-            blind_judge=lambda parent, child: child["held"] > parent["held"],
+            blind_judge=lambda left, right: (
+                "A" if left["held"] > right["held"] else
+                ("B" if right["held"] > left["held"] else "tie")
+            ),
             human_approve=lambda decision: True,
             log=self.log,
             config=GateConfig(),
@@ -55,7 +58,7 @@ class GuardedLoopTests(unittest.TestCase):
 
         rejected_by_judge = self.run_step(
             lambda parent: {**parent, "dev": 0.7, "held": 0.7, "risk": 0.1},
-            blind_judge=lambda parent, child: False,
+            blind_judge=lambda left, right: "tie",
         )
         self.assertEqual("blind_judge_rejected", rejected_by_judge["reason"])
 
@@ -106,6 +109,27 @@ class GuardedLoopTests(unittest.TestCase):
             a.record_trial(0, accepted=True)
             b.record_trial(0, accepted=True)
         self.assertEqual([a.select_parent() for _ in range(10)], [b.select_parent() for _ in range(10)])
+
+    def test_blind_judge_receives_anonymous_randomized_pair(self):
+        observed = []
+        def judge(left, right):
+            observed.append((left["id"], right["id"]))
+            return "A"
+
+        archive = Archive({"id": "parent", "dev": 0.5, "held": 0.5, "risk": 0.0}, seed=7)
+        result = improvement_step(
+            archive=archive,
+            mutate=lambda parent: {**parent, "id": "child", "dev": 0.7, "held": 0.7},
+            dev_eval=lambda item: item["dev"],
+            heldout_eval=lambda item: item["held"],
+            monitor=lambda item: item["risk"],
+            blind_judge=judge,
+            human_approve=lambda decision: True,
+            log=[],
+        )
+        self.assertIn(observed[0], [("child", "parent"), ("parent", "child")])
+        candidate_first = observed[0][0] == "child"
+        self.assertEqual(candidate_first, result["accepted"])
 
 
 if __name__ == "__main__":
