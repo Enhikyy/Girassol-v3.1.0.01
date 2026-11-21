@@ -148,7 +148,7 @@ object TypographyStudioController {
 @OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
 private fun instrument(weight: FontWeight) = Font(R.font.instrument_sans, weight, variationSettings = TypographyFontCache.settings(weight.weight.toFloat()))
 @OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
-private fun jetbrains(weight: FontWeight) = Font(R.font.jetbrains_mono, weight, variationSettings = TypographyFontCache.settings(weight.weight))
+private fun jetbrains(weight: FontWeight) = Font(R.font.jetbrains_mono, weight, variationSettings = TypographyFontCache.settings(weight.weight.toFloat()))
 val InstrumentSans = FontFamily(instrument(FontWeight.Normal), instrument(FontWeight.Medium), instrument(FontWeight.SemiBold), instrument(FontWeight.Bold))
 val JetBrainsMono = FontFamily(jetbrains(FontWeight.Normal), jetbrains(FontWeight.Medium), jetbrains(FontWeight.Bold))
 private val base = Typography()
