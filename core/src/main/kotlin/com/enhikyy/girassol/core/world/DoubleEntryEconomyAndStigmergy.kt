@@ -200,8 +200,13 @@ object SubjectiveMarket {
         sellerReserve: Double = 2.0,
         communalTargetInventory: Double = 8.0
     ): SubjectiveMarketQuote? {
-        if (!quantity.isFinite() || quantity <= 0.0 ||
-            !initialUnitPrice.isFinite() || initialUnitPrice <= 0.0 ||
+        val numericInputs = listOf(
+            quantity, buyerNeed, buyerInventory, sellerInventory, communalInventory,
+            initialUnitPrice, buyerTargetInventory, sellerReserve, communalTargetInventory
+        )
+        if (numericInputs.any { !it.isFinite() } ||
+            quantity <= 0.0 || initialUnitPrice <= 0.0 ||
+            buyerInventory < 0.0 || sellerInventory < 0.0 || communalInventory < 0.0 ||
             buyerTargetInventory <= 0.0 || sellerReserve <= 0.0 || communalTargetInventory <= 0.0) return null
 
         val observations = observedPrices(ledger, resourceType, currencyType).takeLast(12)
