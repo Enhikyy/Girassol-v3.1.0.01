@@ -121,4 +121,31 @@ class SubjectiveMarketTest {
         assertTrue(ledger.verifyZeroSumConservation(FOOD))
         assertTrue(ledger.verifyZeroSumConservation(CREDIT))
     }
+    @Test
+    fun invalidMarketInputsAreRejectedWithoutQuotes() {
+        val ledger = StockFlowDoubleEntryLedger()
+        val nanQuote = SubjectiveMarket.quote(
+            ledger = ledger,
+            resourceType = FOOD,
+            currencyType = CREDIT,
+            quantity = 2.0,
+            buyerNeed = Double.NaN,
+            buyerInventory = 0.0,
+            sellerInventory = 5.0,
+            communalInventory = 2.0
+        )
+        val negativeStockQuote = SubjectiveMarket.quote(
+            ledger = ledger,
+            resourceType = FOOD,
+            currencyType = CREDIT,
+            quantity = 2.0,
+            buyerNeed = 0.2,
+            buyerInventory = 0.0,
+            sellerInventory = -1.0,
+            communalInventory = 2.0
+        )
+        assertNull(nanQuote)
+        assertNull(negativeStockQuote)
+    }
+
 }
