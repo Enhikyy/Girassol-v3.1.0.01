@@ -75,7 +75,7 @@ object TypographyFontCache {
         val w = (round(weight / 25f) * 25f).coerceIn(300f, 800f)
         val wd = (round(width / 5f) * 5f).coerceIn(75f, 125f)
         val key = "$w:$wd"
-        return cache.get(key) ?: FontVariation.Settings(FontVariation.weight(w), FontVariation.width(wd)).also { cache.put(key, it) }
+        return cache.get(key) ?: FontVariation.Settings(FontVariation.weight(w.toInt()), FontVariation.width(wd)).also { cache.put(key, it) }
     }
     fun family(weight: Float): FontFamily {
         val quantized = (round(weight / 25f) * 25f).toInt().coerceIn(300, 800)
@@ -146,7 +146,7 @@ object TypographyStudioController {
     private fun quantize(v: Float, step: Float, min: Float, max: Float) = (round(v / step) * step).coerceIn(min, max)
 }
 @OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
-private fun instrument(weight: FontWeight) = Font(R.font.instrument_sans, weight, variationSettings = TypographyFontCache.settings(weight.weight))
+private fun instrument(weight: FontWeight) = Font(R.font.instrument_sans, weight, variationSettings = TypographyFontCache.settings(weight.weight.toFloat()))
 @OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
 private fun jetbrains(weight: FontWeight) = Font(R.font.jetbrains_mono, weight, variationSettings = TypographyFontCache.settings(weight.weight))
 val InstrumentSans = FontFamily(instrument(FontWeight.Normal), instrument(FontWeight.Medium), instrument(FontWeight.SemiBold), instrument(FontWeight.Bold))
@@ -154,7 +154,7 @@ val JetBrainsMono = FontFamily(jetbrains(FontWeight.Normal), jetbrains(FontWeigh
 private val base = Typography()
 private fun TextStyle.ui(p: TypographyPreferences) = copy(
     fontFamily = TypographyFontCache.family(p.weight.toFloat()), fontSize = fontSize * p.scale, fontWeight = FontWeight(p.weight),
-    letterSpacing = letterSpacing + p.tracking.sp, lineHeight = lineHeight * p.lineHeight
+    letterSpacing = (letterSpacing.value + p.tracking).sp, lineHeight = lineHeight * p.lineHeight
 )
 private fun typographyFor(p: TypographyPreferences) = Typography(
     displayLarge = base.displayLarge.ui(p), displayMedium = base.displayMedium.ui(p), displaySmall = base.displaySmall.ui(p),

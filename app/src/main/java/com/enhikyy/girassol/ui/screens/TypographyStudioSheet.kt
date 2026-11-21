@@ -20,6 +20,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.enhikyy.girassol.ui.theme.Lumon
 import com.enhikyy.girassol.ui.theme.TypographyStudioController
@@ -61,6 +63,6 @@ private fun TypographySlider(context: Context, label: String, value: Float, rang
         Text("$label · ${"%.2f".format(value)}", style = MaterialTheme.typography.labelLarge, color = Lumon.Cream)
         Slider(value = value, onValueChange = onChange, valueRange = range, steps = steps,
             onValueChangeFinished = { TypographyStudioController.persist(context) },
-            modifier = Modifier.fillMaxWidth().testTag(tag))
+            modifier = Modifier.fillMaxWidth().semantics { contentDescription = label }.testTag(tag))
     }
 }

@@ -197,6 +197,18 @@ fun Modifier.liquidGlass(
                 }
             }
             val radius = cornerRadiusOf(outline, size)
+            val microTexture = if (tier == GlassTier.LOW) Path().apply {
+                var y = 8f
+                while (y < size.height) {
+                    var x = 8f
+                    while (x < size.width) {
+                        moveTo(x, y)
+                        lineTo(x + 1.1f, y + 0.25f)
+                        x += 28f
+                    }
+                    y += 28f
+                }
+            } else null
             val strokePx = if (tier == GlassTier.LOW) 1f else 1.dp.toPx()
             if (host != null && glassLayer != null && size.width >= 1f && size.height >= 1f) {
                 val blurPx = (if (tier == GlassTier.MID) blur.value.coerceAtMost(10f) else blur.value).dp.toPx()
@@ -244,6 +256,9 @@ fun Modifier.liquidGlass(
                 }
                 drawPath(path, fill)
                 drawPath(path, gloss)
+                if (tier == GlassTier.LOW && microTexture != null) {
+                    clipPath(path) { drawPath(microTexture, Color.White.copy(alpha = 0.028f), style = Stroke(width = 0.55f)) }
+                }
                 drawPath(path, rim, style = Stroke(width = strokePx))
                 drawContent()
             }
