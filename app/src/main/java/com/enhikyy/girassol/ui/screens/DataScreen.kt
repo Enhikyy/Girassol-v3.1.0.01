@@ -10,10 +10,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -41,7 +45,13 @@ fun DataScreen() {
     val status by SimulationHub.status.collectAsStateWithLifecycle()
     val d = dash ?: return EmptyState("Aguardando o primeiro snapshot do mundo…")
     val alive = d.citizens.filter { it.alive }
-    val history = d.generation.history
+    val allHistory = d.generation.history
+    var period by rememberSaveable { mutableStateOf("30") }
+    val history = when (period) {
+        "7" -> allHistory.takeLast(7)
+        "30" -> allHistory.takeLast(30)
+        else -> allHistory
+    }
     val meanWellbeing = alive.takeIf { it.isNotEmpty() }?.map { it.meanNeed }?.average()
     val generation = d.generation.lineage.maxOfOrNull { it.generation } ?: 0
 
@@ -69,6 +79,21 @@ fun DataScreen() {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 MetricTile("TICK ATUAL", d.tick.toString(), Modifier.weight(1f), Lumon.Cream)
                 MetricTile("LANÇAMENTOS", d.society.totalLedgerEntries.toString(), Modifier.weight(1f), Lumon.Violet)
+            }
+        }
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("JANELA HISTÓRICA", style = MaterialTheme.typography.labelSmall, color = Lumon.CreamDim)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("7" to "7 dias", "30" to "30 dias", "all" to "Tudo").forEach { (key, label) ->
+                        FilterChip(
+                            selected = period == key,
+                            onClick = { period = key },
+                            label = { Text(label) },
+                            modifier = Modifier.testTag("data_period_$key")
+                        )
+                    }
+                }
             }
         }
         item {
