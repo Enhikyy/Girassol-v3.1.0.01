@@ -67,7 +67,7 @@ class AllTabsTest {
         // Sociedade
         rule.onNodeWithTag("evolution_list").performScrollToNode(hasTestTag("evo_society"))
         rule.onNodeWithTag("evo_society").performClick()
-        rule.waitUntil(10_000) { rule.onAllNodes(hasText("CLIODINÂMICA (TURCHIN)")).fetchSemanticsNodes().isNotEmpty() }
+        rule.waitUntil(10_000) { rule.onAllNodes(hasText("Cliodinâmica (Turchin)", ignoreCase = true)).fetchSemanticsNodes().isNotEmpty() }
         rule.onNodeWithTag("evo_society").performClick()
         // Mente: memória 2 estágios + busca FTS no SQLite real
         rule.onNodeWithTag("evolution_list").performScrollToNode(hasTestTag("evo_mind"))
@@ -92,11 +92,11 @@ class AllTabsTest {
         rule.onNodeWithTag("system_list").performScrollToNode(hasTestTag("hw_details_toggle"))
         rule.onNodeWithTag("hw_details_toggle").performClick()
         rule.waitForIdle()
-        rule.onNodeWithTag("system_list").performScrollToNode(hasText("VOZ DOS CIDADÃOS"))
         rule.onNodeWithTag("system_list").performScrollToNode(hasTestTag("v35_hashchain"))
         rule.onNodeWithTag("system_list").performScrollToNode(hasTestTag("verify_hash_chain"))
         rule.onNodeWithTag("verify_hash_chain").performClick()
         rule.waitUntilAtLeastOneExists(hasTestTag("hash_chain_result"), 30_000)
         assertTrue(rule.onAllNodes(hasTestTag("hash_chain_result")).fetchSemanticsNodes().isNotEmpty())
+        rule.onNodeWithTag("system_list").performScrollToNode(hasText("VOZ DOS CIDADÃOS"))
     }
 }
