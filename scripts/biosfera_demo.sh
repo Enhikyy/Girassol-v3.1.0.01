@@ -34,7 +34,7 @@ tap_text "3D"; sleep 12
 shot 02_biosfera_3d
 adb shell screenrecord --time-limit 40 --bit-rate 6000000 /sdcard/biosfera3d.mp4 & RP=$!
 sleep 3
-W=$(adb shell wm size | rg -o '[0-9]+x[0-9]+' | tail -1); SW=${W%x*}; SH=${W#*x}
+W=$(adb shell wm size | grep -oE '[0-9]+x[0-9]+' | tail -1); SW=${W%x*}; SH=${W#*x}
 CX=$((SW/2)); CY=$((SH/2))
 # órbita horizontal, depois vertical
 adb shell input swipe $((CX-300)) $CY $((CX+300)) $CY 1800; sleep 4; shot 03_orbita
