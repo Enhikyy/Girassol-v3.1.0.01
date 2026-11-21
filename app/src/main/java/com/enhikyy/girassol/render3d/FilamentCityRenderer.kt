@@ -249,7 +249,7 @@ class FilamentCityRenderer(
     fun initHeadless(width: Int, height: Int) {
         headless = true
         initCore()
-        swapChain = engine.createSwapChain(width, height, SwapChainFlags.CONFIG_DEFAULT)
+        swapChain = engine.createSwapChain(width, height, if (syncAssets) SwapChainFlags.CONFIG_READABLE else SwapChainFlags.CONFIG_DEFAULT)
         widthPx = width; heightPx = height
         view.setViewport(Viewport(0, 0, width, height))
         configurePost()
@@ -278,6 +278,47 @@ class FilamentCityRenderer(
         }
         engine.flushAndWait()
         return done
+    }
+
+    /** Modo captura (roteiro de demonstração): fora da tela, texturas/IBL síncronos e leitura de quadros. */
+    private var syncAssets = false
+    /** Ticks/s usados na marcha dos cidadãos quando o mundo não vem do [SimulationHub] (captura/testes). */
+    var tpsOverride: Float? = null
+    /** Quadros concluídos por [captureFrame]. */
+    var capturedFrames = 0; private set
+
+    fun initCapture(width: Int, height: Int) {
+        syncAssets = true
+        initHeadless(width, height)
+    }
+
+    /**
+     * Avança [dt] s (câmera, marcha dos cidadãos, luz na fração do dia [dayFraction]) e renderiza
+     * um quadro completo (cena + pós dehancer). Com [read], devolve os pixels RGBA8 (origem embaixo).
+     */
+    fun captureFrame(dt: Float, dayFraction: Float, read: Boolean): ByteBuffer? {
+        check(headless && initialized)
+        val sc = swapChain ?: return null
+        if (WorldViewState.preset.value != preset) lastSnapshot?.let { update(it) }
+        dayTarget = dayFraction; dayPhase = dayFraction
+        updateCamera(dt)
+        animateCitizens(dt)
+        stepLighting(1f)
+        var tries = 0
+        while (!renderer.beginFrame(sc, System.nanoTime())) {
+            engine.flushAndWait()
+            if (++tries > 30) return null
+        }
+        renderViews()
+        var out: ByteBuffer? = null
+        if (read) {
+            out = ByteBuffer.allocateDirect(widthPx * heightPx * 4).order(ByteOrder.nativeOrder())
+            renderer.readPixels(0, 0, widthPx, heightPx, Texture.PixelBufferDescriptor(out, Texture.Format.RGBA, Texture.Type.UBYTE))
+        }
+        renderer.endFrame()
+        engine.flushAndWait()
+        capturedFrames++
+        return out
     }
 
     private var nativeFootprint = 0L
@@ -515,7 +556,8 @@ class FilamentCityRenderer(
 
     /** Pede as superfícies do preset (thread de fundo) e o IBL da fase. */
     private fun requestAssets() {
-        val ex = worker ?: return
+        val ex = worker
+        if (ex == null && !syncAssets) return
         if (!ProceduralAssetsNative.isLoaded || level == EffectLevel.NONE) return
         val gen = generation
         for (kind in WorldMaterials.surfacesFor(preset)) {
@@ -526,6 +568,13 @@ class FilamentCityRenderer(
                 else -> SECONDARY_TEX
             }
             val withEmissive = kind == ProceduralAssetsNative.FACADE || kind == ProceduralAssetsNative.BILLBOARD || kind == ProceduralAssetsNative.COFFER
+            if (ex == null) {
+                // modo captura: gera e envia na própria thread do motor
+                val d = WorldGpu.generateSurface(kind, size, 0x6172A5L + kind * 7919L) ?: continue
+                runCatching { WorldGpu.upload(engine, d, withEmissive) }.onSuccess { surfaces[kind] = it }
+                    .onFailure { Log.w(TAG, "envio da superfície $kind falhou", it) }
+                continue
+            }
             ex.execute {
                 val d = WorldGpu.generateSurface(kind, size, 0x6172A5L + kind * 7919L) ?: return@execute
                 main.post {
@@ -537,6 +586,7 @@ class FilamentCityRenderer(
                 }
             }
         }
+        if (ex == null) { refreshMaterials(); Log.i(TAG, "captura: superfícies de ${preset.name} enviadas (${surfaces.size})") }
     }
 
     private fun refreshMaterials() {
@@ -548,6 +598,15 @@ class FilamentCityRenderer(
         if (ibls.containsKey(ph)) return
         if (!ProceduralAssetsNative.isLoaded) return
         val overcast = if (ph == TimePhase.INTERIOR) 0f else 0.62f
+        if (syncAssets) {
+            val face = profile().iblFaceSize
+            WorldGpu.generateIbl(ph, phaseSunDir(ph), overcast, face, 48)?.let { d ->
+                runCatching { WorldGpu.uploadIbl(engine, d, phaseLight(ph).iblLux) }
+                    .onSuccess { ibls[ph] = it; Log.i(TAG, "captura: IBL ${ph.label} ${face}² + SH3") }
+                    .onFailure { Log.w(TAG, "IBL ${ph.label} ${face}² falhou", it) }
+            }
+            return
+        }
         // 32² síncrono (≈ poucos ms) para nunca renderizar sem luz ambiente; 256² chega em seguida
         WorldGpu.generateIbl(ph, phaseSunDir(ph), overcast, 32, 16)?.let { d ->
             runCatching { WorldGpu.uploadIbl(engine, d, phaseLight(ph).iblLux) }
@@ -1054,7 +1113,7 @@ class FilamentCityRenderer(
         val w = world ?: return
         val tm = engine.transformManager
         val k = (dt * 6f).coerceAtMost(1f)
-        val tps = SimulationHub.status.value.effectiveTps.toFloat()
+        val tps = tpsOverride ?: SimulationHub.status.value.effectiveTps.toFloat()
         val now = System.nanoTime()
         val eye = pose.eye
         for ((id, c) in citizens) {
