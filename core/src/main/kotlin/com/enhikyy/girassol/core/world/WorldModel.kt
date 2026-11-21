@@ -19,7 +19,7 @@ import com.enhikyy.girassol.core.forge.LoraSample
 import kotlinx.serialization.Serializable
 
 /** Versão das regras do mundo. Eventos de versões anteriores mantêm suas regras históricas. */
-const val CURRENT_RULES_VERSION = 12
+const val CURRENT_RULES_VERSION = 13
 
 @Serializable
 enum class DistrictType(val label: String) {
@@ -356,7 +356,7 @@ data class WorldMetrics(
 @Serializable
 data class WorldState(
     val seed: Long,
-    val rulesVersion: Int = CURRENT_RULES_VERSION,
+    var rulesVersion: Int = CURRENT_RULES_VERSION,
     var tick: Long = 0L,
     var wallClockUtcAtLastTick: Long = 0L,
     val districtSize: Int = DISTRICT_SIZE,
