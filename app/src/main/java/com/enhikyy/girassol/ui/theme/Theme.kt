@@ -66,8 +66,10 @@ object Lumon {
 
 data class TypographyPreferences(val scale: Float = 1f, val weight: Int = 400, val tracking: Float = 0f, val lineHeight: Float = 1.25f, val preset: String = "kodak")
 data class TypographyPreset(val key: String, val label: String, val scale: Float, val weight: Int, val tracking: Float, val lineHeight: Float)
+@OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
 object TypographyFontCache {
     private val cache = LruCache<String, FontVariation.Settings>(64)
+    private val families = LruCache<Int, FontFamily>(32)
     @OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
     fun settings(weight: Float, width: Float = 100f): FontVariation.Settings {
         val w = (round(weight / 25f) * 25f).coerceIn(300f, 800f)
@@ -75,7 +77,14 @@ object TypographyFontCache {
         val key = "$w:$wd"
         return cache.get(key) ?: FontVariation.Settings(FontVariation.weight(w), FontVariation.width(wd)).also { cache.put(key, it) }
     }
+    fun family(weight: Float): FontFamily {
+        val quantized = (round(weight / 25f) * 25f).toInt().coerceIn(300, 800)
+        return families.get(quantized) ?: FontFamily(
+            Font(R.font.instrument_sans, FontWeight(quantized), variationSettings = settings(quantized.toFloat()))
+        ).also { families.put(quantized, it) }
+    }
     fun size(): Int = cache.size()
+    fun familySize(): Int = families.size()
 }
 object TypographyStudioController {
     private const val PREFS = "girassol_typography"
@@ -144,7 +153,7 @@ val InstrumentSans = FontFamily(instrument(FontWeight.Normal), instrument(FontWe
 val JetBrainsMono = FontFamily(jetbrains(FontWeight.Normal), jetbrains(FontWeight.Medium), jetbrains(FontWeight.Bold))
 private val base = Typography()
 private fun TextStyle.ui(p: TypographyPreferences) = copy(
-    fontFamily = InstrumentSans, fontSize = fontSize * p.scale, fontWeight = FontWeight(p.weight),
+    fontFamily = TypographyFontCache.family(p.weight.toFloat()), fontSize = fontSize * p.scale, fontWeight = FontWeight(p.weight),
     letterSpacing = letterSpacing + p.tracking.sp, lineHeight = lineHeight * p.lineHeight
 )
 private fun typographyFor(p: TypographyPreferences) = Typography(

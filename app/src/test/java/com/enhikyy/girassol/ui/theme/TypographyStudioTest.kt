@@ -4,6 +4,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.enhikyy.girassol.core.ui.NativeThemes
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertSame
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -39,5 +40,7 @@ class TypographyStudioTest {
     @Test fun variationCacheIsBounded() {
         repeat(300) { TypographyFontCache.settings(300f + it, 75f + it % 70) }
         assertTrue(TypographyFontCache.size() <= 64)
+        assertSame(TypographyFontCache.family(410f), TypographyFontCache.family(412f))
+        assertTrue(TypographyFontCache.familySize() <= 32)
     }
 }

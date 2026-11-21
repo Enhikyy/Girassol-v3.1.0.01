@@ -103,6 +103,11 @@ class MainActivity : ComponentActivity() {
         if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) GlassPerformanceController.load(this)
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) GlassPerformanceController.load(this)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()

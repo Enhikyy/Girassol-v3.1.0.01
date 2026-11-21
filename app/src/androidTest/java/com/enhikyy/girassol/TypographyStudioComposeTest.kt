@@ -30,7 +30,7 @@ class TypographyStudioComposeTest {
         compose.onNodeWithText("Typography Studio").assertIsDisplayed()
         listOf("typography_scale","typography_weight","typography_tracking","typography_line_height").forEach { compose.onNodeWithTag(it).assertIsDisplayed() }
         compose.onNodeWithTag("typography_preset_kodak").performClick()
-        compose.onNodeWithTag("typography_save_preset").assertIsDisplayed()
+        compose.onNodeWithTag("typography_save_preset").assertIsDisplayed().performClick()
     }
     @Test fun liquidGlassComposesAcrossAllHardwareTiers() {
         var tier by mutableStateOf(GlassTier.LOW)
