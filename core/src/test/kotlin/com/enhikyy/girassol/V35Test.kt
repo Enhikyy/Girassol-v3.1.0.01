@@ -341,3 +341,26 @@ class CitizenGrowthTest {
         assertTrue(com.enhikyy.girassol.core.world.CitizenGrowth.gaitCyclesPerTick(0.3, 0.4, baby) > com.enhikyy.girassol.core.world.CitizenGrowth.gaitCyclesPerTick(0.3, 0.4, adult))
     }
 }
+
+class ThemeContrastTest {
+    @org.junit.Test
+    fun quinzeTemasNativosPassamWcagAA() {
+        val themes = com.enhikyy.girassol.core.ui.NativeThemes.ALL
+        org.junit.Assert.assertEquals(15, themes.size)
+        org.junit.Assert.assertEquals(15, themes.map { it.key }.toSet().size)
+        val fails = themes.flatMap { com.enhikyy.girassol.core.ui.Wcag.audit(it) }.filterNot { it.passesAA }
+        org.junit.Assert.assertTrue("abaixo de 4,5:1: " + fails.joinToString { "${it.theme}.${it.role}/${it.surface}=${"%.2f".format(it.ratio)}" }, fails.isEmpty())
+        themes.forEach { t -> org.junit.Assert.assertTrue("${t.key}: superfície deve ser translúcida", (t.surface ushr 24) < 0xFF) }
+    }
+
+    @org.junit.Test
+    fun calculadoraWcagConfereComValoresConhecidos() {
+        val w = com.enhikyy.girassol.core.ui.Wcag
+        org.junit.Assert.assertEquals(21.0, w.contrast(0xFFFFFFFFL, 0xFF000000L), 1e-9)
+        org.junit.Assert.assertEquals(1.0, w.contrast(0xFF777777L, 0xFF777777L), 1e-9)
+        // #767676 sobre branco é o cinza AA clássico (4,54:1)
+        org.junit.Assert.assertEquals(4.54, w.contrast(0xFF767676L, 0xFFFFFFFFL), 0.01)
+        // alfa 0x80 (128/255) de preto sobre branco → #7F7F7F
+        org.junit.Assert.assertEquals(0xFF7F7F7FL, w.composite(0x80000000L, 0xFFFFFFFFL))
+    }
+}

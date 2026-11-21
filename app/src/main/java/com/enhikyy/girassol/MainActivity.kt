@@ -85,6 +85,7 @@ class MainActivity : ComponentActivity() {
         }
         // GL_RENDERER/driver + nível de efeito: cache, GL por software ou sonda isolada.
         com.enhikyy.girassol.render3d.GpuCalibration.ensure(this)
+        com.enhikyy.girassol.ui.theme.ThemeController.load(this)
         setContent { GirassolTheme { GirassolApp() } }
     }
 }

@@ -181,6 +181,10 @@ fun SystemScreen() {
                 if (status.lastMessage.isNotEmpty()) Text(status.lastMessage, style = MaterialTheme.typography.bodySmall, color = Lumon.Teal)
             }
         }
+        item { HashChainPanel(dash) }
+        item { MeshSyncPanel(dash) }
+        item { ThemesPanel() }
+        item { SectionCard("Voz dos cidadãos") { PocketTtsToggle() } }
         item {
             SectionCard("Zona de perigo") {
                 Button(onClick = { confirmReset = true }, colors = ButtonDefaults.buttonColors(containerColor = Lumon.Danger)) { Text("Reiniciar mundo") }

@@ -67,7 +67,7 @@ fun MindScreen() {
     val mt = m.metrics
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
-            SectionCard("Motor cognitivo híbrido · llama.cpp + GBNF") {
+            SectionCard("Motor cognitivo híbrido · llama.cpp + ${llm.grammarBackend.ifEmpty { "GBNF" }}") {
                 val stColor = when (llm.status) { LlmStatus.READY, LlmStatus.BUSY -> Lumon.Teal; LlmStatus.ERROR -> Lumon.Danger; else -> Lumon.Sunflower }
                 KeyValue("Estado", llm.status.label, stColor)
                 KeyValue("Modelo", llm.modelName.ifEmpty { "nenhum (modo econômico: SymbolicLookahead)" })
@@ -88,10 +88,13 @@ fun MindScreen() {
                     OutlinedButton(enabled = llm.modelName.isNotEmpty(), onClick = { LocalLlmManager.removeModel(context) }, modifier = Modifier.weight(1f)) { Text("Remover") }
                 }
                 if (importMsg.isNotEmpty()) Text(importMsg, style = MaterialTheme.typography.bodySmall, color = Lumon.Teal)
-                Text("Saída restrita por gramática GBNF a JSON {acao, pensamento, fala}; decisões entram no log de eventos e são aplicadas no estágio 1 do tick seguinte. Sem modelo, sob calor ou pressão de memória, o deliberador simbólico assume.",
+                Text("Saída restrita por gramática (llguidance/Lark quando compilado, senão GBNF estrita) a JSON {acao, pensamento, fala}; decisões entram no log de eventos e são aplicadas no estágio 1 do tick seguinte. Sem modelo, sob calor ou pressão de memória, o deliberador simbólico assume.",
                     style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
             }
         }
+        item { LlmV35Panel() }
+        item { KnowledgeLibraryPanel(d) }
+        item { FunctionalSystemsPanel(d) }
         item {
             val v = m.v34
             SectionCard("Memória episódica em 2 estágios", Modifier.testTag("v34_memory")) {

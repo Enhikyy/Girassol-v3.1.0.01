@@ -23,11 +23,11 @@ data class VoiceStatus(
 )
 
 /**
- * Vozes dos cidadãos. O pipeline Sherpa-ONNX (Pocket-TTS/Kokoro + SenseVoice) não é
- * empacotado para manter o APK < 14 MB; o caminho usado é o TextToSpeech do Android com
- * uma voz pt-BR **offline** (isNetworkConnectionRequired = false). A fala é posicionada
- * em estéreo (KEY_PARAM_PAN) pela posição contínua do cidadão e, enquanto toca, abaixa
- * a trilha Trautonium do sintetizador AAudio (audio ducking).
+ * Vozes dos cidadãos. Padrão: TextToSpeech do Android com voz pt-BR **offline**
+ * (isNetworkConnectionRequired = false). Opcional (v3.5): Pocket-TTS neural do Sherpa-ONNX
+ * embutido no APK com modelos ([PocketTtsVoice], centrado em inglês). Nos dois caminhos a fala
+ * é posicionada em estéreo pela posição do cidadão, abaixa a trilha Trautonium (ducking) e a
+ * amplitude RMS vai para [VoiceAmplitude] (boca e gestos sincronizados no Filament).
  */
 object CitizenVoice {
     private const val TAG = "GirassolTTS"
@@ -35,11 +35,14 @@ object CitizenVoice {
     private var tts: TextToSpeech? = null
     @Volatile private var ready = false
     @Volatile private var lastSpeakMs = 0L
+    @Volatile var usePocketTts = false
+    @Volatile private var appCtx: Context? = null
     private val _status = MutableStateFlow(VoiceStatus())
     val status: StateFlow<VoiceStatus> = _status.asStateFlow()
 
     fun setEnabled(context: Context, on: Boolean) {
         val app = context.applicationContext
+        appCtx = app
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             if (on && tts == null) start(app)
             if (!on && tts != null) stop()
@@ -64,6 +67,9 @@ object CitizenVoice {
             t.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) = duck(true)
                 override fun onDone(utteranceId: String?) = duck(false)
+                override fun onAudioAvailable(utteranceId: String?, audio: ByteArray?) {
+                    if (utteranceId != null && audio != null) VoiceAmplitude.pushPcm16(utteranceId.substringBeforeLast('-'), audio)
+                }
                 @Deprecated("API antiga", ReplaceWith("onError(utteranceId, code)"))
                 override fun onError(utteranceId: String?) = duck(false)
                 override fun onError(utteranceId: String?, errorCode: Int) = duck(false)
@@ -90,6 +96,14 @@ object CitizenVoice {
 
     /** Fala uma frase (limite de uma a cada [MIN_GAP_MS]); retorna se foi enfileirada. */
     fun speak(id: String, text: String, pan: Float): Boolean {
+        val ctx = appCtx
+        if (usePocketTts && ctx != null && PocketTtsVoice.available(ctx)) {
+            val now = System.currentTimeMillis()
+            if (now - lastSpeakMs < MIN_GAP_MS) { _status.update { it.copy(skipped = it.skipped + 1) }; return false }
+            val ok = PocketTtsVoice.speak(ctx, id, text, pan) { speaking -> duck(speaking) }
+            if (ok) { lastSpeakMs = now; _status.update { it.copy(spoken = it.spoken + 1, engine = "Pocket-TTS (Sherpa-ONNX)") } }
+            return ok
+        }
         val t = tts
         if (t == null || !ready || text.isBlank()) return false
         val now = System.currentTimeMillis()

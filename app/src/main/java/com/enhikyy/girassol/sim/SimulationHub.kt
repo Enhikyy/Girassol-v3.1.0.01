@@ -99,6 +99,10 @@ object SimulationHub {
             com.enhikyy.girassol.perf.AdpfHints.init(app)
             LocalLlmManager.init(app)
             LocalLlmManager.setEnabled(NativeModules.toggles.value.localLlm)
+            // v3.5: modelo rápido Q4_0 embutido (APK direto / pack_rapido) é provisionado no 1º uso
+            if (LocalLlmManager.engineCompiled) scope.launch(Dispatchers.IO) {
+                runCatching { com.enhikyy.girassol.llm.ModelProvisioner.autoProvision(app) }
+            }
             ports = buildPorts(NativeModules.toggles.value)
             writer = PersistenceWriter(app)
             val restored = writer.loadLatestSnapshot()
