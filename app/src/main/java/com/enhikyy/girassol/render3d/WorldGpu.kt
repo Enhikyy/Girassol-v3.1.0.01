@@ -45,8 +45,17 @@ internal object WorldGpu {
         return vb
     }
 
-    val repeatSampler: TextureSampler = TextureSampler(TextureSampler.MinFilter.LINEAR_MIPMAP_LINEAR, TextureSampler.MagFilter.LINEAR,
+    /**
+     * GL por software (SwiftShader do emulador): filtragem anisotrópica e milhares de envios de
+     * mips linha a linha travam o tradutor GL do emulador. Nesse caso: anisotropia 1 e mips de
+     * ORM/normal gerados pela GPU (generateMipmaps). Em GPU real: anisotropia 8 e cadeia do C++.
+     */
+    @Volatile var softwareGl = false
+    private val hwSampler = TextureSampler(TextureSampler.MinFilter.LINEAR_MIPMAP_LINEAR, TextureSampler.MagFilter.LINEAR,
         TextureSampler.WrapMode.REPEAT).apply { anisotropy = 8f }
+    private val swSampler = TextureSampler(TextureSampler.MinFilter.LINEAR_MIPMAP_LINEAR, TextureSampler.MagFilter.LINEAR,
+        TextureSampler.WrapMode.REPEAT)
+    val repeatSampler: TextureSampler get() = if (softwareGl) swSampler else hwSampler
 
     /** Textura 1 × 1 RGBA8 (sRGB ou linear). */
     fun solid(engine: Engine, r: Int, g: Int, b: Int, a: Int, srgb: Boolean): Texture {
@@ -89,6 +98,13 @@ internal object WorldGpu {
             return t
         }
         fun chain(buf: ByteBuffer): Texture {
+            if (softwareGl) {
+                val t = Texture.Builder().width(d.size).height(d.size).levels(levels).sampler(Texture.Sampler.SAMPLER_2D)
+                    .format(Texture.InternalFormat.RGBA8).usage(Texture.Usage.DEFAULT or Texture.Usage.GEN_MIPMAPPABLE).build(engine)
+                setLevel(engine, t, 0, d.size, 0, buf, 0, 4, Texture.Type.UBYTE)
+                t.generateMipmaps(engine)
+                return t
+            }
             val t = Texture.Builder().width(d.size).height(d.size).levels(levels).sampler(Texture.Sampler.SAMPLER_2D)
                 .format(Texture.InternalFormat.RGBA8).build(engine)
             var s = d.size

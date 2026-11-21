@@ -37,13 +37,43 @@ P
 }
 dismiss_anr() { dump; local w; w=$(find_xy "Wait"); [ -n "$w" ] && adb shell input tap $w && echo "diálogo ANR do sistema dispensado"; }
 tap_text() { dump; local b; b=$(find_xy "$1"); [ -n "$b" ] && adb shell input tap $b && echo "toque em '$1' ($b)" || echo "nó '$1' não encontrado"; }
-waitstep() { for i in $(seq 1 300); do grep -q "PASSO $1" "$OUT/logcat.txt" && return 0; sleep 1; done; echo "passo $1 não chegou"; }
+waitstep() { [ "${DEAD:-0}" = 1 ] && return 1; for i in $(seq 1 300); do grep -q "PASSO $1" "$OUT/logcat.txt" && return 0; [ $((i % 30)) = 0 ] && ! timeout 20 adb shell true >/dev/null 2>&1 && { DEAD=1; echo "emulador sem resposta"; return 1; }; sleep 1; done; echo "passo $1 não chegou"; }
 shot() { dismiss_anr; adb exec-out screencap -p > "$OUT/$1.png"; echo "captura $1"; }
 W=$(adb shell wm size | grep -oE '[0-9]+x[0-9]+' | tail -1); SW=${W%x*}; SH=${W#*x}
 CX=$((SW/2)); CY=$((SH*45/100))
 step() { adb shell am broadcast -a girassol.demo.STEP --es step "$1" >/dev/null; [ "$1" = pick ] || waitstep "OK_$1"; }
 waitlong() { for i in $(seq 1 "$2"); do grep -q "PASSO $1" "$OUT/logcat.txt" && return 0; sleep 2; done; echo "passo $1 não chegou"; }
 
+# ---- renderizações offline quadro a quadro (CinematicCapture), com detecção de travamento
+alive() { timeout 20 adb shell true >/dev/null 2>&1; }
+waitcap() { # $1 = tag; desiste se o aparelho parar de responder ou se nada novo aparecer no log por 8 min
+  local last=0 since=$(date +%s)
+  while true; do
+    grep -q "PASSO CAPTURA_OK_$1" "$OUT/logcat.txt" && return 0
+    local sz; sz=$(stat -c %s "$OUT/logcat.txt")
+    if [ "$sz" != "$last" ]; then last=$sz; since=$(date +%s); fi
+    if [ $(( $(date +%s) - since )) -gt 480 ] || ! alive; then echo "captura $1: emulador travou/sem progresso"; DEAD=1; return 1; fi
+    sleep 10
+  done
+}
+BEST=""; DEAD=0
+getcap() {
+  local tag=$1
+  waitcap $tag || return 1
+  CAP=$(grep -o "PASSO CAPTURA_OK_$tag [0-9]* [^ ]*" "$OUT/logcat.txt" | tail -1 | awk '{print $4}')
+  N=$(grep -o "PASSO CAPTURA_OK_$tag [0-9]*" "$OUT/logcat.txt" | tail -1 | awk '{print $3}')
+  echo "captura $tag: $N quadros em $CAP"
+  [ "${N:-0}" -gt 0 ] || return 0
+  mkdir -p "$OUT/render_$tag"
+  adb pull "$CAP/." "$OUT/render_$tag" >/dev/null 2>&1 || true
+  if command -v ffmpeg >/dev/null && [ -f "$OUT/render_$tag/quadros/f_0000.png" ]; then
+    ffmpeg -y -loglevel error -framerate 15 -i "$OUT/render_$tag/quadros/f_%04d.png" -vf "scale=720:1280:flags=lanczos" -c:v libx264 -pix_fmt yuv420p -crf 18 "$OUT/render_$tag/biosfera3d_$tag.mp4"
+  fi
+  rm -rf "$OUT/render_$tag/quadros"
+  BEST=$tag
+}
+getcap minimal && getcap reduced
+[ "$DEAD" = 1 ] && echo "emulador travado; pulando a interface ao vivo"
 # ---- 2) app ao vivo: interface (barras, cartão do cidadão, HUD do POV, 2D)
 waitstep POVOADO; sleep 3; dismiss_anr
 tap_text "Biosfera"; sleep 15
@@ -63,37 +93,7 @@ step 3d; step orbit
 wait $RP 2>/dev/null; sleep 3
 adb pull /sdcard/aovivo.mp4 "$OUT/biosfera3d_app_ao_vivo.mp4" >/dev/null 2>&1 || true
 step fim
-# ---- renderizações offline quadro a quadro (CinematicCapture), nível a nível, com detecção de travamento
-alive() { timeout 20 adb shell true >/dev/null 2>&1; }
-waitcap() { # $1 = tag; desiste se o aparelho parar de responder ou se nada novo aparecer no log por 8 min
-  local last=0 since=$(date +%s)
-  while true; do
-    grep -q "PASSO CAPTURA_OK_$1" "$OUT/logcat.txt" && return 0
-    local sz; sz=$(stat -c %s "$OUT/logcat.txt")
-    if [ "$sz" != "$last" ]; then last=$sz; since=$(date +%s); fi
-    if [ $(( $(date +%s) - since )) -gt 480 ] || ! alive; then echo "captura $1: emulador travou/sem progresso"; return 1; fi
-    sleep 10
-  done
-}
-BEST=""
-for tag in minimal reduced full; do
-  if waitcap $tag; then
-    CAP=$(grep -o "PASSO CAPTURA_OK_$tag [0-9]* [^ ]*" "$OUT/logcat.txt" | tail -1 | awk '{print $4}')
-    N=$(grep -o "PASSO CAPTURA_OK_$tag [0-9]*" "$OUT/logcat.txt" | tail -1 | awk '{print $3}')
-    echo "captura $tag: $N quadros em $CAP"
-    if [ "${N:-0}" -gt 0 ]; then
-      mkdir -p "$OUT/render_$tag"
-      adb pull "$CAP/." "$OUT/render_$tag" >/dev/null 2>&1 || true
-      if command -v ffmpeg >/dev/null && [ -f "$OUT/render_$tag/quadros/f_0000.png" ]; then
-        ffmpeg -y -loglevel error -framerate 15 -i "$OUT/render_$tag/quadros/f_%04d.png" -vf "scale=720:1280:flags=lanczos" -c:v libx264 -pix_fmt yuv420p -crf 18 "$OUT/render_$tag/biosfera3d_$tag.mp4"
-      fi
-      rm -rf "$OUT/render_$tag/quadros"
-      BEST=$tag
-    fi
-  else
-    break
-  fi
-done
+[ "$DEAD" = 1 ] || getcap full
 if [ -n "$BEST" ]; then
   echo "melhor nível renderizado: $BEST"
   cp "$OUT/render_$BEST"/*.png "$OUT/" 2>/dev/null || true

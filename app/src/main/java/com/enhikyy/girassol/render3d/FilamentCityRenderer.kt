@@ -325,6 +325,7 @@ class FilamentCityRenderer(
 
     private fun initCore() {
         check(ensureFilament()) { "biblioteca Filament não carregou" }
+        WorldGpu.softwareGl = isSoftwareGl()
         val heapBefore = android.os.Debug.getNativeHeapAllocatedSize()
         engine = Engine.create()
         renderer = engine.createRenderer()
@@ -566,7 +567,7 @@ class FilamentCityRenderer(
                 ProceduralAssetsNative.WET_ASPHALT, ProceduralAssetsNative.FACADE, ProceduralAssetsNative.CARPET, ProceduralAssetsNative.COFFER ->
                     if (level == EffectLevel.FULL) PRIMARY_TEX else SECONDARY_TEX
                 else -> SECONDARY_TEX
-            }
+            }.let { if (WorldGpu.softwareGl) minOf(it, 256) else it }
             val withEmissive = kind == ProceduralAssetsNative.FACADE || kind == ProceduralAssetsNative.BILLBOARD || kind == ProceduralAssetsNative.COFFER
             if (ex == null) {
                 // modo captura: gera e envia na própria thread do motor
@@ -599,7 +600,7 @@ class FilamentCityRenderer(
         if (!ProceduralAssetsNative.isLoaded) return
         val overcast = if (ph == TimePhase.INTERIOR) 0f else 0.62f
         if (syncAssets) {
-            val face = profile().iblFaceSize
+            val face = if (WorldGpu.softwareGl) minOf(64, profile().iblFaceSize) else profile().iblFaceSize
             WorldGpu.generateIbl(ph, phaseSunDir(ph), overcast, face, 48)?.let { d ->
                 runCatching { WorldGpu.uploadIbl(engine, d, phaseLight(ph).iblLux) }
                     .onSuccess { ibls[ph] = it; Log.i(TAG, "captura: IBL ${ph.label} ${face}² + SH3") }
@@ -613,7 +614,7 @@ class FilamentCityRenderer(
                 .onSuccess { ibls[ph] = it }.onFailure { Log.w(TAG, "IBL ${ph.label} 32² falhou", it) }
         }
         val ex = worker ?: return
-        val face = profile().iblFaceSize
+        val face = if (WorldGpu.softwareGl) minOf(64, profile().iblFaceSize) else profile().iblFaceSize
         if (face <= 32 || !iblPending.add(ph)) return
         val gen = generation
         ex.execute {
