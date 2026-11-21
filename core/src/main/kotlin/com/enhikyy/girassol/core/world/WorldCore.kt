@@ -1224,7 +1224,12 @@ class WorldCore(
             val existing = c.memories.firstOrNull { it.layer == MemoryLayer.SEMANTIC && it.content == summary }
             if (existing != null) {
                 // Migra nós semânticos antigos (sem arestas) quando as fontes ainda existem.
-                relation?.sourceEpisodeIds?.let(existing.linkedMemoryIds::addAll)
+                relation?.let {
+                    existing.linkedMemoryIds.addAll(it.sourceEpisodeIds)
+                    existing.tags = existing.tags + it.topicTag
+                    existing.entityIds = existing.entityIds + it.entityIds
+                    existing.bits = null
+                }
             } else {
                 val tags = linkedSetOf("SCHEMA").apply { relation?.topicTag?.let { add(it) } }
                 c.memories += AssociativeMemoryNode(
@@ -1250,7 +1255,12 @@ class WorldCore(
             val relation = proceduralRelations[macro]
             val existing = c.memories.firstOrNull { it.layer == MemoryLayer.PROCEDURAL && it.content == macro }
             if (existing != null) {
-                relation?.sourceEpisodeId?.let(existing.linkedMemoryIds::add)
+                relation?.let {
+                    existing.linkedMemoryIds.add(it.sourceEpisodeId)
+                    existing.tags = existing.tags + it.tags
+                    existing.entityIds = existing.entityIds + it.entityIds
+                    existing.bits = null
+                }
             } else {
                 val tags = linkedSetOf("MACRO").apply { addAll(relation?.tags.orEmpty()) }
                 c.memories += AssociativeMemoryNode(
