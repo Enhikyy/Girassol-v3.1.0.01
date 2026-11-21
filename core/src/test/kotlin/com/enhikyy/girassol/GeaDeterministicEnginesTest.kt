@@ -94,6 +94,26 @@ class GeaDeterministicEnginesTest {
     }
 
     @Test
+    fun `rsi gate fails closed on missing or non finite evaluation evidence`() {
+        val gate = BoundedRsiPromotionGate()
+        val baseline = CognitivePolicyGenome(version = 1)
+        val candidate = baseline.copy(version = 2, epistemicExplorationWeight = 0.90)
+        val baseMetrics = ShadowReplayMetrics(1.2, 0.70, 0.20, 0.70, 8.0, 0)
+
+        assertTrue(gate.computeBrierScore(emptyList()).isNaN())
+
+        val invalidMetrics = baseMetrics.copy(meanFreeEnergy = Double.POSITIVE_INFINITY)
+        val decision = gate.evaluatePromotion(baseline, candidate, baseMetrics, invalidMetrics)
+        assertFalse(decision.promoted)
+        assertTrue(decision.reason.contains("não finitas"))
+        assertEquals(-1.0, decision.netFitnessGain, 0.0)
+
+        val invalidCalibration = baseMetrics.copy(brierScore = Double.NaN)
+        val calibrationDecision = gate.evaluatePromotion(baseline, candidate, baseMetrics, invalidCalibration)
+        assertFalse(calibrationDecision.promoted)
+    }
+
+    @Test
     fun `pedagogy bkt fsrs irt voyager and diploid dominance work deterministically`() {
         var skill = SkillMasteryState(skillId = "forjar_ferramenta")
         repeat(4) { i ->
