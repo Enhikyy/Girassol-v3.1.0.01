@@ -164,7 +164,7 @@ fun WorldScreen(onOpenCitizen: (String) -> Unit, onOpenMenu: () -> Unit = {}) {
         }
 
         val agent = selected?.let { id -> s.agents.firstOrNull { it.id == id } }
-        if (agent != null) AgentCard(agent, Modifier.align(Alignment.BottomCenter).padding(bottom = 92.dp)) { onOpenCitizen(agent.id) }
+        if (agent != null) AgentCard(agent, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 92.dp)) { onOpenCitizen(agent.id) }
         else if (s.population == 0) {
             Button(
                 onClick = { importer(null) }, shape = Shapes.Capsule,

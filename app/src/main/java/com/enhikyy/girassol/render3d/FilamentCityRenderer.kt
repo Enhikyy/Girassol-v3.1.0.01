@@ -87,6 +87,7 @@ class FilamentCityRenderer(
     var level: EffectLevel = initialLevel
         private set
     private var headless = false
+    private var framedPopulation = false
     private var lastSnapshot: WorldRenderSnapshot? = null
     private val fpsGovernor = FpsGovernor()
     /** Chamado quando o FPS fica abaixo do piso por tempo prolongado (thread principal). */
@@ -516,6 +517,13 @@ class FilamentCityRenderer(
             if (meshKey == Long.MIN_VALUE) { camera.targetX = s.widthTiles / 2f; camera.targetZ = s.widthTiles / 2f; camera.distance = (s.widthTiles * 0.9f).coerceIn(18f, 110f) }
             meshKey = key
             rebuildCity(s)
+        }
+        // v3.6: com poucos cidadãos (Adão e Eva), enquadra o grupo uma vez em vez do centro da cidade
+        if (!framedPopulation && s.agents.isNotEmpty() && s.agents.size <= 6) {
+            camera.targetX = s.agents.map { it.x + 0.5f }.average().toFloat()
+            camera.targetZ = s.agents.map { it.z + 0.5f }.average().toFloat()
+            camera.distance = 24f.coerceIn(camera.minDistance, camera.maxDistance)
+            framedPopulation = true
         }
         night = s.night
         applyDayNight()

@@ -128,7 +128,7 @@ private fun GirassolApp() {
                 Tab.BIOSFERA -> WorldScreen(onOpenCitizen = { selectedCitizen = it }, onOpenMenu = openMenu)
                 else -> Column(Modifier.fillMaxSize().statusBarsPadding()) {
                     TabHeader(tab.label, openMenu)
-                    Box(Modifier.fillMaxSize().padding(bottom = 84.dp)) {
+                    Box(Modifier.fillMaxSize().navigationBarsPadding().padding(bottom = 84.dp)) {
                         when (tab) {
                             Tab.CHAT -> ChatScreen(onOpenCitizen = { selectedCitizen = it })
                             Tab.EVOLUCAO -> EvolutionScreen(onOpenCitizen = { selectedCitizen = it })
@@ -141,7 +141,7 @@ private fun GirassolApp() {
             val sel = selectedCitizen
             if (sel != null) {
                 BackHandler { selectedCitizen = null }
-                Box(Modifier.fillMaxSize().background(Lumon.Background).statusBarsPadding().padding(bottom = 84.dp).testTag("citizen_overlay")) {
+                Box(Modifier.fillMaxSize().background(Lumon.Background).statusBarsPadding().navigationBarsPadding().padding(bottom = 84.dp).testTag("citizen_overlay")) {
                     CitizenDetailView(sel) { selectedCitizen = null }
                 }
             }
