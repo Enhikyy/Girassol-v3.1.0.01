@@ -29,8 +29,17 @@ class KotlinTsetlinMachine(
     val specificityS: Float = 3.5f,
     val thresholdT: Int = 8,
     private var rngState: Long = 42L,
-    private val taStates: IntArray = IntArray(numClauses * numFeatures * 2) { numStates.coerceAtLeast(2) }
+    private val taStates: IntArray = IntArray(checkedStateCount(numFeatures, numClauses)) { numStates.coerceAtLeast(2) }
 ) : ReflexClassifier {
+
+    init {
+        require(numFeatures > 0 && numClauses > 0) { "dimensões Tsetlin devem ser positivas" }
+        require(numStates in 2..(Int.MAX_VALUE / 2)) { "numStates fora do intervalo" }
+        require(thresholdT >= 1) { "thresholdT deve ser positivo" }
+        require(specificityS.isFinite() && specificityS >= 1.01f) { "specificityS inválido" }
+        require(taStates.size == checkedStateCount(numFeatures, numClauses))
+        require(taStates.all { it in 1..(numStates * 2) }) { "estado de autômato fora do intervalo" }
+    }
 
     private fun offset(c: Int) = c * numFeatures * 2
     private fun polarity(c: Int) = if (c % 2 == 0) 1 else -1
@@ -144,6 +153,13 @@ class KotlinTsetlinMachine(
         KotlinTsetlinMachine(numFeatures, numClauses, numStates, specificityS, thresholdT, rngState, taStates.copyOf())
 
     companion object {
+        private fun checkedStateCount(features: Int, clauses: Int): Int {
+            require(features > 0 && clauses > 0) { "dimensões Tsetlin devem ser positivas" }
+            val count = features.toLong() * clauses.toLong() * 2L
+            require(count <= Int.MAX_VALUE) { "dimensões Tsetlin excedem o espaço de endereçamento" }
+            return count.toInt()
+        }
+
         private const val MAGIC_V1 = 0x47525354
         private const val MAGIC_V2 = 0x32545347 // "GST2" em little-endian
         private const val FORMAT_VERSION = 2
