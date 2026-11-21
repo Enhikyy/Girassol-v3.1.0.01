@@ -40,6 +40,7 @@ Implementação feita do zero a partir do documento consolidado "PROJETO GIRASSO
 - Memória de trabalho: buffer ordenado de 5–9 referências por cidadão, persistido no snapshot do mundo; recuperação Hamming/RRF/BM25 mantém o contexto de trabalho individual entre decisões e reinicializações.
 - Consolidação semântica/procedural: nós `SCHEMA` e `SKILL_MACRO` preservam ligações aos episódios verificados e às entidades de origem (`linkedMemoryIds` / `entityIds`), com migração progressiva de nós legados durante o sono.
 - Economia emergente: escambo de alimento usa preço subjetivo derivado de necessidade, estoque, escassez e histórico do ledger; liquidação alimento/crédito é atômica e preserva a soma zero.
+- Migração de regras: snapshots antigos preservam eventos/hash-chain; ao abrir o mundo, o marcador de regras sobe para v13 e novos eventos registram a versão atual.
 - Anti-clarão Mali: ver `docs/RENDER_CALIBRATION.md`. Balões: no máximo 2, sem sobreposição, com fade-out.
 
 ## Novidades da v3.5.0.00
