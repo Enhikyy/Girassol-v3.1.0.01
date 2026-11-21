@@ -543,7 +543,9 @@ class FilamentCityRenderer(
         scene.addEntity(sunEntity)
         sunShadowKey = "${preset.name}/${level.name}"
         if (!interior) {
-            for (lamp in w.lamps.take(64)) {
+            // GL por software (SwiftShader): luzes pontuais (froxels) derrubam o emulador à noite —
+            // os postes ficam só com emissivo + glow
+            for (lamp in w.lamps.take(if (WorldGpu.softwareGl) 0 else 64)) {
                 val e = EntityManager.get().create()
                 LightManager.Builder(LightManager.Type.POINT).color(1.0f, 0.72f, 0.42f).intensity(0f)
                     .position(lamp.x, lamp.y, lamp.z).falloff(16f).castShadows(false).build(engine, e)

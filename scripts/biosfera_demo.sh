@@ -52,24 +52,32 @@ waitcap() { # $1 = tag; desiste se o aparelho parar de responder ou se nada novo
     grep -q "PASSO CAPTURA_OK_$1" "$OUT/logcat.txt" && return 0
     local sz; sz=$(stat -c %s "$OUT/logcat.txt")
     if [ "$sz" != "$last" ]; then last=$sz; since=$(date +%s); fi
+    # puxa os quadros já gravados a cada segmento concluído (se o emulador cair, não se perde tudo)
+    local segs; segs=$(grep -c "PASSO CAPTURA_SEGMENTO $1 " "$OUT/logcat.txt")
+    if [ "$segs" != "${PULLED[$1]:-0}" ]; then PULLED[$1]=$segs; mkdir -p "$OUT/render_$1"
+      timeout 120 adb pull "/sdcard/Android/data/com.enhikyy.girassol/files/captura_$1/." "$OUT/render_$1" >/dev/null 2>&1 || true; fi
     if [ $(( $(date +%s) - since )) -gt 480 ] || ! alive; then echo "captura $1: emulador travou/sem progresso"; DEAD=1; return 1; fi
     sleep 10
   done
 }
-BEST=""; DEAD=0
+BEST=""; DEAD=0; declare -A PULLED
+encode() {
+  local tag=$1
+  if command -v ffmpeg >/dev/null && [ -f "$OUT/render_$tag/quadros/f_0000.png" ]; then
+    ffmpeg -y -loglevel error -framerate 15 -i "$OUT/render_$tag/quadros/f_%04d.png" -vf "scale=720:1280:flags=lanczos" -c:v libx264 -pix_fmt yuv420p -crf 18 "$OUT/render_$tag/biosfera3d_$tag.mp4" || true
+  fi
+  rm -rf "$OUT/render_$tag/quadros"
+}
 getcap() {
   local tag=$1
-  waitcap $tag || return 1
+  if ! waitcap $tag; then encode $tag; [ -f "$OUT/render_$tag/biosfera3d_$tag.mp4" ] && BEST=$tag; return 1; fi
   CAP=$(grep -o "PASSO CAPTURA_OK_$tag [0-9]* [^ ]*" "$OUT/logcat.txt" | tail -1 | awk '{print $4}')
   N=$(grep -o "PASSO CAPTURA_OK_$tag [0-9]*" "$OUT/logcat.txt" | tail -1 | awk '{print $3}')
   echo "captura $tag: $N quadros em $CAP"
   [ "${N:-0}" -gt 0 ] || return 0
   mkdir -p "$OUT/render_$tag"
   adb pull "$CAP/." "$OUT/render_$tag" >/dev/null 2>&1 || true
-  if command -v ffmpeg >/dev/null && [ -f "$OUT/render_$tag/quadros/f_0000.png" ]; then
-    ffmpeg -y -loglevel error -framerate 15 -i "$OUT/render_$tag/quadros/f_%04d.png" -vf "scale=720:1280:flags=lanczos" -c:v libx264 -pix_fmt yuv420p -crf 18 "$OUT/render_$tag/biosfera3d_$tag.mp4"
-  fi
-  rm -rf "$OUT/render_$tag/quadros"
+  encode $tag
   BEST=$tag
 }
 getcap minimal && getcap reduced
