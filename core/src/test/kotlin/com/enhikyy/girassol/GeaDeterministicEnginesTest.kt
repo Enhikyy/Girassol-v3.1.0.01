@@ -13,6 +13,7 @@ import com.enhikyy.girassol.core.memory.SubjectiveOpinion
 import com.enhikyy.girassol.core.rsi.BoundedRsiPromotionGate
 import com.enhikyy.girassol.core.rsi.CognitivePolicyGenome
 import com.enhikyy.girassol.core.rsi.RsiMutationProposal
+import com.enhikyy.girassol.core.rsi.RsiCoordinator
 import com.enhikyy.girassol.core.rsi.ShadowReplayMetrics
 import com.enhikyy.girassol.core.social.AdicoInstitutionRule
 import com.enhikyy.girassol.core.social.DeonticOperator
@@ -26,6 +27,7 @@ import com.enhikyy.girassol.core.world.PhysicalJobPipeline
 import com.enhikyy.girassol.core.world.SpatialStigmergyAndReservationBoard
 import com.enhikyy.girassol.core.world.StockFlowDoubleEntryLedger
 import com.enhikyy.girassol.core.world.ToilStatus
+import com.enhikyy.girassol.core.world.WorldCore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -67,6 +69,20 @@ class GeaDeterministicEnginesTest {
         val decision = gate.evaluatePromotion(baseGenome, candGenome, baseMetrics, validMetrics)
         assertTrue(decision.promoted)
         assertTrue(decision.netFitnessGain >= 0.025)
+    }
+
+    @Test
+    fun `rsi shadow replay without forecasts cannot promote a policy`() {
+        val core = WorldCore.create(seed = 505L)
+        val coordinator = RsiCoordinator(replayTicks = 8, cmaLambda = 2, cmaReplayTicks = 4)
+
+        val metrics = coordinator.shadowReplay(core.state, core.state.policy, ticks = 8)
+        assertTrue(metrics.brierScore.isNaN())
+        assertFalse(metrics.hasValidMeasurements())
+
+        val record = coordinator.runCycle(core)
+        assertFalse(record.decision.promoted)
+        assertTrue(record.decision.reason.contains("evidência"))
     }
 
     @Test
