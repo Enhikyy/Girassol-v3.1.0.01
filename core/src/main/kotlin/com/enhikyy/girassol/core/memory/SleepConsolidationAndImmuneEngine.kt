@@ -136,19 +136,10 @@ class FourLayerMemoryAndSleepEngine(
     private val maxNodesPerAgent: Int = 512,
     private val replayBatchSize: Int = 12
 ) {
-    private val workingSlots = ArrayDeque<AssociativeMemoryNode>()
+    /** O chamador possui o buffer; ele pertence ao cidadão e é serializado no WorldState. */
+    fun activeWorkingIds(workingMemoryIds: List<Long>): Set<Long> = workingMemoryIds.toSet()
 
-    fun clearWorkingMemory() = workingSlots.clear()
-
-    fun pushWorkingMemory(node: AssociativeMemoryNode) {
-        workingSlots.removeAll { it.id == node.id }
-        if (workingSlots.size >= workingMemoryCapacity) {
-            workingSlots.removeFirst()
-        }
-        workingSlots.addLast(node)
-    }
-
-    fun activeWorkingIds(): Set<Long> = workingSlots.map { it.id }.toSet()
+    fun workingMemorySize(workingMemoryIds: List<Long>): Int = workingMemoryIds.size
 
     /**
      * Recuperação em 2 estágios (ver [EpisodicIndex]): Hamming bit[256] seleciona os
@@ -163,15 +154,27 @@ class FourLayerMemoryAndSleepEngine(
         queryTags: Set<String>,
         queryEntities: Set<String>,
         topK: Int = 6,
-        workingCapacity: Int = workingMemoryCapacity
+        workingCapacity: Int = workingMemoryCapacity,
+        workingMemoryIds: MutableList<Long> = mutableListOf()
     ): RetrievalResult {
-        if (nodes.isEmpty()) return RetrievalResult(emptyList(), 0, 0)
+        if (nodes.isEmpty()) {
+            workingMemoryIds.clear()
+            return RetrievalResult(emptyList(), 0, 0)
+        }
+        val validMemoryIds = nodes.mapTo(HashSet()) { it.id }
+        workingMemoryIds.retainAll(validMemoryIds)
+        val cap = workingCapacity.coerceIn(5, 9)
+        val normalizedBuffer = workingMemoryIds.distinct().takeLast(cap)
+        if (normalizedBuffer != workingMemoryIds) {
+            workingMemoryIds.clear()
+            workingMemoryIds.addAll(normalizedBuffer)
+        }
         val qFeatures = EpisodicIndex.features(queryText, queryTags, queryEntities)
         val qBits = EpisodicIndex.simHash(qFeatures)
         val stage1 = nodes.indices.sortedWith(compareBy<Int> { EpisodicIndex.hamming(qBits, nodes[it].binaryEmbedding()) }.thenByDescending { nodes[it].id })
             .take(EpisodicIndex.STAGE1_K).map { nodes[it] }
         val qDense = EpisodicIndex.dense(qFeatures)
-        val activeWm = activeWorkingIds()
+        val activeWm = activeWorkingIds(workingMemoryIds)
         val cos = DoubleArray(stage1.size) { EpisodicIndex.cosine(qDense, EpisodicIndex.dense(stage1[it].features())).toDouble() }
         val corpus = nodes.map { EpisodicIndex.terms(it.content) + it.tags.map { t -> t.lowercase() } }
         val bm25 = EpisodicIndex.bm25(EpisodicIndex.terms(queryText) + queryTags.map { it.lowercase() },
@@ -188,14 +191,13 @@ class FourLayerMemoryAndSleepEngine(
         val hawkes = DoubleArray(stage1.size) { EpisodicIndex.hawkesIntensity(stage1[it].hawkesExcitation, stage1[it].hawkesLastTick, currentTick) }
         val fused = EpisodicIndex.rrf(listOf(cos, bm25, composite, hawkes), stage1.size)
         val chosen = stage1.indices.sortedWith(compareByDescending<Int> { fused[it] }.thenByDescending { stage1[it].id }).take(topK).map { stage1[it] }
-        val cap = workingCapacity.coerceIn(5, 9)
         for (node in chosen) {
             if (node.recentAccessTicks.size >= 16) node.recentAccessTicks.removeAt(0)
             node.recentAccessTicks.add(currentTick)
             EpisodicIndex.hawkesExcite(node, currentTick, node.salience)
-            workingSlots.removeAll { it.id == node.id }
-            while (workingSlots.size >= cap) workingSlots.removeFirst()
-            workingSlots.addLast(node)
+            workingMemoryIds.removeAll { it == node.id }
+            while (workingMemoryIds.size >= cap) workingMemoryIds.removeAt(0)
+            workingMemoryIds.add(node.id)
         }
         return RetrievalResult(chosen, stage1.size, nodes.size)
     }
@@ -205,10 +207,12 @@ class FourLayerMemoryAndSleepEngine(
         currentTick: Long,
         queryTags: Set<String>,
         queryEntities: Set<String>,
-        topK: Int = 6
-    ): List<AssociativeMemoryNode> = retrieveTwoStage(nodes, currentTick, queryTags.joinToString(" "), queryTags, queryEntities, topK).memories
-
-    fun workingMemorySize(): Int = workingSlots.size
+        topK: Int = 6,
+        workingMemoryIds: MutableList<Long> = mutableListOf()
+    ): List<AssociativeMemoryNode> = retrieveTwoStage(
+        nodes, currentTick, queryTags.joinToString(" "), queryTags, queryEntities,
+        topK = topK, workingMemoryIds = workingMemoryIds
+    ).memories
 
     /**
      * Sharp-Wave Ripple Replay: reproduz as sequências encadeadas (A-MEM) em ordem reversa
