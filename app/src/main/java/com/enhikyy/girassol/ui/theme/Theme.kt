@@ -82,7 +82,7 @@ object TypographyStudioController {
     private val defaults = TypographyPreferences()
     var preferences by mutableStateOf(defaults)
         private set
-    val presets = listOf(
+    private val builtInPresets = listOf(
         TypographyPreset("kodak", "Kodak Editorial", 1.00f, 450, 0.15f, 1.32f),
         TypographyPreset("swiss", "Swiss Modern", 0.98f, 500, -0.10f, 1.20f),
         TypographyPreset("terminal", "Terminal", 0.94f, 450, 0.35f, 1.18f),
@@ -90,6 +90,9 @@ object TypographyStudioController {
         TypographyPreset("compact", "Compacto", 0.90f, 450, -0.15f, 1.12f),
         TypographyPreset("accessibility", "Acessível", 1.20f, 600, 0.10f, 1.50f)
     )
+    private var customPreset by mutableStateOf<TypographyPreset?>(null)
+        private set
+    val presets: List<TypographyPreset> get() = builtInPresets + listOfNotNull(customPreset)
     fun load(context: Context) {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         preferences = TypographyPreferences(
@@ -99,6 +102,9 @@ object TypographyStudioController {
             p.getFloat("line_height", defaults.lineHeight).coerceIn(1.1f, 1.6f),
             p.getString("preset", defaults.preset) ?: defaults.preset
         )
+        customPreset = if (p.getBoolean("custom_enabled", false)) {
+            TypographyPreset("custom", "Meu preset", preferences.scale, preferences.weight, preferences.tracking, preferences.lineHeight)
+        } else null
     }
     fun update(context: Context, value: TypographyPreferences, persist: Boolean = true) {
         val safe = value.copy(
@@ -113,6 +119,13 @@ object TypographyStudioController {
     fun applyPreset(context: Context, key: String) {
         val p = presets.firstOrNull { it.key == key } ?: return
         update(context, TypographyPreferences(p.scale, p.weight, p.tracking, p.lineHeight, p.key))
+    }
+    fun saveCustomPreset(context: Context) {
+        val p = preferences.copy(preset = "custom")
+        preferences = p
+        customPreset = TypographyPreset("custom", "Meu preset", p.scale, p.weight, p.tracking, p.lineHeight)
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("custom_enabled", true).apply()
+        persist(context)
     }
     fun persist(context: Context) {
         val p = preferences
