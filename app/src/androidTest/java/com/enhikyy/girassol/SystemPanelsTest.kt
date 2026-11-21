@@ -9,6 +9,8 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
@@ -90,11 +92,12 @@ class SystemPanelsTest {
 
     @Test
     fun breakerTripsAndRearms() {
-        scrollTo("breaker_test").performClick()
+        // aciona o onClick do botão pela semântica (independe da posição do toque na coluna longa)
+        scrollTo("breaker_test").performSemanticsAction(SemanticsActions.OnClick)
         rule.waitUntil(10_000) { MemoryGuard.state.value.breakerOpen }
         rule.waitUntilAtLeastOneExists(hasTestTag("breaker_state") and hasText("ABERTO", substring = true), 10_000)
         // o loop determinístico continua: a simulação segue sem o LLM
-        scrollTo("breaker_rearm").performClick()
+        scrollTo("breaker_rearm").performSemanticsAction(SemanticsActions.OnClick)
         rule.waitUntil(10_000) { !MemoryGuard.state.value.breakerOpen }
     }
 
