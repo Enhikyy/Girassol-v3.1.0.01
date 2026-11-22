@@ -16,6 +16,7 @@ class LlmQuantPolicyTest {
         assertEquals(LlmQuantPolicy.KV_Q8_0, LlmQuantPolicy.kvTypeFor(12 * gb))
         assertEquals("q4_0", LlmQuantPolicy.kvName(LlmQuantPolicy.KV_Q4_0))
         assertEquals("q8_0", LlmQuantPolicy.kvName(LlmQuantPolicy.KV_Q8_0))
+        assertEquals("f8_e4m3", LlmQuantPolicy.kvName(LlmQuantPolicy.KV_F8_E4M3))
     }
 
     @Test fun lazySomenteEmAparelhosPequenos() {

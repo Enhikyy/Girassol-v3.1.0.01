@@ -67,7 +67,7 @@ Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmLoad(
     cfg.nThreads = threads;
     cfg.nCtx = nCtx;
     cfg.flashAttn = flashAttn == JNI_TRUE;
-    cfg.kvType = static_cast<girassol::llm::KvCacheType>(kvType < 0 || kvType > 2 ? 0 : kvType);
+    cfg.kvType = static_cast<girassol::llm::KvCacheType>(kvType < 0 || kvType > 3 ? 0 : kvType);
     cfg.slotDir = readStr(env, slotDir);
     cfg.maxSlots = maxSlots;
     cfg.poolCapacity = poolCapacity;

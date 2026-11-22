@@ -28,7 +28,11 @@ struct llama_adapter_lora;
 
 namespace girassol::llm {
 
-enum class KvCacheType : int { F16 = 0, Q8_0 = 1, Q4_0 = 2 };
+// F8_E4M3 (llama.cpp >= 1.0.0, GGML_TYPE_F8_E4M3): 1 byte/elem, bloco 1 (qualquer head_dim),
+// não exige flash attention. Na CPU arm64 a leitura é por tabela (sem kernel dotprod): é mais
+// lenta e menos precisa que Q8_0 (3 bits de mantissa), então NÃO é padrão de nenhum perfil.
+// Uso principal: degrau do fallback quando head_dim % 32 != 0 (antes caía direto em F16).
+enum class KvCacheType : int { F16 = 0, Q8_0 = 1, Q4_0 = 2, F8_E4M3 = 3 };
 
 struct LlmLoadConfig {
     int32_t nThreads = 2;

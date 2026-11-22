@@ -41,6 +41,7 @@ const char* kvName(KvCacheType t) {
     switch (t) {
         case KvCacheType::Q8_0: return "q8_0";
         case KvCacheType::Q4_0: return "q4_0";
+        case KvCacheType::F8_E4M3: return "f8_e4m3";
         default: return "f16";
     }
 }
@@ -56,6 +57,7 @@ ggml_type toGgml(KvCacheType t) {
     switch (t) {
         case KvCacheType::Q8_0: return GGML_TYPE_Q8_0;
         case KvCacheType::Q4_0: return GGML_TYPE_Q4_0;
+        case KvCacheType::F8_E4M3: return GGML_TYPE_F8_E4M3;
         default: return GGML_TYPE_F16;
     }
 }
@@ -361,20 +363,28 @@ bool LlmEngine::createContextLocked(std::string* err) {
         cp.abort_callback_data = &abort_;
         return llama_init_from_model(model_, cp);
     };
+    // F8_E4M3 não é tipo quantizado para o ggml: funciona com ou sem flash attention.
+    // Q8_0/Q4_0 quantizam V e por isso exigem flash attention.
     flashApplied_ = cfg.flashAttn;
-    kvApplied_ = cfg.flashAttn ? cfg.kvType : KvCacheType::F16;
+    kvApplied_ = (cfg.flashAttn || cfg.kvType == KvCacheType::F8_E4M3) ? cfg.kvType : KvCacheType::F16;
     kvHeadDimFallback_ = false;
-    // Pré-checagem: KV quantizado (Q8_0/Q4_0, bloco de 32) exige head_dim múltiplo de 32.
-    if (kvApplied_ != KvCacheType::F16 && (headDim_ <= 0 || headDim_ % 32 != 0)) {
-        kvApplied_ = KvCacheType::F16;
+    // Pré-checagem: Q8_0/Q4_0 (bloco de 32) exigem head_dim múltiplo de 32. F8_E4M3 tem bloco 1,
+    // então é o degrau natural antes de F16 (metade da RAM de KV em relação a F16).
+    if ((kvApplied_ == KvCacheType::Q8_0 || kvApplied_ == KvCacheType::Q4_0) && (headDim_ <= 0 || headDim_ % 32 != 0)) {
+        kvApplied_ = KvCacheType::F8_E4M3;
         kvHeadDimFallback_ = true;
     }
     ctx_ = makeCtx(flashApplied_, kvApplied_);
-    if (!ctx_ && flashApplied_ && kvApplied_ != KvCacheType::F16) {
-        kvApplied_ = KvCacheType::F16;
-        ctx_ = makeCtx(true, KvCacheType::F16);
+    // Cascata: tipo pedido -> F8_E4M3 (arquiteturas MLA/DeepSeek recusam FP8) -> F16 -> sem flash.
+    if (!ctx_ && kvApplied_ != KvCacheType::F8_E4M3 && kvApplied_ != KvCacheType::F16) {
+        kvApplied_ = KvCacheType::F8_E4M3;
+        ctx_ = makeCtx(flashApplied_, KvCacheType::F8_E4M3);
     }
-    if (!ctx_ && (flashApplied_ || kvApplied_ != KvCacheType::F16)) {
+    if (!ctx_ && kvApplied_ != KvCacheType::F16) {
+        kvApplied_ = KvCacheType::F16;
+        ctx_ = makeCtx(flashApplied_, KvCacheType::F16);
+    }
+    if (!ctx_ && flashApplied_) {
         flashApplied_ = false;
         kvApplied_ = KvCacheType::F16;
         ctx_ = makeCtx(false, KvCacheType::F16);

@@ -96,6 +96,8 @@ object LlmQuantPolicy {
     const val KV_F16 = 0
     const val KV_Q8_0 = 1
     const val KV_Q4_0 = 2
+    /** llama.cpp 1.0.0 GGML_TYPE_F8_E4M3: opcional/fallback, nunca padrão de perfil (ver llm_engine.hpp). */
+    const val KV_F8_E4M3 = 3
     const val LOW_RAM_BYTES = 4L * 1024 * 1024 * 1024 + 512L * 1024 * 1024
     const val LAZY_IDLE_MS = 90_000L
 
@@ -117,7 +119,7 @@ object LlmQuantPolicy {
 
     fun kvTypeFor(totalMemBytes: Long): Int = if (totalMemBytes <= LOW_RAM_BYTES) KV_Q4_0 else KV_Q8_0
     fun lazyFor(totalMemBytes: Long): Boolean = totalMemBytes <= LOW_RAM_BYTES
-    fun kvName(t: Int): String = when (t) { KV_Q8_0 -> "q8_0"; KV_Q4_0 -> "q4_0"; else -> "f16" }
+    fun kvName(t: Int): String = when (t) { KV_Q8_0 -> "q8_0"; KV_Q4_0 -> "q4_0"; KV_F8_E4M3 -> "f8_e4m3"; else -> "f16" }
 
     /**
      * Classifica o tipo de pesos. [ftype] vem do próprio GGUF (llama_model_ftype) e tem
@@ -161,7 +163,7 @@ object LlmQuantPolicy {
      */
     fun activeRamEstimate(fileBytes: Long, nCtx: Int, kvType: Int): Long {
         val mb = 1024L * 1024
-        val kvPerToken = when (kvType) { KV_Q4_0 -> 48L * 1024; KV_Q8_0 -> 90L * 1024; else -> 168L * 1024 }
+        val kvPerToken = when (kvType) { KV_Q4_0 -> 48L * 1024; KV_Q8_0 -> 90L * 1024; KV_F8_E4M3 -> 85L * 1024; else -> 168L * 1024 }
         return 96L * mb + (fileBytes * 0.35).toLong() + kvPerToken * nCtx
     }
 

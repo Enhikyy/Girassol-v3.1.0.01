@@ -194,6 +194,30 @@ static void llmTest() {
     CHECK(!eng.loaded(), "descarregamento do modelo");
 
 
+    // --- v4.2: KV-cache OCP-FP8 (GGML_TYPE_F8_E4M3, llama.cpp 1.0.0) — sem flash attention,
+    // qualquer head_dim, e degrau do fallback de Q8_0 quando head_dim % 32 != 0.
+    {
+        girassol::llm::LlmEngine ef;
+        girassol::llm::LlmLoadConfig cfg;
+        cfg.nThreads = 2; cfg.nCtx = 256; cfg.flashAttn = false; cfg.kvType = girassol::llm::KvCacheType::F8_E4M3;
+        CHECK(ef.load(path, cfg, &err), ("carrega com KV F8_E4M3 sem flash attention " + err).c_str());
+        const std::string rc = ef.runtimeConfig();
+        std::printf("config FP8: %s\n", rc.c_str());
+        CHECK(rc.find("kv=f8_e4m3") != std::string::npos, "KV F8_E4M3 efetivamente aplicado");
+        const auto rf = ef.generate("Voce e Ana.", "Escolha uma acao.", kGrammar, 64);
+        CHECK(rf.ok && !rf.text.empty() && rf.text.front() == '{', "geração com GBNF sobre KV F8_E4M3");
+        ef.unload();
+        girassol::llm::LlmEngine eq;
+        cfg.flashAttn = true; cfg.kvType = girassol::llm::KvCacheType::Q8_0;
+        CHECK(eq.load(path, cfg, &err), ("carrega Q8_0 para checar fallback " + err).c_str());
+        const std::string rq = eq.runtimeConfig();
+        if (eq.headDim() % 32 != 0) {
+            CHECK(rq.find("kv=f8_e4m3(head_dim=") != std::string::npos, "head_dim%32!=0 cai para F8_E4M3, não F16");
+        } else {
+            CHECK(rq.find("kv=q8_0") != std::string::npos, "Q8_0 mantido quando head_dim%32==0");
+        }
+    }
+
     // --- v3.4: prefixo imutável + slots por cidadão + fast-forward + temperatura semeada
     {
         const std::string slotDir = (std::filesystem::temp_directory_path() / "girassol_slots_test").string();
