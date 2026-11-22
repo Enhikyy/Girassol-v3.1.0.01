@@ -18,8 +18,23 @@ object WorldMaterials {
         // ---- urbano
         MatSpec("asphalt", PA.WET_ASPHALT, metersU = 4f, normalStrength = 1f),
         MatSpec("sidewalk", PA.SIDEWALK, metersU = 4f),
-        MatSpec("curb", PA.CONCRETE, metersU = 2f, tint = lin(0.92f, 0.92f, 0.90f)),
-        MatSpec("facade", PA.FACADE, metersU = 15f, metersV = 20f, emissive = floatArrayOf(1f, 1f, 1f), emissiveDriver = EmissiveDriver.WINDOWS),
+        MatSpec("curb", PA.CONCRETE, metersU = 1.2f, tint = lin(0.96f, 0.95f, 0.93f)),
+        MatSpec("gutter", PA.CONCRETE, metersU = 2f, tint = lin(0.42f, 0.43f, 0.44f)),
+        MatSpec("paint_worn", PA.CONCRETE, metersU = 1.5f, tint = lin(1.0f, 1.0f, 0.97f)),
+        // v4.1: fachada de concreto #6E767A (sem janelas pintadas — as janelas são geometria real)
+        MatSpec("facade", PA.CONCRETE, metersU = 3f, tint = lin(0.66f, 0.71f, 0.73f)),
+        MatSpec("spandrel", PA.CONCRETE, metersU = 3f, tint = lin(0.30f, 0.62f, 0.66f)),
+        MatSpec("reveal", PA.CONCRETE, metersU = 1f, tint = lin(0.78f, 0.80f, 0.80f)),
+        MatSpec("sill", PA.CONCRETE, metersU = 1f, tint = lin(0.95f, 0.94f, 0.91f)),
+        MatSpec("frame", -1, tint = lin(0.20f, 0.21f, 0.22f), rough = 0.35f, metal = 1f),
+        // vidro: rugosidade 0,08; interior aceso 2700–4500 K decidido por janela no shader
+        MatSpec("window_glass", -1, tint = lin(0.035f, 0.045f, 0.05f), rough = 0.08f,
+            emissive = floatArrayOf(1f, 1f, 1f), emissiveDriver = EmissiveDriver.WINDOWS, window = true),
+        MatSpec("marquee", -1, tint = lin(0.18f, 0.19f, 0.20f), rough = 0.4f, metal = 0.8f),
+        MatSpec("wood", -1, tint = lin(0.46f, 0.30f, 0.18f), rough = 0.62f),
+        MatSpec("planter", PA.CONCRETE, metersU = 1.5f, tint = lin(0.85f, 0.85f, 0.83f)),
+        MatSpec("soil", -1, tint = lin(0.12f, 0.08f, 0.05f), rough = 0.95f),
+        MatSpec("leaf_light", -1, tint = lin(0.24f, 0.36f, 0.16f), rough = 0.82f),
         MatSpec("concrete", PA.CONCRETE, metersU = 3f),
         MatSpec("grass", PA.GRASS, metersU = 4f),
         MatSpec("field", PA.GRASS, metersU = 4f, tint = lin(0.92f, 0.86f, 0.62f)),
@@ -49,6 +64,9 @@ object WorldMaterials {
         MatSpec("monitor_body", -1, tint = lin(0.66f, 0.66f, 0.62f), rough = 0.48f),
         MatSpec("monitor_screen", -1, tint = lin(0.02f, 0.03f, 0.04f), rough = 0.12f,
             emissive = lin(0.30f, 0.86f, 1.0f), emissiveDriver = EmissiveDriver.MONITOR),
+        MatSpec("pillar", PA.PARTITION, metersU = 2f, tint = lin(0.90f, 0.91f, 0.89f)),
+        MatSpec("carpet_runner", PA.CARPET, metersU = 2f, tint = lin(1.35f, 1.30f, 1.25f), normalStrength = 1.2f),
+        MatSpec("corridor_wall", PA.PARTITION, metersU = 3f, tint = lin(0.93f, 0.95f, 0.93f)),
         MatSpec("chair_fabric", -1, tint = lin(0.07f, 0.08f, 0.09f), rough = 0.92f),
         MatSpec("chair_metal", -1, tint = lin(0.20f, 0.21f, 0.22f), rough = 0.35f, metal = 1f)
     )
@@ -57,7 +75,7 @@ object WorldMaterials {
     fun spec(id: String): MatSpec = byId[id] ?: error("material desconhecido: $id")
     val surfacesUsed: Set<Int> get() = all.filter { it.surface >= 0 }.map { it.surface }.toSet()
     fun surfacesFor(p: WorldPreset): List<Int> = if (p == WorldPreset.URBAN_OVERCAST)
-        listOf(PA.WET_ASPHALT, PA.FACADE, PA.SIDEWALK, PA.CONCRETE, PA.GRASS, PA.BILLBOARD)
+        listOf(PA.WET_ASPHALT, PA.CONCRETE, PA.SIDEWALK, PA.GRASS, PA.BILLBOARD)
     else listOf(PA.CARPET, PA.COFFER, PA.PARTITION)
 
     /** Roupas sóbrias (sRGB): carvão, marinho, ardósia, aveia, verde-garrafa, vinho fosco, cinza-grafite. */

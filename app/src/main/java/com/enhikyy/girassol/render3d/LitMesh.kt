@@ -236,6 +236,128 @@ class LitMeshBuilder {
         }
     }
 
+    /** Retângulo com UV explícita (u0..u1, v0..v1) — vidros de janela codificam o id da janela em u. */
+    fun rectUv(o: V3, ex: V3, ey: V3, u0: Float, u1: Float, v0: Float, v1: Float) {
+        val n = ex.cross(ey).normalized()
+        val ux = ex.normalized()
+        val base = vertexCount
+        vertex(o, ux, n, u0, v0); vertex(o + ex, ux, n, u1, v0); vertex(o + ex + ey, ux, n, u1, v1); vertex(o + ey, ux, n, u0, v1)
+        tri(base, base + 1, base + 2); tri(base, base + 2, base + 3)
+    }
+
+    /** Seção elíptica horizontal de um loft: centro (cx, y, cz), semi-eixos rx (X) e rz (Z). */
+    data class Section(val y: Float, val rx: Float, val rz: Float, val cx: Float = 0f, val cz: Float = 0f)
+
+    /**
+     * Superfície lisa por seções elípticas empilhadas em Y (tronco, quadril, coxas) com normais
+     * suaves (derivadas analíticas da elipse + inclinação entre seções) e tampas opcionais.
+     */
+    fun loft(sections: List<Section>, segments: Int = 16, capBottom: Boolean = true, capTop: Boolean = true) {
+        require(sections.size >= 2) { "loft exige 2+ seções" }
+        val base = vertexCount
+        val row = segments + 1
+        for ((si, s) in sections.withIndex()) {
+            val prev = sections[maxOf(si - 1, 0)]; val next = sections[minOf(si + 1, sections.size - 1)]
+            val dy = (next.y - prev.y).let { if (kotlin.math.abs(it) < 1e-6f) 1e-6f else it }
+            for (j in 0..segments) {
+                val a = (2.0 * PI * j / segments).toFloat()
+                val sa = sin(a); val ca = cos(a)
+                val pos = V3(s.cx + sa * s.rx, s.y, s.cz + ca * s.rz)
+                // normal da elipse no plano + inclinação pela variação do raio ao longo de Y
+                val drx = (next.rx - prev.rx) / dy; val drz = (next.rz - prev.rz) / dy
+                val dcx = (next.cx - prev.cx) / dy; val dcz = (next.cz - prev.cz) / dy
+                val nPlane = V3(sa / s.rx.coerceAtLeast(1e-4f), 0f, ca / s.rz.coerceAtLeast(1e-4f)).normalized()
+                val slope = -(nPlane.x * (sa * drx + dcx) + nPlane.z * (ca * drz + dcz))
+                val n = V3(nPlane.x, slope, nPlane.z).normalized()
+                val tg = V3(ca, 0f, -sa)
+                vertex(pos, tg, n, a * maxOf(s.rx, s.rz), s.y)
+            }
+        }
+        for (i in 0 until sections.size - 1) for (j in 0 until segments) {
+            val k = base + i * row + j
+            tri(k, k + 1, k + row + 1); tri(k, k + row + 1, k + row)
+        }
+        fun cap(s: Section, up: Boolean) {
+            val n = V3(0f, if (up) 1f else -1f, 0f)
+            val c0 = vertex(V3(s.cx, s.y, s.cz), V3(1f, 0f, 0f), n, s.cx, s.cz)
+            val ring = IntArray(segments) { j ->
+                val a = (2.0 * PI * j / segments).toFloat()
+                val x = s.cx + sin(a) * s.rx; val z = s.cz + cos(a) * s.rz
+                vertex(V3(x, s.y, z), V3(1f, 0f, 0f), n, x, z)
+            }
+            for (j in 0 until segments) if (up) tri(c0, ring[j], ring[(j + 1) % segments]) else tri(c0, ring[(j + 1) % segments], ring[j])
+        }
+        if (capBottom) cap(sections.first(), up = false)
+        if (capTop) cap(sections.last(), up = true)
+    }
+
+    /** Cápsula lisa entre [a] e [b] (raios [ra] → [rb]) com calotas hemisféricas — membros e dedos. */
+    fun capsule(a: V3, b: V3, ra: Float, rb: Float = ra, segments: Int = 12, capRings: Int = 4) {
+        val axis = (b - a).let { if (it.length() < 1e-6f) V3(0f, 1f, 0f) else it.normalized() }
+        val s1 = TangentFrame.anyPerpendicular(axis); val s2 = axis.cross(s1)
+        val len = (b - a).length()
+        val base = vertexCount
+        val row = segments + 1
+        // anéis: calota inferior (capRings), corpo (2), calota superior (capRings)
+        val rings = ArrayList<Triple<V3, Float, Float>>() // centro, raio, cos da latitude (eixo)
+        for (i in capRings downTo 1) {
+            val th = (PI / 2 * i / capRings).toFloat()
+            rings += Triple(a - axis * (ra * sin(th)), ra * cos(th), -sin(th))
+        }
+        rings += Triple(a, ra, 0f); rings += Triple(b, rb, 0f)
+        for (i in 1..capRings) {
+            val th = (PI / 2 * i / capRings).toFloat()
+            rings += Triple(b + axis * (rb * sin(th)), rb * cos(th), sin(th))
+        }
+        for ((ri, ring) in rings.withIndex()) {
+            val (c, r, ax) = ring
+            val radial = kotlin.math.sqrt((1f - ax * ax).coerceAtLeast(0f))
+            for (j in 0..segments) {
+                val ang = (2.0 * PI * j / segments).toFloat()
+                val dir = s1 * cos(ang) + s2 * sin(ang)
+                val n = (dir * radial + axis * ax).normalized()
+                vertex(c + dir * r, axis, if (n.length() < 1e-5f) axis * ax else n, ang * maxOf(ra, rb), ri.toFloat() / rings.size * (len + ra + rb))
+            }
+        }
+        for (i in 0 until rings.size - 1) for (j in 0 until segments) {
+            val k = base + i * row + j
+            tri(k, k + row, k + row + 1); tri(k, k + row + 1, k + 1)
+        }
+    }
+
+    /** Meia-esfera: [upper] = calota de cima (cúpula), senão a de baixo (difusor de luminária). */
+    fun dome(c: V3, rx: Float, ry: Float, rz: Float, upper: Boolean, rings: Int = 6, segments: Int = 14) {
+        val base = vertexCount
+        for (i in 0..rings) {
+            val th = (PI / 2 * i / rings).toFloat() + if (upper) 0f else (PI / 2).toFloat()
+            for (j in 0..segments) {
+                val ph = (2.0 * PI * j / segments).toFloat()
+                val n = V3(sin(th) * sin(ph), cos(th), sin(th) * cos(ph))
+                vertex(V3(c.x + n.x * rx, c.y + n.y * ry, c.z + n.z * rz), V3(cos(ph), 0f, -sin(ph)),
+                    V3(n.x / rx, n.y / ry, n.z / rz).normalized(), ph * rx, th * ry)
+            }
+        }
+        val row = segments + 1
+        for (i in 0 until rings) for (j in 0 until segments) {
+            val k = base + i * row + j
+            tri(k, k + row, k + row + 1); tri(k, k + row + 1, k + 1)
+        }
+        // tampa plana fechando a meia-esfera
+        val n = V3(0f, if (upper) -1f else 1f, 0f)
+        val c0 = vertex(c, V3(1f, 0f, 0f), n, c.x, c.z)
+        val ring = IntArray(segments) { j ->
+            val ph = (2.0 * PI * j / segments).toFloat()
+            vertex(V3(c.x + sin(ph) * rx, c.y, c.z + cos(ph) * rz), V3(1f, 0f, 0f), n, c.x + sin(ph) * rx, c.z + cos(ph) * rz)
+        }
+        for (j in 0 until segments) if (upper) tri(c0, ring[(j + 1) % segments], ring[j]) else tri(c0, ring[j], ring[(j + 1) % segments])
+    }
+
+    /** Tubo por uma polilinha (braço curvo do poste, galhos) com juntas esféricas suaves. */
+    fun polyTube(points: List<V3>, r: Float, segments: Int = 8) {
+        for (i in 0 until points.size - 1) tube(points[i], points[i + 1], r, segments)
+        for (i in 1 until points.size - 1) sphere(points[i], r, r, r, rings = 3, segments = segments)
+    }
+
     fun append(m: LitMesh) {
         val base = vertexCount
         for (i in 0 until m.vertexCount) {

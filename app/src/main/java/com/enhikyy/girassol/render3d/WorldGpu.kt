@@ -199,8 +199,12 @@ internal object WorldGpu {
         return (0.2126f * r + 0.7152f * g + 0.0722f * b).coerceAtLeast(1e-6f)
     }
 
-    fun uploadIbl(engine: Engine, d: IblData, targetLux: Float): Ibl {
-        if (softwareGl) {
+    /**
+     * [specular] = false (nível Lite v4.1 e emulador): só a irradiância SH3, sem cubemap de reflexo
+     * especular — o céu visível vem do domo procedural sky_gradient.
+     */
+    fun uploadIbl(engine: Engine, d: IblData, targetLux: Float, specular: Boolean = true): Ibl {
+        if (softwareGl || !specular) {
             // GL por software (emulador): enviar o cubemap derruba o tradutor GL do emulador. Só SH3
             // (irradiância difusa, sem reflexo especular do céu) e céu de cor sólida — aproximação.
             val light = IndirectLight.Builder().irradiance(3, d.sh).intensity(1f).build(engine)

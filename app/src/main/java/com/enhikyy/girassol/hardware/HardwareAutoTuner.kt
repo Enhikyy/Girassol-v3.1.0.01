@@ -39,6 +39,13 @@ object HardwareAutoTuner {
         else -> 256
     }
 
+    /** v4.1 — nível de renderização da Aba Mundo (RAM total + GL_RENDERER). */
+    fun renderTier(context: Context, glRenderer: String?): RenderTier {
+        val am = context.getSystemService(ActivityManager::class.java)
+        val mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+        return RenderTier.classify(mi.totalMem / (1024 * 1024), glRenderer)
+    }
+
     fun detect(context: Context): HardwareProfile {
         val am = context.getSystemService(ActivityManager::class.java)
         val mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }

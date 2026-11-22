@@ -564,7 +564,7 @@ private fun AgentCard(a: AgentView, energy: Double?, social: Double?, place: Str
                 Icon(Icons.Outlined.Close, contentDescription = "fechar", tint = Lumon.CreamDim)
             }
         }
-        Text("${CitizenText.action(a.action)} · $place" + if (a.neural) " · pensou com o próprio .gguf" else "",
+        Text(CitizenText.status(a, place) + if (a.neural) " · pensou com o próprio .gguf" else "",
             color = Lumon.Teal, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("agent_card_action"))
         if (a.thought.isNotBlank()) Text(a.thought, color = Lumon.Cream, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
         if (a.speech.isNotBlank()) Text("“${a.speech}”", color = Lumon.CreamDim, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)

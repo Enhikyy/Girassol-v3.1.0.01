@@ -1,5 +1,6 @@
 package com.enhikyy.girassol.render3d
 
+import com.enhikyy.girassol.hardware.RenderTier
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -22,15 +23,19 @@ enum class CameraMode(val label: String) {
 
 /** Fase do dia que seleciona o IBL procedural (cubemap + SH) e a exposição. */
 enum class TimePhase(val label: String, val skyPreset: Int) {
-    MORNING("Manhã", 0), AFTERNOON("Tarde", 1), NIGHT("Noite", 2), INTERIOR("Interior", 3);
+    MORNING("Manhã", 0), AFTERNOON("Tarde", 1), DUSK("Entardecer", 1), NIGHT("Noite", 2), INTERIOR("Interior", 3);
 
     companion object {
-        /** [dayFraction] 0 = meia-noite (ver [SunCycle.dayFraction]). Manhã 05:30–13:00, tarde até 18:45. */
+        /**
+         * [dayFraction] 0 = meia-noite (ver [SunCycle.dayFraction]). Manhã 05:30–13:00, tarde até
+         * 16:48, entardecer 16:48–18:43 (v4.1: céu âmbar/rosado e janelas acendendo), depois noite.
+         */
         fun of(dayFraction: Float, preset: WorldPreset): TimePhase = when {
             preset == WorldPreset.LUMON_INTERIOR -> INTERIOR
             dayFraction < 0.23f || dayFraction >= 0.78f -> NIGHT
             dayFraction < 0.54f -> MORNING
-            else -> AFTERNOON
+            dayFraction < 0.70f -> AFTERNOON
+            else -> DUSK
         }
     }
 }
@@ -76,7 +81,22 @@ data class CinematicProfile(
     // IBL
     val iblFaceSize: Int = 256,
     // névoa (somente urbano)
-    val fog: Boolean
+    val fog: Boolean,
+    // v4.1 — recursos por nível de hardware (RenderTier)
+    /** Bloom em 1/4 da altura do viewport (Lite). */
+    val bloomQuarterRes: Boolean = false,
+    /** Cubemap de reflexo especular do IBL (Mid/Ultra); Lite usa só a irradiância SH. */
+    val specularIbl: Boolean = true,
+    /** Gradação "Kodak 70 mm" (curvas + mixer de canais assados na LUT 3D do Filament). */
+    val kodakLut: Boolean = true,
+    /** Halação quente da passada girassol_dehancer_post (0 = desligada). */
+    val halation: Float = 0.15f,
+    /** Grão Kodak da passada girassol_dehancer_post (0 = desligado). */
+    val grain: Float = 0.045f,
+    /** Resolução das texturas procedurais (512 Lite, 1024 Mid/Ultra). */
+    val textureSize: Int = 1024,
+    /** Luzes pontuais do teto do salão Lumon. */
+    val ceilingPointLights: Boolean = true
 ) {
     /** O Filament 1.75 rejeita/clampa highlight < 10; o limiar real fica no bright-pass da passada girassol_dehancer_post. */
     val effectiveBloomHighlight: Float get() = maxOf(bloomHighlight, FILAMENT_MIN_HIGHLIGHT)
@@ -99,6 +119,31 @@ data class CinematicProfile(
                     shadowCascades = 1, screenSpaceContactShadows = false, bloomEnabled = false, iblFaceSize = 64, fog = false)
                 EffectLevel.NONE -> base.copy(taa = false, fxaa = false, ssrEnabled = false, ssaoEnabled = false, castShadows = false,
                     screenSpaceContactShadows = false, bloomEnabled = false, iblFaceSize = 32, fog = false)
+            }
+        }
+
+        /**
+         * v4.1 — perfil efetivo = degradação por [EffectLevel] ∩ teto do [RenderTier]:
+         *  LITE  → sombras 1024, LUT Kodak 70 mm, bloom 1/4, sem SSAO/SSR/halação/grão, sem IBL especular;
+         *  MID   → sombras 2048, bloom + halação quente, IBL especular, sem SSAO/SSR/grão;
+         *  ULTRA → tudo (SSAO, grão Kodak, SSR);
+         *  EMULATOR → sem sombras nem pós (o fallback unlit faz tonemapping no shader).
+         */
+        fun forTier(p: WorldPreset, tier: RenderTier, l: EffectLevel): CinematicProfile {
+            val b = forLevel(p, l)
+            return when (tier) {
+                RenderTier.EMULATOR -> b.copy(castShadows = false, screenSpaceContactShadows = false, ssaoEnabled = false, ssrEnabled = false,
+                    bloomEnabled = false, taa = false, fxaa = false, specularIbl = false, kodakLut = false, halation = 0f, grain = 0f,
+                    textureSize = tier.textureSize, ceilingPointLights = false, iblFaceSize = minOf(b.iblFaceSize, 64), fog = false)
+                RenderTier.LITE -> b.copy(shadowMapSize = minOf(b.shadowMapSize, 1024), shadowCascades = minOf(b.shadowCascades, 2),
+                    ssaoEnabled = false, ssrEnabled = false, taa = false, bloomQuarterRes = true, bloomLevels = minOf(b.bloomLevels, 4),
+                    specularIbl = false, kodakLut = b.kodakLut, halation = 0f, grain = 0f, textureSize = tier.textureSize,
+                    iblFaceSize = minOf(b.iblFaceSize, 64), contactShadowSteps = minOf(b.contactShadowSteps, 8))
+                RenderTier.MID -> b.copy(shadowMapSize = minOf(b.shadowMapSize, 2048), ssaoEnabled = false, ssrEnabled = false,
+                    halation = if (l == EffectLevel.NONE) 0f else 0.15f, grain = 0f, textureSize = tier.textureSize,
+                    iblFaceSize = minOf(b.iblFaceSize, 128))
+                RenderTier.ULTRA -> b.copy(halation = if (l == EffectLevel.NONE) 0f else 0.15f,
+                    grain = if (l == EffectLevel.NONE) 0f else 0.045f, textureSize = tier.textureSize)
             }
         }
     }

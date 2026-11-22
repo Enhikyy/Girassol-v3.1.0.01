@@ -6,7 +6,7 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 /**
- * Esqueleto procedural do cidadão (7 ossos, skinning rígido no Filament) e a pose de cada
+ * Esqueleto procedural do cidadão (9 ossos: coxa + canela separadas por joelho; skinning rígido no Filament) e a pose de cada
  * quadro. Lógica pura (testada na JVM): o renderizador só copia as matrizes.
  *
  * Sincronização exigida pela especificação:
@@ -14,6 +14,8 @@ import kotlin.math.sin
  *    ([CitizenGrowth.gaitCyclesPerTick]) e a passada da idade;
  *  - digitação em terminal CRT: antebraços à frente com batidas rápidas alternadas;
  *  - amplitude vocal do Pocket-TTS ([amplitude] 0..1): abertura da boca e gesto da cabeça;
+ *  - v4.1: joelho flexiona na fase de balanço da passada; postura sentada (coxa horizontal,
+ *    canela vertical, raiz abaixada) quando o cidadão digita no terminal ou come em casa;
  *  - crescimento infantil → adulto: escala total, cabeça maior, membros mais curtos.
  * As matrizes são colunas-maiores (convenção do Filament), em espaço do modelo.
  */
@@ -25,7 +27,17 @@ object CitizenRig {
     const val BONE_ARM_R = 4
     const val BONE_LEG_L = 5
     const val BONE_LEG_R = 6
-    const val BONES = 7
+    const val BONE_SHIN_L = 7
+    const val BONE_SHIN_R = 8
+    const val BONES = 9
+    /** Altura do joelho na pose de ligação (coxa 0,26 m, canela 0,29 m). */
+    const val KNEE_Y = 0.29f
+    /** Rotação da coxa / flexão do joelho / descida do quadril na pose sentada. */
+    const val SIT_THIGH = -1.5f
+    const val SIT_KNEE = 1.5f
+    const val SIT_DROP = 0.08f
+    /** Flexão máxima do joelho na fase de balanço da caminhada. */
+    const val WALK_KNEE = 0.6f
 
     /** Pivôs na pose de ligação (adulto, altura 1,42). */
     val PIVOTS: Array<FloatArray> = arrayOf(
@@ -35,7 +47,9 @@ object CitizenRig {
         floatArrayOf(-0.27f, 1.0f, 0f),     // ombro esquerdo
         floatArrayOf(0.27f, 1.0f, 0f),      // ombro direito
         floatArrayOf(-0.10f, 0.55f, 0f),    // quadril esquerdo
-        floatArrayOf(0.10f, 0.55f, 0f)      // quadril direito
+        floatArrayOf(0.10f, 0.55f, 0f),     // quadril direito
+        floatArrayOf(-0.10f, KNEE_Y, 0f),   // joelho esquerdo
+        floatArrayOf(0.10f, KNEE_Y, 0f)     // joelho direito
     )
 
     class State {
@@ -43,14 +57,16 @@ object CitizenRig {
         var yaw = 0f         // rad, suavizado
         var typePhase = 0f
         var gesture = 0f
+        var sit = 0f         // 0 em pé … 1 sentado (suavizado)
     }
 
     data class Input(
         val maturity: Float, val vx: Float, val vz: Float, val ticksPerSecond: Float,
-        val typing: Boolean, val amplitude: Float, val dt: Float
+        val typing: Boolean, val amplitude: Float, val dt: Float,
+        val seated: Boolean = false
     )
 
-    /** Avança [s] e escreve 7 matrizes 4×4 (112 floats) em [out]. Retorna a matriz raiz (16 floats). */
+    /** Avança [s] e escreve 9 matrizes 4×4 (144 floats) em [out]. Retorna a matriz raiz (16 floats). */
     fun pose(s: State, inp: Input, out: FloatArray): FloatArray {
         require(out.size >= BONES * 16)
         val p = CitizenGrowth.proportions(inp.maturity)
@@ -69,8 +85,16 @@ object CitizenRig {
         val amp = inp.amplitude.coerceIn(0f, 1f)
         s.gesture += (amp - s.gesture) * (inp.dt * 10f).coerceAtMost(1f)
 
-        val swing = (sin(s.phase * 2.0 * PI).toFloat()) * 0.62f * walking
-        val bob = kotlin.math.abs(sin(s.phase * 2.0 * PI).toFloat()) * 0.03f * walking
+        s.sit += ((if (inp.seated) 1f else 0f) - s.sit) * (inp.dt * 6f).coerceAtMost(1f)
+        val sit = s.sit
+        val stand = 1f - sit
+        val swing = (sin(s.phase * 2.0 * PI).toFloat()) * 0.62f * walking * stand
+        val bob = kotlin.math.abs(sin(s.phase * 2.0 * PI).toFloat()) * 0.03f * walking * stand
+        // joelho: flexiona só na fase de balanço (perna indo à frente), sincronizado à velocidade
+        val kneeL = maxOf(0f, sin(s.phase * 2.0 * PI + PI / 2).toFloat()) * WALK_KNEE * walking * stand + SIT_KNEE * sit
+        val kneeR = maxOf(0f, sin((s.phase + 0.5f) * 2.0 * PI + PI / 2).toFloat()) * WALK_KNEE * walking * stand + SIT_KNEE * sit
+        val thighL = swing + SIT_THIGH * sit
+        val thighR = -swing + SIT_THIGH * sit
 
         val limb = p.limbScale
         val armSwingL = -swing * 0.8f
@@ -92,15 +116,26 @@ object CitizenRig {
         val mp = PIVOTS[BONE_MOUTH]
         val mouth = Mat4.mul(head, Mat4.mul(Mat4.translate(mp[0], mp[1], mp[2]),
             Mat4.mul(Mat4.scale(1f, 1f + 3.2f * s.gesture, 1f), Mat4.translate(-mp[0], -mp[1], -mp[2]))))
+        val legL = bone(BONE_LEG_L, thighL, 0f, 1f, limb, 1f, 0f)
+        val legR = bone(BONE_LEG_R, thighR, 0f, 1f, limb, 1f, 0f)
+        // canela = coxa · rotação em torno do joelho (espaço de ligação) — hierarquia rígida
+        fun shin(leg: FloatArray, bone: Int, knee: Float): FloatArray {
+            val kp = PIVOTS[bone]
+            return Mat4.mul(leg, Mat4.mul(Mat4.translate(kp[0], kp[1], kp[2]),
+                Mat4.mul(Mat4.rotX(knee), Mat4.translate(-kp[0], -kp[1], -kp[2]))))
+        }
         val bones = arrayOf(torso, head, mouth,
             bone(BONE_ARM_L, armL, 0f, 1f, limb, 1f, bob),
             bone(BONE_ARM_R, armR, 0f, 1f, limb, 1f, bob),
-            bone(BONE_LEG_L, swing, 0f, 1f, limb, 1f, 0f),
-            bone(BONE_LEG_R, -swing, 0f, 1f, limb, 1f, 0f))
+            legL, legR,
+            shin(legL, BONE_SHIN_L, kneeL),
+            shin(legR, BONE_SHIN_R, kneeR))
         for (i in 0 until BONES) bones[i].copyInto(out, i * 16)
 
         // raiz: escala global da idade + guinada pela direção da velocidade
-        return Mat4.mul(Mat4.rotY(s.yaw), Mat4.scale(p.height, p.height, p.height))
+        // (sentado: desce o quadril até o assento)
+        return Mat4.mul(Mat4.translate(0f, -SIT_DROP * sit * p.height, 0f),
+            Mat4.mul(Mat4.rotY(s.yaw), Mat4.scale(p.height, p.height, p.height)))
     }
 
     /** Pivôs reposicionados pelas proporções: pernas mais curtas abaixam quadril, tronco e cabeça. */

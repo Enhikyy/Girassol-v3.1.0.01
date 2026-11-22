@@ -9,6 +9,8 @@ import android.view.Surface
 import android.view.SurfaceView
 import com.enhikyy.girassol.audio.VoiceAmplitude
 import com.enhikyy.girassol.core.render.CitizenRig
+import com.enhikyy.girassol.hardware.HardwareAutoTuner
+import com.enhikyy.girassol.hardware.RenderTier
 import com.enhikyy.girassol.core.render.Mat4
 import com.enhikyy.girassol.core.world.AgentView
 import com.enhikyy.girassol.core.world.WorldRenderSnapshot
@@ -95,6 +97,8 @@ class FilamentCityRenderer(
         fun phaseLight(p: TimePhase): PhaseLight = when (p) {
             TimePhase.MORNING -> PhaseLight(12.2f, 15000f, floatArrayOf(1.0f, 0.97f, 0.92f), 12000f, 0f, 0.20f, 0.60f, 0.05f, 0.010f)
             TimePhase.AFTERNOON -> PhaseLight(12.0f, 21000f, floatArrayOf(1.0f, 0.80f, 0.58f), 8000f, 0f, 0.60f, 0.90f, 0.30f, 0.012f)
+            // entardecer: sol baixo e alaranjado, janelas acendendo, postes ligando
+            TimePhase.DUSK -> PhaseLight(11f, 9000f, floatArrayOf(1.0f, 0.62f, 0.36f), 6000f, 6000f, 1.0f, 1.2f, 1.5f, 0.014f)
             TimePhase.NIGHT -> PhaseLight(4.6f, 2f, floatArrayOf(0.62f, 0.72f, 1.0f), 6f, 12000f, 1.60f, 1.40f, 3.0f, 0.016f)
             TimePhase.INTERIOR -> PhaseLight(8.2f, 650f, floatArrayOf(1.0f, 0.98f, 0.94f), 300f, 0f, 0f, 0f, 0f, 0f)
         }
@@ -102,6 +106,14 @@ class FilamentCityRenderer(
         /** sRGB → linear (Colors.toLinear ACCURATE) antes de qualquer cor ir ao motor. */
         fun linear(c: FloatArray): FloatArray = Colors.toLinear(Colors.Conversion.ACCURATE, c.copyOf(3))
         private val LAMP_LINEAR by lazy { linear(floatArrayOf(1.0f, 0.72f, 0.42f)) }
+        /** Luminárias do teto Lumon: branco neutro-frio de escritório (≈ 4000 K). */
+        private val CEILING_LINEAR by lazy { linear(floatArrayOf(1.0f, 0.95f, 0.88f)) }
+        /** Fração de janelas acesas (decidida por janela no shader, hash da posição). */
+        const val WINDOW_LIT_FRACTION = 0.45f
+        /** Luzes pontuais do teto no nível Lite (só as das mesas). */
+        const val INTERIOR_POINT_LIGHTS_LITE = 30
+        /** Raio da cúpula do céu (m): dentro do plano distante (700–900 m) em qualquer modo de câmera. */
+        const val SKY_RADIUS_M = 520f
         /** Neblina neutra suave (sRGB). */
         val FOG_SRGB = floatArrayOf(0.66f, 0.68f, 0.70f)
 
@@ -109,6 +121,7 @@ class FilamentCityRenderer(
         fun phaseSunDir(p: TimePhase): FloatArray = when (p) {
             TimePhase.MORNING -> floatArrayOf(-0.62f, 0.48f, -0.36f)
             TimePhase.AFTERNOON -> floatArrayOf(0.74f, 0.22f, -0.34f)
+            TimePhase.DUSK -> floatArrayOf(0.86f, 0.10f, -0.30f)
             TimePhase.NIGHT -> floatArrayOf(0.30f, 0.80f, 0.40f)
             TimePhase.INTERIOR -> floatArrayOf(0f, 1f, 0f)
         }
@@ -172,6 +185,17 @@ class FilamentCityRenderer(
     private var sunEntity = 0
     private var sunShadowKey = ""
     private val lampEntities = ArrayList<Int>()
+    private val pointEntities = ArrayList<Int>()
+
+    // ---- v4.1: nível de hardware (HardwareAutoTuner) e cúpula de céu em gradiente
+    /** Nível efetivo de renderização; [tierOverride] força um nível (testes/roteiro de captura). */
+    var tier: RenderTier = RenderTier.LITE; private set
+    var tierOverride: RenderTier? = null
+    private lateinit var skyMat: Material
+    private var skyMi: MaterialInstance? = null
+    private var skyEntity = 0
+    private var skyVb: VertexBuffer? = null; private var skyIb: IndexBuffer? = null
+    private val kodakGradings = HashMap<WorldPreset, ColorGrading>()
 
     // ---- cidadãos articulados
     private class BoneGpu(val vb: VertexBuffer, val ib: IndexBuffer, val count: Int, val slot: CitizenModel.Slot, val box: Box)
@@ -347,7 +371,11 @@ class FilamentCityRenderer(
 
     private fun initCore() {
         check(ensureFilament()) { "biblioteca Filament não carregou" }
-        WorldGpu.softwareGl = isSoftwareGl()
+        val glRenderer = GlInfo.cached?.renderer
+        tier = tierOverride ?: if (glRenderer == null && isEmulatorBuild()) RenderTier.EMULATOR
+            else HardwareAutoTuner.renderTier(context, glRenderer)
+        WorldGpu.softwareGl = tier == RenderTier.EMULATOR
+        Log.i(TAG, "nível de renderização: ${tier.label} (GL_RENDERER=${glRenderer ?: "?"})")
         val heapBefore = android.os.Debug.getNativeHeapAllocatedSize()
         engine = Engine.create()
         renderer = engine.createRenderer()
@@ -357,9 +385,11 @@ class FilamentCityRenderer(
         view.setScene(scene)
         view.setCamera(fCamera)
         renderer.setClearOptions(Renderer.ClearOptions().apply { clear = true; clearColor = doubleArrayOf(0.0, 0.0, 0.0, 1.0) })
-        // emulador/SwiftShader: o caminho lit sai corrompido no tradutor GLES 3.0 → variante unlit
-        // com o mesmo layout de parâmetros, iluminada pela mesma câmera física (world_emu.mat)
-        pbrMat = loadMaterial(if (WorldGpu.softwareGl) "materials/world_emu.filamat" else "materials/world_pbr.filamat")
+        // material PBR único (girassol_world.mat). Emulador/SwiftShader: o caminho lit sai corrompido
+        // no tradutor GLES 3.0 → a MESMA fonte compilada com -DGIRASSOL_SOFTWARE_GL (variante unlit,
+        // mesmo layout de parâmetros, iluminada pela mesma câmera física)
+        pbrMat = loadMaterial(if (WorldGpu.softwareGl) "materials/girassol_world_fallback.filamat" else "materials/girassol_world.filamat")
+        skyMat = loadMaterial("materials/sky_gradient.filamat")
         glowMat = loadMaterial("materials/glow.filamat")
         shadowMat = loadMaterial("materials/contact_shadow.filamat")
         postMat = loadMaterial("materials/girassol_dehancer_post.filamat")
@@ -370,6 +400,7 @@ class FilamentCityRenderer(
         texOrm = WorldGpu.solid(engine, 255, 0, 255, 255, srgb = false)
         texNormal = WorldGpu.solid(engine, 128, 128, 255, 255, srgb = false)
         buildCitizenGeometry()
+        buildSkyDome()
         initPostPass()
         applyEffectLevel(level)
         nativeFootprint = (android.os.Debug.getNativeHeapAllocatedSize() - heapBefore).coerceAtLeast(FilamentMemory.MIN_ENGINE_BYTES)
@@ -378,7 +409,7 @@ class FilamentCityRenderer(
 
     // ================================================================== materiais
 
-    private fun profile(): CinematicProfile = CinematicProfile.forLevel(preset, level)
+    private fun profile(): CinematicProfile = CinematicProfile.forTier(preset, tier, level)
 
     /** Albedo aproximado enquanto a textura procedural da superfície ainda não chegou. */
     private fun fallbackAlbedo(surface: Int): FloatArray = when (surface) {
@@ -409,6 +440,9 @@ class FilamentCityRenderer(
         else mi.setParameter("surface", 0f, spec.rough, spec.metal, 0.05f)
         val e = spec.emissive ?: floatArrayOf(0f, 0f, 0f)
         mi.setParameter("emissiveColor", e[0], e[1], e[2], emissiveIntensity(spec.emissiveDriver))
+        // janelas: interior aceso por janela (fração acesa, intensidade, semente) decidido no shader
+        if (spec.window) mi.setParameter("windowParams", 1f, WINDOW_LIT_FRACTION, 1f, (spec.id.hashCode() and 0xffff) / 65535f)
+        else mi.setParameter("windowParams", 0f, 0f, 0f, 0f)
     }
 
     private fun fallbackRough(surface: Int): Float = when (surface) {
@@ -456,6 +490,8 @@ class FilamentCityRenderer(
         glowVb?.let { engine.destroyVertexBuffer(it) }; glowIb?.let { engine.destroyIndexBuffer(it) }; glowVb = null; glowIb = null
         for (e in lampEntities) { scene.removeEntity(e); engine.destroyEntity(e); EntityManager.get().destroy(e) }
         lampEntities.clear()
+        for (e in pointEntities) { scene.removeEntity(e); engine.destroyEntity(e); EntityManager.get().destroy(e) }
+        pointEntities.clear()
         if (sunEntity != 0) { scene.removeEntity(sunEntity); engine.destroyEntity(sunEntity); EntityManager.get().destroy(sunEntity); sunEntity = 0 }
         world = null
     }
@@ -569,7 +605,7 @@ class FilamentCityRenderer(
         if (!interior) {
             // GL por software (SwiftShader): luzes pontuais (froxels) derrubam o emulador à noite —
             // os postes ficam só com emissivo + glow
-            for (lamp in w.lamps.take(if (WorldGpu.softwareGl) 0 else 64)) {
+            for (lamp in w.lamps.take(streetLampBudget())) {
                 val e = EntityManager.get().create()
                 LightManager.Builder(LightManager.Type.POINT).color(LAMP_LINEAR[0], LAMP_LINEAR[1], LAMP_LINEAR[2]).intensity(0f)
                     .position(lamp.x, lamp.y, lamp.z).falloff(16f).castShadows(false).build(engine, e)
@@ -577,6 +613,28 @@ class FilamentCityRenderer(
                 lampEntities += e
             }
         }
+        // v4.1: luzes pontuais do teto do salão Lumon (níveis 1–3): 350 lux nas mesas, 250 lux nos
+        // corredores. Fluxo φ = E·4π·d² (lm) e raio de atenuação da especificação.
+        if (p.ceilingPointLights && tier.pointLights) {
+            val budget = if (tier == RenderTier.LITE) INTERIOR_POINT_LIGHTS_LITE else w.pointLights.size
+            for (pl in w.pointLights.take(budget)) {
+                val e = EntityManager.get().create()
+                LightManager.Builder(LightManager.Type.POINT).color(CEILING_LINEAR[0], CEILING_LINEAR[1], CEILING_LINEAR[2])
+                    .intensity(pl.lumens).position(pl.pos.x, pl.pos.y, pl.pos.z).falloff(pl.falloffM).castShadows(false)
+                    .build(engine, e)
+                scene.addEntity(e)
+                pointEntities += e
+            }
+            Log.i(TAG, "luzes pontuais do teto: ${pointEntities.size} (${tier.label})")
+        }
+    }
+
+    /** Postes com luz pontual por nível (LITE 16 · MID 32 · ULTRA 64 · emulador 0 — só emissivo + glow). */
+    private fun streetLampBudget(): Int = when (tier) {
+        RenderTier.EMULATOR -> 0
+        RenderTier.LITE -> 16
+        RenderTier.MID -> 32
+        RenderTier.ULTRA -> 64
     }
 
     // ================================================================== texturas / IBL
@@ -589,11 +647,8 @@ class FilamentCityRenderer(
         val gen = generation
         for (kind in WorldMaterials.surfacesFor(preset)) {
             if (surfaces.containsKey(kind)) continue
-            val size = when (kind) {
-                ProceduralAssetsNative.WET_ASPHALT, ProceduralAssetsNative.FACADE, ProceduralAssetsNative.CARPET, ProceduralAssetsNative.COFFER ->
-                    if (level == EffectLevel.FULL) PRIMARY_TEX else SECONDARY_TEX
-                else -> SECONDARY_TEX
-            }.let { if (WorldGpu.softwareGl) minOf(it, 256) else it }
+            // v4.1: 512² (Lite) / 1024² (Mid/Ultra) / 256² (emulador), pelo perfil do nível
+            val size = profile().textureSize.let { if (WorldGpu.softwareGl) minOf(it, 256) else it }
             val withEmissive = kind == ProceduralAssetsNative.FACADE || kind == ProceduralAssetsNative.BILLBOARD || kind == ProceduralAssetsNative.COFFER
             if (ex == null) {
                 // modo captura: gera e envia na própria thread do motor
@@ -628,7 +683,7 @@ class FilamentCityRenderer(
         if (syncAssets) {
             val face = if (WorldGpu.softwareGl) minOf(64, profile().iblFaceSize) else profile().iblFaceSize
             WorldGpu.generateIbl(ph, phaseSunDir(ph), overcast, face, 48)?.let { d ->
-                runCatching { WorldGpu.uploadIbl(engine, d, WorldExposure.iblLuxFor(ph)) }
+                runCatching { WorldGpu.uploadIbl(engine, d, WorldExposure.iblLuxFor(ph), specular = profile().specularIbl) }
                     .onSuccess { ibls[ph] = it; Log.i(TAG, "captura: IBL ${ph.label} ${face}² + SH3") }
                     .onFailure { Log.w(TAG, "IBL ${ph.label} ${face}² falhou", it) }
             }
@@ -636,7 +691,7 @@ class FilamentCityRenderer(
         }
         // 32² síncrono (≈ poucos ms) para nunca renderizar sem luz ambiente; 256² chega em seguida
         WorldGpu.generateIbl(ph, phaseSunDir(ph), overcast, 32, 16)?.let { d ->
-            runCatching { WorldGpu.uploadIbl(engine, d, WorldExposure.iblLuxFor(ph)) }
+            runCatching { WorldGpu.uploadIbl(engine, d, WorldExposure.iblLuxFor(ph), specular = profile().specularIbl) }
                 .onSuccess { ibls[ph] = it }.onFailure { Log.w(TAG, "IBL ${ph.label} 32² falhou", it) }
         }
         val ex = worker ?: return
@@ -649,7 +704,7 @@ class FilamentCityRenderer(
                 iblPending.remove(ph)
                 if (!initialized || gen != generation) return@post
                 val old = ibls[ph]
-                val n = runCatching { WorldGpu.uploadIbl(engine, d, WorldExposure.iblLuxFor(ph)) }
+                val n = runCatching { WorldGpu.uploadIbl(engine, d, WorldExposure.iblLuxFor(ph), specular = profile().specularIbl) }
                     .getOrElse { Log.w(TAG, "IBL ${ph.label} ${face}² falhou", it); return@post }
                 ibls[ph] = n
                 if (activeIbl === old) applyIbl(n)
@@ -663,7 +718,8 @@ class FilamentCityRenderer(
         activeIbl = ibl
         if (ibl == null) { scene.indirectLight = null; scene.skybox = null; return }
         scene.indirectLight = ibl.light
-        scene.skybox = if (preset == WorldPreset.URBAN_OVERCAST && !WorldGpu.softwareGl) ibl.skybox else null
+        // v4.1: o céu é a cúpula em gradiente (dia/entardecer/noite); o cubemap só ilumina
+        scene.skybox = null
         updateIblIntensity()
     }
 
@@ -672,6 +728,51 @@ class FilamentCityRenderer(
         // E(+Y) = intensidade · π · SH(+Y) → intensidade que dá a iluminância alvo
         val k = (cur[2] / Math.PI.toFloat()) / ibl.upIrradiance
         ibl.light.intensity = k
+    }
+
+    // ================================================================== céu em gradiente
+
+    /** Cúpula invertida (esfera unitária, culling front) com o material sky_gradient. */
+    private fun buildSkyDome() {
+        val m = LitMeshBuilder().apply { sphere(V3(0f, 0f, 0f), 1f, 1f, 1f, rings = 16, segments = 32) }.build()
+        val vb = WorldGpu.litVertexBuffer(engine, m); val ib = WorldGpu.indexBuffer(engine, m.indices)
+        skyVb = vb; skyIb = ib
+        val mi = skyMat.createInstance()
+        skyMi = mi
+        skyEntity = EntityManager.get().create()
+        RenderableManager.Builder(1).boundingBox(Box(0f, 0f, 0f, 1f, 1f, 1f)).culling(false)
+            .geometry(0, RenderableManager.PrimitiveType.TRIANGLES, vb, ib, 0, m.indices.size)
+            .material(0, mi).castShadows(false).receiveShadows(false).priority(7).layerMask(0xff, WorldLayers.WORLD)
+            .build(engine, skyEntity)
+        engine.transformManager.create(skyEntity)
+        skyVisible = false
+    }
+    private var skyVisible = false
+
+    /** Céu da fase (dia/entardecer/noite) só na cidade; segue a câmera; mesma cor da névoa no horizonte. */
+    private fun updateSky() {
+        val mi = skyMi ?: return
+        val urban = preset == WorldPreset.URBAN_OVERCAST
+        if (urban != skyVisible) {
+            if (urban) scene.addEntity(skyEntity) else scene.removeEntity(skyEntity)
+            skyVisible = urban
+        }
+        if (!urban) return
+        val s = SkyGradient.of(phase)
+        val z = linear(s.zenith); val h = linear(s.horizon); val sc = linear(s.sun)
+        val d = when (phase) {
+            TimePhase.NIGHT -> phaseSunDir(TimePhase.NIGHT)
+            else -> SunCycle.at(dayPhase.takeIf { !it.isNaN() } ?: 0.4f).dir
+        }
+        val n = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).coerceAtLeast(1e-4f)
+        mi.setParameter("zenithColor", z[0], z[1], z[2], s.zenithI)
+        mi.setParameter("horizonColor", h[0], h[1], h[2], s.horizonI)
+        mi.setParameter("sunDir", d[0] / n, d[1] / n, d[2] / n, SkyGradient.SUN_DISK_COS)
+        mi.setParameter("sunColor", sc[0], sc[1], sc[2], s.sunI)
+        mi.setParameter("skyMode", if (WorldGpu.softwareGl || !level.postProcessing) 1f else 0f, s.stars, s.gradientExp, s.haze)
+        val e = pose.eye
+        val tm = engine.transformManager
+        tm.setTransform(tm.getInstance(skyEntity), Mat4.mul(Mat4.translate(e.x, e.y, e.z), Mat4.scale(SKY_RADIUS_M, SKY_RADIUS_M, SKY_RADIUS_M)))
     }
 
     // ================================================================== cidadãos
@@ -704,6 +805,7 @@ class FilamentCityRenderer(
                 val rough = when (slot) { CitizenModel.Slot.SKIN -> 0.55f; CitizenModel.Slot.HAIR -> 0.7f; CitizenModel.Slot.SHOES -> 0.45f; else -> 0.85f }
                 mi.setParameter("surface", 0f, rough, 0f, 0.1f)
                 if (slot == CitizenModel.Slot.BADGE) mi.setParameter("emissiveColor", 0.3f, 0.85f, 1f, 0.8f) else mi.setParameter("emissiveColor", 0f, 0f, 0f, 0f)
+                mi.setParameter("windowParams", 0f, 0f, 0f, 0f)
                 zeroOffsets(mi)
             }
         }
@@ -798,7 +900,8 @@ class FilamentCityRenderer(
     }
 
     private fun configurePost() {
-        val strength = postStrength(level)
+        // v4.1: halação e grão vêm do perfil do nível (Mid: halação quente; Ultra: + grão Kodak)
+        val strength = postStrength(level)?.let { s -> val p = profile(); floatArrayOf(s[0], p.halation, s[2], p.grain) }
         renderTarget?.let { view.setRenderTarget(null); engine.destroyRenderTarget(it) }; renderTarget = null
         rtColor?.let { engine.destroyTexture(it) }; rtColor = null
         rtDepth?.let { engine.destroyTexture(it) }; rtDepth = null
@@ -856,10 +959,10 @@ class FilamentCityRenderer(
 
     /** Aplica o [CinematicProfile] efetivo (preset × nível de efeito) à View. */
     private fun applyEffectLevel(l: EffectLevel) {
-        val p = CinematicProfile.forLevel(preset, l)
+        val p = CinematicProfile.forTier(preset, tier, l)
         view.setShadowingEnabled(p.castShadows)
         if (WorldGpu.softwareGl) {
-            // emulador: sem pós do Filament (bloom, LUT 3D) — o world_emu entrega valores de tela
+            // emulador: sem pós do Filament (bloom, LUT 3D) — a variante girassol_world_fallback entrega valores de tela
             view.setPostProcessingEnabled(false)
             return
         }
@@ -884,7 +987,7 @@ class FilamentCityRenderer(
         view.setDithering(if (l.temporalDithering) View.Dithering.TEMPORAL else View.Dithering.NONE)
         view.setBloomOptions(View.BloomOptions().apply {
             // emulador/SwiftShader: sem bloom (sem cubemap de reflexo, NaN se propagariam pela cadeia)
-            enabled = p.bloomEnabled && !WorldGpu.softwareGl; strength = p.bloomStrength; levels = p.bloomLevels; resolution = p.bloomResolution
+            enabled = p.bloomEnabled && !WorldGpu.softwareGl; strength = p.bloomStrength; levels = p.bloomLevels; resolution = if (p.bloomQuarterRes) (heightPx / 4).coerceIn(90, p.bloomResolution) else p.bloomResolution
             threshold = true; highlight = p.effectiveBloomHighlight; lensFlare = false; starburst = false
         })
         view.setVignetteOptions(View.VignetteOptions().apply {
@@ -894,9 +997,31 @@ class FilamentCityRenderer(
         view.setDynamicResolutionOptions(View.DynamicResolutionOptions().apply { enabled = false; minScale = p.resolutionScale; maxScale = p.resolutionScale })
         view.setColorGrading(when {
             WorldGpu.softwareGl -> simpleGrading()
+            l.colorGrading && p.kodakLut -> kodakGrading(preset)
             l.colorGrading -> grading(preset)
             else -> null
         })
+    }
+
+    /**
+     * "LUT 3D Kodak 70 mm": gradação de negativo 5219/2383 assada pelo Filament na LUT 3D interna
+     * (32³) — mixer de canais com cruzamento leve, curvas de pé/ombro por canal (pretos frios,
+     * altas quentes), slope/offset/power e vibrance, sobre o perfil cinematográfico do preset.
+     */
+    private fun kodakGrading(p: WorldPreset): ColorGrading = kodakGradings.getOrPut(p) {
+        val prof = CinematicProfile.of(p)
+        val warm = p == WorldPreset.URBAN_OVERCAST
+        ColorGrading.Builder()
+            .toneMapper(ToneMapper.ACES())
+            .channelMixer(floatArrayOf(1.02f, -0.01f, -0.01f), floatArrayOf(0.01f, 0.98f, 0.01f), floatArrayOf(-0.02f, 0.03f, 0.99f))
+            .shadowsMidtonesHighlights(prof.shadowsTint, floatArrayOf(1f, 1f, 1f, 0f),
+                floatArrayOf(1.03f, 1.0f, 0.95f, 0f), floatArrayOf(0f, 0.333f, 0.55f, 1f))
+            .slopeOffsetPower(floatArrayOf(1.0f, 0.99f, 0.97f), floatArrayOf(0.004f, 0.002f, 0.006f), floatArrayOf(1.02f, 1.0f, 0.98f))
+            .curves(floatArrayOf(0.92f, 0.95f, 1.0f), floatArrayOf(0.98f, 1.0f, 1.02f), floatArrayOf(1.03f, 1.0f, if (warm) 0.94f else 0.97f))
+            .contrast(prof.contrast)
+            .vibrance(1.04f)
+            .saturation(prof.saturation * 0.97f)
+            .build(engine)
     }
 
     private var simpleGradingObj: ColorGrading? = null
@@ -914,7 +1039,8 @@ class FilamentCityRenderer(
             height = 0f; heightFalloff = 1.5f; density = cur[7]
             inScatteringStart = 0f; inScatteringSize = -1f
             fogColorFromIbl = false
-            color = linear(FOG_SRGB)
+            // v4.1: neblina com a cor do horizonte da fase (dia/entardecer/noite) — funde com o céu
+            color = if (preset == WorldPreset.URBAN_OVERCAST) linear(SkyGradient.of(phase).fog) else linear(FOG_SRGB)
         })
     }
 
@@ -1151,6 +1277,7 @@ class FilamentCityRenderer(
         }
         for (e in lampEntities) lm.setIntensity(lm.getInstance(e), cur[3])
         if (WorldGpu.softwareGl) applyEmuLighting(ph)
+        updateSky()
         updateIblIntensity()
         for ((id, mi) in sharedMis) {
             val spec = WorldMaterials.spec(id)
@@ -1166,7 +1293,7 @@ class FilamentCityRenderer(
     }
 
     /**
-     * Emulador: alimenta o world_emu com sol/céu em luminância de tela, derivados da MESMA câmera
+     * Emulador: alimenta o girassol_world_fallback com sol/céu em luminância de tela, derivados da MESMA câmera
      * física (EV100 interpolado → 1/(1,2·2^EV)) e das mesmas iluminâncias de [WorldExposure].
      */
     private fun applyEmuLighting(ph: TimePhase) {
@@ -1182,6 +1309,7 @@ class FilamentCityRenderer(
         val tint = linear(when (ph) {
             TimePhase.MORNING -> floatArrayOf(0.86f, 0.92f, 1.0f)
             TimePhase.AFTERNOON -> floatArrayOf(0.95f, 0.90f, 0.88f)
+            TimePhase.DUSK -> floatArrayOf(1.0f, 0.80f, 0.70f)
             TimePhase.NIGHT -> floatArrayOf(0.70f, 0.78f, 1.0f)
             TimePhase.INTERIOR -> floatArrayOf(1.0f, 0.98f, 0.94f)
         })
@@ -1220,7 +1348,8 @@ class FilamentCityRenderer(
             val st = rigStates.getOrPut(id) { CitizenRig.State() }
             val far = (p - eye).length() > CITIZEN_FAR_M * (if (preset == WorldPreset.URBAN_OVERCAST) 2.5f else 1.5f)
             val inp = CitizenRig.Input(maturity = a?.maturity ?: 1f, vx = a?.vx ?: 0f, vz = a?.vz ?: 0f, ticksPerSecond = tps,
-                typing = a?.typing == true, amplitude = VoiceAmplitude.level(id, now), dt = dt)
+                typing = a?.typing == true, amplitude = VoiceAmplitude.level(id, now), dt = dt,
+                seated = a != null && com.enhikyy.girassol.ui.components.CitizenText.seated(a))
             val speed = sqrt(inp.vx * inp.vx + inp.vz * inp.vz)
             walking[id] = (speed * tps / 0.6f).coerceIn(0f, 1f)
             val root = CitizenRig.pose(st, inp, boneScratch)
@@ -1254,7 +1383,7 @@ class FilamentCityRenderer(
         }
         val heading = Math.toDegrees(((st?.yaw ?: 0f) + fpc.yawOffset).toDouble()).toFloat()
         WorldViewState.publishPov(PovTelemetry(id, a.name, v[0], v[2], ((heading % 360f) + 360f) % 360f, sector,
-            a.action?.name?.lowercase()?.replace('_', ' ') ?: "ocioso", a.thought, neigh, s.widthTiles * TILE_M))
+            com.enhikyy.girassol.ui.components.CitizenText.status(a, com.enhikyy.girassol.ui.components.CitizenText.nearestPlace(s.objects, a.fx, a.fz)), a.thought, neigh, s.widthTiles * TILE_M))
     }
 
     private fun renderFrame(frameTimeNanos: Long, dt: Float) {
@@ -1327,6 +1456,12 @@ class FilamentCityRenderer(
         engine.destroyMaterial(pbrMat); engine.destroyMaterial(glowMat); engine.destroyMaterial(shadowMat)
         engine.destroyTexture(texWhite); engine.destroyTexture(texBlack); engine.destroyTexture(texOrm); engine.destroyTexture(texNormal)
         for ((_, g) in gradings) engine.destroyColorGrading(g)
+        for ((_, g) in kodakGradings) engine.destroyColorGrading(g)
+        kodakGradings.clear()
+        if (skyEntity != 0) { scene.removeEntity(skyEntity); engine.destroyEntity(skyEntity); engine.transformManager.destroy(skyEntity); EntityManager.get().destroy(skyEntity); skyEntity = 0 }
+        skyMi?.let { engine.destroyMaterialInstance(it) }; skyMi = null
+        skyVb?.let { engine.destroyVertexBuffer(it) }; skyIb?.let { engine.destroyIndexBuffer(it) }; skyVb = null; skyIb = null
+        engine.destroyMaterial(skyMat)
         simpleGradingObj?.let { engine.destroyColorGrading(it) }; simpleGradingObj = null
         gradings.clear()
         swapChain?.let { engine.destroySwapChain(it) }; swapChain = null
@@ -1339,8 +1474,17 @@ class FilamentCityRenderer(
     }
 }
 
-/** Emulador/GL por software (goldfish/ranchu, SwiftShader): sem pós-processamento do Filament. */
+/**
+ * v4.1 — emulador/GL por software: decidido pelo GL_RENDERER ("SwiftShader" ou "Android
+ * Emulator"), como exige a especificação. As heurísticas de Build só entram se a consulta EGL
+ * falhar (sem GL_RENDERER para decidir).
+ */
 internal fun isSoftwareGl(): Boolean {
+    GlInfo.cached?.renderer?.let { return com.enhikyy.girassol.hardware.RenderTier.isEmulatorRenderer(it) }
+    return isEmulatorBuild()
+}
+
+private fun isEmulatorBuild(): Boolean {
     val hw = android.os.Build.HARDWARE.lowercase()
     val fp = android.os.Build.FINGERPRINT.lowercase()
     val product = android.os.Build.PRODUCT.lowercase()

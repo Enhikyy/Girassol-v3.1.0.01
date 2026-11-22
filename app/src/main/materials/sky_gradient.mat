@@ -1,0 +1,68 @@
+// v4.1 — céu procedural da Aba Mundo: gradiente horizonte → zênite (dia / entardecer / noite),
+// disco solar com halo e faixa de bruma no horizonte com a MESMA cor da névoa da View, para que
+// prédios distantes se dissolvam no céu sem costura. Domo invertido centrado na câmera.
+// skyMode.x = 1 → codifica sRGB + ACES no shader (fallback de GL por software, pós desligado).
+material {
+    name : girassol_sky_gradient,
+    shadingModel : unlit,
+    requires : [ uv0 ],
+    culling : front,
+    depthWrite : false,
+    flipUV : false,
+    parameters : [
+        // rgb linear, w = intensidade
+        { type : float4, name : zenithColor },
+        { type : float4, name : horizonColor },
+        // xyz = direção PARA o sol, w = cosseno do raio angular do disco
+        { type : float4, name : sunDir },
+        // rgb linear, w = intensidade do disco
+        { type : float4, name : sunColor },
+        // x = codificar sRGB/ACES, y = estrelas (0..1), z = expoente do gradiente, w = altura da bruma
+        { type : float4, name : skyMode }
+    ]
+}
+
+vertex {
+    void materialVertex(inout MaterialVertexInputs material) {
+    }
+}
+
+fragment {
+    float girassolSkyHash(vec3 p) {
+        p = fract(p * 0.3183099 + 0.1);
+        p *= 17.0;
+        return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+    }
+
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+        highp vec3 dir = normalize(getWorldPosition() - getWorldCameraPosition());
+        float h = clamp(dir.y, -0.2, 1.0);
+        float t = pow(clamp(h, 0.0, 1.0), materialParams.skyMode.z);
+        vec3 zen = materialParams.zenithColor.rgb * materialParams.zenithColor.w;
+        vec3 hor = materialParams.horizonColor.rgb * materialParams.horizonColor.w;
+        vec3 c = mix(hor, zen, t);
+        // bruma no horizonte (mesma cor da névoa) e chão abaixo do horizonte
+        float haze = 1.0 - smoothstep(0.0, materialParams.skyMode.w, h);
+        c = mix(c, hor, haze);
+        // sol: disco + halo de Mie
+        vec3 sd = normalize(materialParams.sunDir.xyz);
+        float mu = dot(dir, sd);
+        float disk = smoothstep(materialParams.sunDir.w, materialParams.sunDir.w + 0.0006, mu);
+        float halo = pow(max(mu, 0.0), 48.0) * 0.35 + pow(max(mu, 0.0), 6.0) * 0.08;
+        vec3 sun = materialParams.sunColor.rgb * materialParams.sunColor.w;
+        c += sun * (disk + halo * step(0.0, h + 0.05));
+        // estrelas à noite (acima do horizonte)
+        if (materialParams.skyMode.y > 0.0 && h > 0.05) {
+            vec3 cell = floor(dir * 420.0);
+            float s = girassolSkyHash(cell);
+            c += vec3(step(0.9965, s) * materialParams.skyMode.y * (0.4 + 0.6 * fract(s * 91.7)) * zen.b * 6.0 + 0.0);
+        }
+        c = max(c, vec3(0.0));
+        if (materialParams.skyMode.x > 0.5) {
+            c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), 0.0, 1.0);
+            c = pow(c, vec3(1.0 / 2.2));
+        }
+        material.baseColor = vec4(c, 1.0);
+    }
+}

@@ -34,19 +34,25 @@ object CinematicCapture {
         val frames: Int, val dragX: Float = 0f, val dragY: Float = 0f, val stills: Map<Int, String> = emptyMap()
     )
 
+    /**
+     * v4.1 — roteiro: Dia, Entardecer, Noite, POV na rua, Interior Severance (+ POV no salão).
+     * Fração do dia: 0,36 manhã · 0,74 entardecer (TimePhase.DUSK) · 0,90 noite.
+     */
     private val script = listOf(
-        Segment("orbita_manha", WorldPreset.URBAN_OVERCAST, CameraMode.ORBIT, 0.36f, 26, dragX = 7f,
-            stills = mapOf(14 to "01_biosfera_3d", 25 to "04_orbita")),
-        Segment("inclinacao", WorldPreset.URBAN_OVERCAST, CameraMode.TILT, 0.42f, 20, dragX = 4f,
-            stills = mapOf(19 to "05_inclinacao")),
-        Segment("manha_8x", WorldPreset.URBAN_OVERCAST, CameraMode.ORBIT, 0.33f, 14, dragX = 3f, stills = mapOf(13 to "06_8x_manha")),
-        Segment("tarde_8x", WorldPreset.URBAN_OVERCAST, CameraMode.ORBIT, 0.68f, 14, dragX = 3f, stills = mapOf(13 to "07_8x_tarde")),
-        Segment("noite_8x", WorldPreset.URBAN_OVERCAST, CameraMode.ORBIT, 0.90f, 17, dragX = 3f, stills = mapOf(16 to "08_8x_noite")),
+        Segment("dia", WorldPreset.URBAN_OVERCAST, CameraMode.ORBIT, 0.36f, 26, dragX = 7f,
+            stills = mapOf(14 to "01_dia", 25 to "01b_dia_orbita")),
+        Segment("inclinacao", WorldPreset.URBAN_OVERCAST, CameraMode.TILT, 0.42f, 18, dragX = 4f,
+            stills = mapOf(17 to "01c_dia_inclinacao")),
+        Segment("entardecer", WorldPreset.URBAN_OVERCAST, CameraMode.ORBIT, 0.74f, 18, dragX = 3f,
+            stills = mapOf(17 to "02_entardecer")),
+        Segment("noite", WorldPreset.URBAN_OVERCAST, CameraMode.ORBIT, 0.90f, 18, dragX = 3f,
+            stills = mapOf(17 to "03_noite")),
         Segment("pov_rua", WorldPreset.URBAN_OVERCAST, CameraMode.FIRST_PERSON_POV, 0.62f, 26, dragX = -4f,
-            stills = mapOf(12 to "02_cidadaos_andando", 25 to "10_pov_primeira_pessoa")),
-        Segment("interior", WorldPreset.LUMON_INTERIOR, CameraMode.TILT, 0.45f, 22, dragX = 5f, stills = mapOf(21 to "11_interior_brutalista")),
+            stills = mapOf(12 to "04b_cidadaos_andando", 25 to "04_pov")),
+        Segment("interior", WorldPreset.LUMON_INTERIOR, CameraMode.TILT, 0.45f, 22, dragX = 5f,
+            stills = mapOf(21 to "05_interior_severance")),
         Segment("interior_pov", WorldPreset.LUMON_INTERIOR, CameraMode.FIRST_PERSON_POV, 0.45f, 22, dragX = 5f,
-            stills = mapOf(21 to "12_interior_pov"))
+            stills = mapOf(21 to "05b_interior_pov"))
     )
 
     fun run(ctx: Context, level: EffectLevel, mark: (String) -> Unit) {
@@ -100,7 +106,7 @@ object CinematicCapture {
                         File(out, "$name.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
                         mark("CAPTURA_MEDIA $tag $name ${meanRgb(px)}")
                         // diagnóstico: o mesmo quadro sem a passada analógica (dehancer) — isola cena × pós
-                        if (name == "01_biosfera_3d" || name == "11_interior_brutalista") {
+                        if (name == "01_dia" || name == "05_interior_severance") {
                             r.setPostBypass(true)
                             r.captureFrame(0f, seg.day, read = true)?.let { raw ->
                                 mark("CAPTURA_MEDIA $tag ${name}_sem_pos ${meanRgb(raw)}")

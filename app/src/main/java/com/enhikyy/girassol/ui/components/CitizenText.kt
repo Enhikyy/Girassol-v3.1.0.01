@@ -1,6 +1,7 @@
 package com.enhikyy.girassol.ui.components
 
 import com.enhikyy.girassol.core.world.ActionType
+import com.enhikyy.girassol.core.world.AgentView
 import com.enhikyy.girassol.core.world.ObjectView
 import com.enhikyy.girassol.core.world.SmartObjectType
 
@@ -32,6 +33,19 @@ object CitizenText {
         SmartObjectType.PRACA -> "na praça"
         SmartObjectType.OFICINA -> "na oficina"
     }
+
+    /**
+     * v4.1 — linha de status do HUD. Comer só é "Comendo em casa" quando o cidadão está de fato
+     * dentro de casa ([AgentView.insideHome]); a caminho mostra "Indo para casa → Comer".
+     */
+    fun status(a: AgentView, place: String): String = when {
+        a.action == ActionType.COMER && a.insideHome -> "Comendo em casa"
+        a.action == ActionType.COMER -> "Indo para casa → Comer"
+        else -> "${action(a.action)} · $place"
+    }
+
+    /** Postura sentada no rig: digitando no terminal ou comendo dentro de casa. */
+    fun seated(a: AgentView): Boolean = a.typing || (a.action == ActionType.COMER && a.insideHome)
 
     /** Lugar mais próximo (até ~4 tiles); senão "a caminho". */
     fun nearestPlace(objects: List<ObjectView>, fx: Float, fz: Float): String {

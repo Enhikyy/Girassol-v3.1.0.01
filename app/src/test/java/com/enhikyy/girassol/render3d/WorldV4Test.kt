@@ -169,7 +169,7 @@ class WorldV4Test {
 
     @Test
     fun citizenModelHasAllBonesAndDeterministicPalette() {
-        assertEquals(7, CitizenModel.bones.size)
+        assertEquals(com.enhikyy.girassol.core.render.CitizenRig.BONES, CitizenModel.bones.size)
         assertTrue(CitizenModel.bones.all { b -> b.isNotEmpty() && b.all { it.mesh.vertexCount > 0 } })
         val p1 = CitizenModel.palette("adao"); val p2 = CitizenModel.palette("adao")
         assertTrue(p1.shirt.contentEquals(p2.shirt) && p1.skin.contentEquals(p2.skin))

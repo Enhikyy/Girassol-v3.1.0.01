@@ -52,10 +52,24 @@ abstract class CompileFilamentMaterials : DefaultTask() {
         out.deleteRecursively(); out.mkdirs()
         val tool = matc.get().asFile
         tool.setExecutable(true)
-        sourceDir.get().asFile.listFiles { f -> f.extension == "mat" }!!.sortedBy { it.name }.forEach { mat ->
+        // v4.1: todos os materiais para Vulkan + OpenGL ES 3.0. girassol_world.mat é a fonte ÚNICA
+        // do mundo: gera o PBR lit e, com templates/define, o fallback unlit de GL por software.
+        val litWorld = listOf("-TNAME=girassol_world", "-TSHADING=lit", "-TREFLECTIONS=screenspace",
+            "-TSPECULAR_AO=simple", "-TMULTI_BOUNCE=true")
+        val fallbackWorld = listOf("-TNAME=girassol_world_fallback", "-TSHADING=unlit", "-TREFLECTIONS=default",
+            "-TSPECULAR_AO=none", "-TMULTI_BOUNCE=false", "-DGIRASSOL_SOFTWARE_GL")
+        fun run(mat: File, outName: String, extra: List<String>) {
             exec.exec {
-                commandLine(tool.absolutePath, "-a", "opengl", "-p", "mobile", "-o",
-                    out.resolve(mat.nameWithoutExtension + ".filamat").absolutePath, mat.absolutePath)
+                commandLine(listOf(tool.absolutePath, "-a", "opengl", "-a", "vulkan", "-p", "mobile") + extra +
+                    listOf("-o", out.resolve("$outName.filamat").absolutePath, mat.absolutePath))
+            }
+        }
+        sourceDir.get().asFile.listFiles { f -> f.extension == "mat" }!!.sortedBy { it.name }.forEach { mat ->
+            if (mat.nameWithoutExtension == "girassol_world") {
+                run(mat, "girassol_world", litWorld)
+                run(mat, "girassol_world_fallback", fallbackWorld)
+            } else {
+                run(mat, mat.nameWithoutExtension, emptyList())
             }
         }
     }

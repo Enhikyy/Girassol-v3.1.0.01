@@ -25,6 +25,9 @@ data class GlDriverInfo(val renderer: String, val vendor: String, val version: S
 object GlInfo {
     private const val EGL_OPENGL_ES3_BIT_KHR = 0x40
 
+    /** GL_RENDERER do processo, consultado uma única vez (a sonda EGL custa alguns ms). */
+    val cached: GlDriverInfo? by lazy { query() }
+
     fun query(): GlDriverInfo? = runCatching {
         val dpy = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         val ver = IntArray(2)

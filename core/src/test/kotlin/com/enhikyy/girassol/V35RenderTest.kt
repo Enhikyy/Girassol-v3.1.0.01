@@ -88,6 +88,32 @@ class CitizenRigTest {
         val hand = Mat4.transform(typing.copyOfRange(CitizenRig.BONE_ARM_L * 16, CitizenRig.BONE_ARM_L * 16 + 16), -0.27f, 0.55f, 0f)
         assertTrue("mão à frente no teclado CRT: z=${hand[2]}", hand[2] > 0.25f)
     }
+    @Test fun kneeFlexesInSwingPhaseAndSeatedPoseFoldsTheLegs() {
+        assertEquals(9, CitizenRig.BONES)
+        // caminhando: em algum quadro a canela dobra em relação à coxa (pé atrás da linha da coxa)
+        val s = CitizenRig.State(); val out = FloatArray(CitizenRig.BONES * 16)
+        var maxBend = 0f
+        repeat(120) {
+            CitizenRig.pose(s, CitizenRig.Input(1f, 0.08f, 0f, 10f, false, 0f, 1f / 30f), out)
+            val thighFoot = Mat4.transform(out.copyOfRange(CitizenRig.BONE_LEG_L * 16, CitizenRig.BONE_LEG_L * 16 + 16), -0.10f, 0f, 0f)
+            val shinFoot = Mat4.transform(out.copyOfRange(CitizenRig.BONE_SHIN_L * 16, CitizenRig.BONE_SHIN_L * 16 + 16), -0.10f, 0f, 0f)
+            maxBend = maxOf(maxBend, kotlin.math.hypot((shinFoot[1] - thighFoot[1]).toDouble(), (shinFoot[2] - thighFoot[2]).toDouble()).toFloat())
+        }
+        assertTrue("flexão do joelho $maxBend", maxBend > 0.05f)
+        // parado em pé: canela alinhada à coxa
+        val (idle, _) = run(1f, 0f)
+        val a = Mat4.transform(idle.copyOfRange(CitizenRig.BONE_SHIN_L * 16, CitizenRig.BONE_SHIN_L * 16 + 16), -0.10f, 0f, 0f)
+        assertEquals(0f, a[2], 1e-4f)
+        // sentado: coxa para a frente (pé à frente do quadril), canela para baixo, raiz abaixada
+        val st = CitizenRig.State(); var root = FloatArray(16)
+        repeat(60) { root = CitizenRig.pose(st, CitizenRig.Input(1f, 0f, 0f, 10f, true, 0f, 1f / 30f, seated = true), out) }
+        val knee = Mat4.transform(out.copyOfRange(CitizenRig.BONE_SHIN_L * 16, CitizenRig.BONE_SHIN_L * 16 + 16), -0.10f, CitizenRig.KNEE_Y, 0f)
+        val foot = Mat4.transform(out.copyOfRange(CitizenRig.BONE_SHIN_L * 16, CitizenRig.BONE_SHIN_L * 16 + 16), -0.10f, 0f, 0f)
+        assertTrue("joelho à frente z=${knee[2]}", knee[2] > 0.2f)
+        assertTrue("joelho na altura do quadril y=${knee[1]}", knee[1] > 0.45f)
+        assertTrue("canela vertical: pé abaixo do joelho", foot[1] < knee[1] - 0.2f && abs(foot[2] - knee[2]) < 0.08f)
+        assertTrue("raiz abaixada ${root[13]}", root[13] < -0.05f)
+    }
 }
 
 class BackroomsCorridorsTest {

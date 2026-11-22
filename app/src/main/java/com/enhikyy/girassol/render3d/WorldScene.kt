@@ -31,8 +31,18 @@ data class MatSpec(
     val metal: Float = 0f,
     val normalStrength: Float = 1f,
     val emissive: FloatArray? = null,
-    val emissiveDriver: EmissiveDriver = EmissiveDriver.NONE
+    val emissiveDriver: EmissiveDriver = EmissiveDriver.NONE,
+    /** v4.1: vidro de janela (u = id da janela; acesa/apagada e 2700–4500 K decididos no shader). */
+    val window: Boolean = false
 )
+
+/**
+ * v4.1 — luz pontual de teto: [lux] de iluminância alvo a [targetDistM] metros abaixo (plano de
+ * trabalho). Fluxo do Filament: Φ = E · 4π · d² lúmens (fonte isotrópica, lei do inverso do quadrado).
+ */
+data class PointLightSpec(val pos: V3, val lux: Float, val targetDistM: Float, val falloffM: Float) {
+    val lumens: Float get() = lux * 4f * Math.PI.toFloat() * targetDistM * targetDistM
+}
 
 /** Como a intensidade emissiva varia com a fase do dia. */
 enum class EmissiveDriver { NONE, WINDOWS, BILLBOARD, STREET_LAMP, CEILING, MONITOR, BADGE }
@@ -58,7 +68,9 @@ class WorldScene(
     val mapX: (Float) -> Float,
     val mapZ: (Float) -> Float,
     /** Altura do piso caminhável na posição da cena (calçadas +0,15 m). */
-    val floorAt: (Float, Float) -> Float
+    val floorAt: (Float, Float) -> Float,
+    /** v4.1: luzes pontuais de teto (interior Lumon: 350 lux nas mesas, 250 lux nos corredores). */
+    val pointLights: List<PointLightSpec> = emptyList()
 ) {
     val vertexCount: Int get() = parts.sumOf { it.mesh.vertexCount } + instanced.sumOf { it.mesh.vertexCount * it.offsets.size }
     val instanceCount: Int get() = instanced.sumOf { it.offsets.size }

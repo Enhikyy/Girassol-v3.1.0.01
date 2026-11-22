@@ -92,7 +92,7 @@ XY=$(grep -o "PASSO CARTAO [-0-9]* [-0-9]*" "$OUT/logcat.txt" | tail -1 | awk '{
 echo "cidadão projetado em: $XY"
 case "$XY" in -1*|"") echo "sem projeção";; *) adb shell input tap $XY;; esac
 sleep 6; shot 03_cartao_cidadao
-tap_text "POV 1ª Pessoa"; sleep 10; shot app_02_pov_hud_minimapa
+tap_text "POV 1ª Pessoa"; sleep 10; shot 06_hud_pov
 step orbit; sleep 4
 step interior; sleep 12; shot app_03_interior
 step urban; sleep 8
@@ -112,7 +112,7 @@ alive && { timeout 60 adb shell am force-stop com.enhikyy.girassol.debug || true
 kill $IP 2>/dev/null
 kill $LP 2>/dev/null
 {
-  echo "== Resumo do logcat (Biosfera 3D v4.0) =="
+  echo "== Resumo do logcat (Biosfera 3D v4.1) =="
   echo "-- passos do roteiro"; grep -E "BiosferaDemo" "$OUT/logcat.txt" | sed -E 's/^.*PASSO/PASSO/'
   echo "-- calibração e pipeline"; grep -E "GpuCalibration|GirassolFilament" "$OUT/logcat.txt" | grep -vE "fps=" | head -60
   echo "-- captura offline (ms por quadro no SwiftShader)"; grep -E "BiosferaCaptura" "$OUT/logcat.txt" | sed -E "s/^.*BiosferaCaptura: //" | head -80

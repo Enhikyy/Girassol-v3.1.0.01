@@ -47,7 +47,7 @@ object WorldExposure {
         return when {
             ph == TimePhase.INTERIOR -> LightBand.INTERIOR
             ph == TimePhase.NIGHT -> LightBand.NIGHT
-            dayFraction >= 0.70f -> LightBand.DUSK
+            ph == TimePhase.DUSK -> LightBand.DUSK
             else -> LightBand.DAY
         }
     }
@@ -63,6 +63,7 @@ object WorldExposure {
     fun iblLuxFor(p: TimePhase): Float = when (p) {
         TimePhase.MORNING -> DAY.iblLux
         TimePhase.AFTERNOON -> DAY.iblLux
+        TimePhase.DUSK -> DUSK.iblLux
         TimePhase.NIGHT -> NIGHT.iblLux
         TimePhase.INTERIOR -> INTERIOR.iblLux
     }

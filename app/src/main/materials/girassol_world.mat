@@ -1,0 +1,135 @@
+// v4.1 — material ÚNICO da Aba Mundo (URBAN_OVERCAST / LUMON_INTERIOR / céu / humanoides).
+// Uma só fonte, duas compilações feitas pelo Gradle (CompileFilamentMaterials):
+//   girassol_world.filamat          — PBR "lit" (Vulkan + OpenGL ES 3.0, perfil mobile) usado em
+//                                     TODOS os celulares reais (níveis Lite/Mid/Ultra);
+//   girassol_world_fallback.filamat — a MESMA fonte com -TSHADING=unlit e -DGIRASSOL_SOFTWARE_GL,
+//                                     escolhida SOMENTE quando GL_RENDERER contém "SwiftShader"
+//                                     ou "Android Emulator" (o caminho lit do Filament sai
+//                                     corrompido no tradutor GLES do emulador).
+// Texturas procedurais C++20 (ProceduralWorldAssets): albedo sRGB + ORM (R=AO, G=rugosidade,
+// B=metálico) + normal tangente + máscara emissiva, com mipmaps gerados na GPU.
+// Instanciação: até 64 instâncias por renderable, deslocamento em instanceOffsets[i].xyz.
+// Janelas: windowParams.x > 0 liga o modo "vidro de janela": u = id da janela + u local,
+// um hash do id decide acesa/apagada (fração windowParams.y), a temperatura de cor
+// (2700–4500 K, conversão de Kelvin para RGB linear no shader) e a persiana.
+material {
+    name : ${NAME},
+    shadingModel : ${SHADING},
+    requires : [ uv0, tangents ],
+    reflections : ${REFLECTIONS},
+    specularAmbientOcclusion : ${SPECULAR_AO},
+    multiBounceAmbientOcclusion : ${MULTI_BOUNCE},
+    flipUV : false,
+    instanced : true,
+    culling : back,
+    parameters : [
+        { type : sampler2d, name : albedoTex, precision : medium },
+        { type : sampler2d, name : ormTex, precision : medium },
+        { type : sampler2d, name : normalTex, precision : medium },
+        { type : sampler2d, name : emissiveTex, precision : medium },
+        { type : float4, name : baseTint },
+        { type : float4, name : uvScale },
+        { type : float4, name : emissiveColor },
+        // (força da normal, viés de rugosidade, escala de metálico, AO mínimo)
+        { type : float4, name : surface },
+        // (modo janela 0/1, fração acesa, intensidade relativa, semente)
+        { type : float4, name : windowParams },
+        // somente fallback: xyz = direção PARA o sol, w = luminância difusa do sol por albedo
+        { type : float4, name : sunDirAmount },
+        // somente fallback: rgb = cor linear do sol
+        { type : float4, name : sunColor },
+        // somente fallback: rgb = luminância difusa do céu por albedo
+        { type : float4, name : skyAmbient },
+        { type : float4[64], name : instanceOffsets }
+    ]
+}
+
+vertex {
+    void materialVertex(inout MaterialVertexInputs material) {
+        vec4 o = materialParams.instanceOffsets[getInstanceIndex()];
+        material.worldPosition.xyz += o.xyz;
+    }
+}
+
+fragment {
+    float girassolHash1(float n) { return fract(sin(n * 12.9898 + 78.233) * 43758.5453); }
+
+    // Kelvin → RGB linear (ajuste de Tanner Helland, válido em 1000–40000 K), normalizado no máximo.
+    vec3 girassolKelvin(float k) {
+        float t = k / 100.0;
+        float r = t <= 66.0 ? 1.0 : clamp(1.292936186 * pow(t - 60.0, -0.1332047592), 0.0, 1.0);
+        float g = t <= 66.0 ? clamp(0.3900815788 * log(t) - 0.6318414438, 0.0, 1.0)
+                            : clamp(1.129890861 * pow(t - 60.0, -0.0755148492), 0.0, 1.0);
+        float b = t >= 66.0 ? 1.0 : (t <= 19.0 ? 0.0 : clamp(0.5432067891 * log(t - 10.0) - 1.196254089, 0.0, 1.0));
+        vec3 srgb = vec3(r, g, b);
+        vec3 lin = pow(srgb, vec3(2.2));
+        return lin / max(max(lin.r, lin.g), max(lin.b, 1e-4));
+    }
+
+    // Emissão da janela [id] no ponto local (lu, lv) ∈ [0,1]²: acesa ou apagada, 2700–4500 K,
+    // persiana parcial e gradiente de teto (luz vinda das luminárias internas).
+    vec3 girassolWindow(vec2 rawUv) {
+        float id = floor(rawUv.x) + materialParams.windowParams.w;
+        float lu = fract(rawUv.x);
+        float lv = clamp(rawUv.y, 0.0, 1.0);
+        float on = step(girassolHash1(id), materialParams.windowParams.y);
+        float kelvin = mix(2700.0, 4500.0, girassolHash1(id * 1.731 + 5.0));
+        float blind = girassolHash1(id * 3.117 + 11.0);
+        float blindEdge = 1.0 - blind * 0.55;                       // persiana desce até 55%
+        float blindMask = lv > blindEdge ? 0.18 : 1.0;
+        float ceiling = 0.72 + 0.28 * smoothstep(0.1, 0.95, lv);
+        float edge = smoothstep(0.0, 0.06, lu) * smoothstep(1.0, 0.94, lu);
+        float level = mix(0.65, 1.0, girassolHash1(id * 7.31 + 3.0));
+        return girassolKelvin(kelvin) * on * blindMask * ceiling * (0.55 + 0.45 * edge) * level *
+            materialParams.windowParams.z;
+    }
+
+    void material(inout MaterialInputs material) {
+        vec2 rawUv = getUV0();
+        vec2 uv = rawUv * materialParams.uvScale.xy + materialParams.uvScale.zw;
+        bool isWindow = materialParams.windowParams.x > 0.5;
+#if defined(GIRASSOL_SOFTWARE_GL)
+        prepareMaterial(material);
+        vec3 base = texture(materialParams_albedoTex, uv).rgb * materialParams.baseTint.rgb;
+        vec3 orm = texture(materialParams_ormTex, uv).rgb;
+        float ao = max(orm.r, materialParams.surface.w);
+        // normal facetada pelas derivadas de tela (orientada para a câmera)
+        highp vec3 wp = getWorldPosition();
+        vec3 fn = normalize(cross(dFdx(wp), dFdy(wp)));
+        if (dot(fn, getWorldCameraPosition() - wp) < 0.0) fn = -fn;
+        float ndl = max(dot(fn, normalize(materialParams.sunDirAmount.xyz)), 0.0);
+        float up = 0.55 + 0.45 * fn.y;
+        vec3 lit = base * (materialParams.skyAmbient.rgb * up * ao + materialParams.sunColor.rgb * ndl * materialParams.sunDirAmount.w);
+        vec3 e = texture(materialParams_emissiveTex, uv).rgb * materialParams.emissiveColor.rgb * materialParams.emissiveColor.w;
+        if (isWindow) {
+            // vidro: reflexo aproximado do céu (Fresnel de Schlick) + interior aceso
+            vec3 v = normalize(getWorldCameraPosition() - wp);
+            float fres = 0.04 + 0.96 * pow(1.0 - max(dot(fn, v), 0.0), 5.0);
+            lit = mix(lit, materialParams.skyAmbient.rgb * 1.4, fres);
+            e = girassolWindow(rawUv) * materialParams.emissiveColor.rgb * materialParams.emissiveColor.w;
+        }
+        // tonemapping ACES (Narkowicz) + sRGB no shader: no emulador o pós do Filament fica desligado
+        vec3 c = max(lit + e, vec3(0.0));
+        c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), 0.0, 1.0);
+        c = pow(c, vec3(1.0 / 2.2));
+        material.baseColor = vec4(c, 1.0);
+#else
+        vec3 n = texture(materialParams_normalTex, uv).xyz * 2.0 - 1.0;
+        n.xy *= materialParams.surface.x;
+        material.normal = normalize(n);
+        prepareMaterial(material);
+        vec4 a = texture(materialParams_albedoTex, uv);
+        material.baseColor = vec4(a.rgb * materialParams.baseTint.rgb, 1.0);
+        vec3 orm = texture(materialParams_ormTex, uv).rgb;
+        material.ambientOcclusion = max(orm.r, materialParams.surface.w);
+        material.roughness = clamp(orm.g + materialParams.surface.y, 0.045, 1.0);
+        material.metallic = clamp(orm.b * materialParams.surface.z, 0.0, 1.0);
+        vec3 e = texture(materialParams_emissiveTex, uv).rgb;
+        // emissiveColor.rgb = cor linear, .w = intensidade (≈ nits relativos à exposição)
+        material.emissive = vec4(e * materialParams.emissiveColor.rgb * materialParams.emissiveColor.w, 0.0);
+        if (isWindow) {
+            material.emissive = vec4(girassolWindow(rawUv) * materialParams.emissiveColor.rgb * materialParams.emissiveColor.w, 0.0);
+        }
+#endif
+    }
+}

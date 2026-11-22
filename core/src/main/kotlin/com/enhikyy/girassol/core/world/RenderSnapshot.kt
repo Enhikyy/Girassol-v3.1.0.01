@@ -13,7 +13,9 @@ data class AgentView(
     val vx: Float = 0f, val vz: Float = 0f,
     /** Digitando num terminal CRT (PESQUISAR/ESTUDAR executando no objeto). */
     val typing: Boolean = false,
-    val ageDays: Float = 0f
+    val ageDays: Float = 0f,
+    /** v4.1: parado (sem caminho pendente) a até 1 tile da própria casa — "dentro de casa". */
+    val insideHome: Boolean = false
 )
 
 data class ObjectView(val id: String, val type: SmartObjectType, val x: Int, val z: Int, val contaminated: Boolean, val occupancy: Int)
@@ -53,7 +55,8 @@ data class WorldRenderSnapshot(
                     CitizenGrowth.maturity(it.ageDays(state.tick), it.parents.isEmpty()),
                     it.vx.toFloat(), it.vz.toFloat(),
                     (it.intention?.action == ActionType.PESQUISAR || it.intention?.action == ActionType.ESTUDAR) && it.path.isEmpty() && it.actionTicksRemaining > 0,
-                    it.ageDays(state.tick).toFloat()) },
+                    it.ageDays(state.tick).toFloat(),
+                    insideHome = it.path.isEmpty() && state.obj(it.homeObjectId)?.let { h -> kotlin.math.abs(it.x - h.tileX) <= 1 && kotlin.math.abs(it.z - h.tileZ) <= 1 } == true) },
                 trail = state.board.channelSnapshot(CH_TRAIL),
                 foodScent = state.board.channelSnapshot(CH_FOOD),
                 population = alive.size,
