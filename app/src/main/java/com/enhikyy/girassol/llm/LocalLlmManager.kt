@@ -261,6 +261,24 @@ object LlmQuantPolicy {
     }
 }
 
+/**
+ * v4.2 — fonte ÚNICA da fidelidade de treino da sessão nativa. Gravada só na carga do contexto
+ * (retorno de nativeLlmTrainingFidelity) e lida por toda atualização de [LlmStats] e da
+ * telemetria do Orçamento Sináptico. Objeto leve (sem inicialização pesada) para o pacote
+ * synaptic ler sem disparar o init do [LocalLlmManager] nem criar ciclo de inicialização.
+ */
+object LlmSessionFidelity {
+    private val ref = java.util.concurrent.atomic.AtomicReference(LlmQuantPolicy.TrainingFidelity())
+    /** Última fidelidade publicada (valor imutável; leitura sem trava). */
+    val current: LlmQuantPolicy.TrainingFidelity get() = ref.get()
+    /** Só a carga de contexto chama isto; refreshes periódicos apenas leem [current]. */
+    internal fun publish(f: LlmQuantPolicy.TrainingFidelity) = ref.set(f)
+}
+
+/** Reaplica a fidelidade da sessão (fonte atômica) sobre qualquer cópia de [LlmStats]. */
+internal fun LlmStats.withSessionFidelity(f: LlmQuantPolicy.TrainingFidelity): LlmStats =
+    if (trainingF16 == f.pureF16 && trainingFidelity == f.label) this else copy(trainingF16 = f.pureF16, trainingFidelity = f.label)
+
 /** Um modelo .gguf importado; cada um é a mente exclusiva de 1 cidadão fundador. */
 data class ImportedModel(val key: String, val path: String, val bytes: Long, val active: Boolean = true, val sha256Head: String = "") {
     val displayName: String get() = key.removeSuffix(".gguf")
@@ -314,6 +332,15 @@ object LocalLlmManager : NeuralDeliberationPort {
     private val waitingSince = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     private val _stats = MutableStateFlow(LlmStats())
+
+    /**
+     * Toda escrita em [_stats] passa por aqui: aplica a alteração de forma atômica
+     * (MutableStateFlow.update = CAS) e SEMPRE reaplica a fidelidade de [LlmSessionFidelity],
+     * então nenhum refresh concorrente sobrescreve o valor com estado vazio ou anterior.
+     */
+    private inline fun updateStats(crossinline block: (LlmStats) -> LlmStats) {
+        _stats.update { cur -> block(cur).withSessionFidelity(LlmSessionFidelity.current) }
+    }
     val stats: StateFlow<LlmStats> = _stats.asStateFlow()
     private val _models = MutableStateFlow<List<ImportedModel>>(emptyList())
     /** Modelos importados (cada um vinculado a um cidadão fundador). */
@@ -350,9 +377,9 @@ object LocalLlmManager : NeuralDeliberationPort {
         kvType = profile.kvType
         lazyMode = LlmQuantPolicy.lazyFor(totalMem)
         _models.value = readRegistry(context)
-        _stats.update { it.copy(budgetMb = LlmQuantPolicy.budgetFor(totalMem) / (1024 * 1024), kvCache = LlmQuantPolicy.kvName(kvType), lazyMode = lazyMode) }
+        updateStats { it.copy(budgetMb = LlmQuantPolicy.budgetFor(totalMem) / (1024 * 1024), kvCache = LlmQuantPolicy.kvName(kvType), lazyMode = lazyMode) }
         runCatching { publishBudget(RamBudget.read(context)) }
-        if (!engineCompiled) { _stats.update { it.copy(status = LlmStatus.UNAVAILABLE) }; return }
+        if (!engineCompiled) { updateStats { it.copy(status = LlmStatus.UNAVAILABLE) }; return }
         refreshStatus()
         idleChecker.scheduleWithFixedDelay({ unloadIfIdle() }, 30, 30, java.util.concurrent.TimeUnit.SECONDS)
     }
@@ -498,7 +525,7 @@ object LocalLlmManager : NeuralDeliberationPort {
             if (!ready || inflight.get() > 0) return@execute
             ready = false; loadedKey = null
             runCatching { LlmNativeBridge.nativeLlmUnload() }
-            _stats.update { it.copy(lastError = "ocioso: contexto liberado (recarrega sob demanda)", idleUnloads = it.idleUnloads + 1) }
+            updateStats { it.copy(lastError = "ocioso: contexto liberado (recarrega sob demanda)", idleUnloads = it.idleUnloads + 1) }
             refreshStatus()
         }
     }
@@ -530,7 +557,7 @@ object LocalLlmManager : NeuralDeliberationPort {
     private fun publishLora(json: String) {
         val cycles = Regex("\"cycles\":(\\d+)").find(json)?.groupValues?.get(1)?.toIntOrNull() ?: 0
         val active = json.contains("\"active\":true")
-        _stats.update { it.copy(loraStatus = json, loraCycles = cycles, loraActive = active) }
+        updateStats { it.copy(loraStatus = json, loraCycles = cycles, loraActive = active) }
     }
 
     fun setEnabled(on: Boolean) {
@@ -569,7 +596,7 @@ object LocalLlmManager : NeuralDeliberationPort {
                 runCatching { LlmNativeBridge.nativeLlmUnload() }
             }
             ready = false; loadedKey = null
-            _stats.update { it.copy(status = LlmStatus.PAUSED_MEMORY, lastError = "disjuntor: $reason", memoryUnloads = it.memoryUnloads + 1) }
+            updateStats { it.copy(status = LlmStatus.PAUSED_MEMORY, lastError = "disjuntor: $reason", memoryUnloads = it.memoryUnloads + 1) }
         }
     }
 
@@ -593,12 +620,12 @@ object LocalLlmManager : NeuralDeliberationPort {
         worker.execute(f)
         val r = runCatching { f.get(90, java.util.concurrent.TimeUnit.SECONDS) }.getOrNull()
         if (r == null || r.size < 4) return "Benchmark falhou (${_stats.value.lastError.ifEmpty { "sem resposta" }})"
-        _stats.update { it.copy(benchPromptTps = r[0], benchGenTps = r[1]) }
+        updateStats { it.copy(benchPromptTps = r[0], benchGenTps = r[1]) }
         return "${target.displayName}: pp${r[2].toInt()} %.1f tok/s · tg${r[3].toInt()} %.1f tok/s · ${LlmNativeBridge.loadedVariant}".format(r[0], r[1])
     }
 
     private fun refreshStatus() {
-        _stats.update {
+        updateStats {
             val s = when {
                 !engineCompiled -> LlmStatus.UNAVAILABLE
                 _models.value.isEmpty() -> LlmStatus.NO_MODEL
@@ -623,11 +650,11 @@ object LocalLlmManager : NeuralDeliberationPort {
         if (ready && loadedKey == m.key) return true
         val ctx = appContext ?: return false
         if (memoryBreakerOpen) {
-            _stats.update { it.copy(status = LlmStatus.PAUSED_MEMORY, lastError = "disjuntor de memória aberto") }
+            updateStats { it.copy(status = LlmStatus.PAUSED_MEMORY, lastError = "disjuntor de memória aberto") }
             return false
         }
         val file = File(m.path)
-        if (!file.exists()) { _stats.update { it.copy(status = LlmStatus.ERROR, lastError = "arquivo ausente: ${m.key}") }; return false }
+        if (!file.exists()) { updateStats { it.copy(status = LlmStatus.ERROR, lastError = "arquivo ausente: ${m.key}") }; return false }
         val poolNow = if (profile.poolCapacity > 1) LlmQuantPolicy.parsePool(runCatching { LlmNativeBridge.nativeLlmPoolStatus() }.getOrDefault("")) else LlmQuantPolicy.PoolStatus()
         val others = poolNow.paths.zip(poolNow.bytes).filter { it.first != file.absolutePath }.map { it.second }
         // v3.8: orçamento dinâmico (MemAvailable ∧ availMem − Filament − gráfico − WAL − folga)
@@ -657,7 +684,7 @@ object LocalLlmManager : NeuralDeliberationPort {
         val chosenKvOrNull = LlmQuantPolicy.chooseKv(weightBytes, nCtx, kvType) { budget.fits(it) }
         if (chosenKvOrNull == null) {
             val minActive = LlmQuantPolicy.activeRamEstimate(weightBytes, nCtx, LlmQuantPolicy.KV_Q4_0)
-            _stats.update { it.copy(status = LlmStatus.PAUSED_MEMORY,
+            updateStats { it.copy(status = LlmStatus.PAUSED_MEMORY,
                 lastError = "RAM insuficiente agora: ${budget.availableMb} MB livres (${budget.source}), reserva ${budget.reserveMb} MB " +
                     "(Filament + gráfico + WAL + folga), modelo precisa de ~${minActive / 1048576} MB mesmo em KV q4_0") }
             return false
@@ -666,7 +693,7 @@ object LocalLlmManager : NeuralDeliberationPort {
         val ramReason = if (chosenKv != kvType)
             "disjuntor de RAM: ${budget.dynamicBytes / 1048576} MB livres < ~${preferredActive / 1048576} MB em KV ${LlmQuantPolicy.kvName(kvType)}"
             else ""
-        _stats.update { it.copy(status = LlmStatus.LOADING, modelName = m.key, lastError = "") }
+        updateStats { it.copy(status = LlmStatus.LOADING, modelName = m.key, lastError = "") }
         val threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 4)
         fun load(kv: Int, flash: Boolean) = runCatching {
             LlmNativeBridge.nativeLlmLoad(file.absolutePath, threads, nCtx, flash, kv, slotDirFor(ctx, m.key).absolutePath, MAX_SLOTS, pool)
@@ -688,7 +715,7 @@ object LocalLlmManager : NeuralDeliberationPort {
             if (err.isEmpty()) appliedKv = LlmQuantPolicy.KV_F16
         }
         if (err.isNotEmpty()) {
-            _stats.update { it.copy(status = LlmStatus.ERROR, lastError = "${m.key}: $err") }
+            updateStats { it.copy(status = LlmStatus.ERROR, lastError = "${m.key}: $err") }
             return false
         }
         val desc = runCatching { LlmNativeBridge.nativeLlmDescribe() }.getOrDefault("")
@@ -710,16 +737,16 @@ object LocalLlmManager : NeuralDeliberationPort {
             if (appliedKv != chosenKv) "motor recusou KV ${LlmQuantPolicy.kvName(chosenKv)} (arquitetura/head_dim)" else ""
         }
         val fidelity = LlmQuantPolicy.parseFidelity(runCatching { LlmNativeBridge.nativeLlmTrainingFidelity() }.getOrDefault(""), why)
-        com.enhikyy.girassol.synaptic.SynapticBudgetEngine.onTrainingFidelity(fidelity.pureF16, fidelity.label)
+        LlmSessionFidelity.publish(fidelity)
+        com.enhikyy.girassol.synaptic.SynapticBudgetEngine.onTrainingFidelityChanged()
         if (!fidelity.pureF16) Log.w(TAG, "${m.key}: sessão ${fidelity.label}")
-        _stats.update {
+        updateStats {
             it.copy(status = LlmStatus.READY, modelName = m.key, description = parts.getOrElse(0) { "" },
                 modelBytes = parts.getOrNull(1)?.toLongOrNull() ?: file.length(),
                 kvCache = parts.getOrNull(2)?.takeIf { c -> c.isNotBlank() } ?: LlmQuantPolicy.kvName(kvType),
                 quantAdvice = LlmQuantPolicy.weightAdvice(file.name + " " + parts.getOrElse(0) { "" }, ftype, LlmNativeBridge.cpuFlags.fp16),
                 weightType = ftype, headDim = headDim, activeEstimateMb = active / 1048576,
                 modelSwitches = it.modelSwitches + 1,
-                trainingF16 = fidelity.pureF16, trainingFidelity = fidelity.label,
                 nativeHeapMb = android.os.Debug.getNativeHeapAllocatedSize() / 1048576.0)
         }
         publishPool()
@@ -731,7 +758,7 @@ object LocalLlmManager : NeuralDeliberationPort {
     private fun poolKeys(): List<String> = LlmQuantPolicy.parsePool(runCatching { LlmNativeBridge.nativeLlmPoolStatus() }.getOrDefault("")).paths
 
     private fun publishBudget(b: RamBudget.Budget) {
-        _stats.update { it.copy(budgetMb = b.staticBytes / 1048576, dynamicBudgetMb = b.dynamicMb,
+        updateStats { it.copy(budgetMb = b.staticBytes / 1048576, dynamicBudgetMb = b.dynamicMb,
             budgetReserveMb = b.reserveMb, budgetSource = b.source) }
     }
 
@@ -747,7 +774,7 @@ object LocalLlmManager : NeuralDeliberationPort {
             val n = runCatching { LlmNativeBridge.nativeLlmEvictParked() }.getOrDefault(0)
             if (n > 0) {
                 Log.w(TAG, "pressão de memória ($reason): $n modelo(s) estacionado(s) despejado(s)")
-                _stats.update { it.copy(pressureEvictions = it.pressureEvictions + n, lastError = "despejo por pressão: $reason") }
+                updateStats { it.copy(pressureEvictions = it.pressureEvictions + n, lastError = "despejo por pressão: $reason") }
                 publishPool()
             }
             appContext?.let { runCatching { publishBudget(RamBudget.read(it)) } }
@@ -773,7 +800,7 @@ object LocalLlmManager : NeuralDeliberationPort {
     private fun publishPool() {
         val st = LlmQuantPolicy.parsePool(runCatching { LlmNativeBridge.nativeLlmPoolStatus() }.getOrDefault(""))
         val byPath = _models.value.associateBy { File(it.path).absolutePath }
-        _stats.update {
+        updateStats {
             it.copy(poolCapacity = st.capacity, poolResident = st.resident, poolHits = st.switches,
                 poolColdLoads = st.coldLoads, poolEvictions = st.evictions,
                 poolKeys = st.paths.map { p -> byPath[p]?.key ?: File(p).name })
@@ -847,7 +874,7 @@ object LocalLlmManager : NeuralDeliberationPort {
                     results += NeuralDecision(request.agentId, request.tick, parsed.action, parsed.thought, parsed.speech,
                         genTokens, ms.toLong(), "llama.cpp:${target.displayName}")
                 }
-                _stats.update {
+                updateStats {
                     it.copy(tokensPerSecond = if (tps > 0) tps else it.tokensPerSecond, lastLatencyMs = ms,
                         genTokensPerSecond = if (genTps > 0) genTps else it.genTokensPerSecond,
                         decisions = it.decisions + if (parsed != null) 1 else 0,
@@ -861,7 +888,7 @@ object LocalLlmManager : NeuralDeliberationPort {
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "geração falhou", t)
-                _stats.update { it.copy(rejected = it.rejected + 1, lastError = t.message ?: "erro") }
+                updateStats { it.copy(rejected = it.rejected + 1, lastError = t.message ?: "erro") }
             } finally {
                 pendingAgents.remove(request.agentId)
                 inflight.decrementAndGet()
@@ -899,7 +926,7 @@ object LocalLlmManager : NeuralDeliberationPort {
                 lastUse = System.currentTimeMillis()
                 val text = if (r[1].isEmpty()) com.enhikyy.girassol.core.cognition.NeuralProtocol.parseChat(r[0]) else null
                 val tps = r[5].toDoubleOrNull() ?: 0.0
-                _stats.update { it.copy(tokensPerSecond = if (tps > 0) tps else it.tokensPerSecond, lastLatencyMs = r[4].toDoubleOrNull() ?: it.lastLatencyMs,
+                updateStats { it.copy(tokensPerSecond = if (tps > 0) tps else it.tokensPerSecond, lastLatencyMs = r[4].toDoubleOrNull() ?: it.lastLatencyMs,
                     lastOutput = r[0].take(220), lastError = r[1]) }
                 if (text != null) onDone(text, "gguf:${target.displayName}") else onDone(null, r[1].ifEmpty { "resposta fora da gramática" })
             } catch (t: Throwable) {

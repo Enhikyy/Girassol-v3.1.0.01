@@ -6,6 +6,7 @@ import androidx.compose.runtime.Immutable
 import com.enhikyy.girassol.data.GirassolRecordCodec
 import com.enhikyy.girassol.data.SynapticBudgetStore
 import com.enhikyy.girassol.hardware.HardwareAutoTuner
+import com.enhikyy.girassol.llm.LlmSessionFidelity
 import com.enhikyy.girassol.nativebridge.LlmNativeBridge
 import com.enhikyy.girassol.nativebridge.SynapticBudgetNative
 import kotlinx.coroutines.CoroutineScope
@@ -124,7 +125,7 @@ object SynapticBudgetEngine {
         scope.launch {
             runCatching { startOnEngineThread(app) }.onFailure {
                 Log.e(TAG, "falha ao iniciar o Orçamento Sináptico", it)
-                _telemetry.value = _telemetry.value.copy(message = "erro: ${it.javaClass.simpleName}: ${it.message}")
+                _telemetry.update { s -> s.copy(message = "erro: ${it.javaClass.simpleName}: ${it.message}") }
             }
         }
     }
@@ -182,11 +183,13 @@ object SynapticBudgetEngine {
     }
 
     /**
-     * v4.2 — fidelidade de treino da sessão LLM ativa (vem do JNI a cada carga de contexto).
+     * v4.2 — fidelidade de treino da sessão LLM ativa. O valor vive em [LlmSessionFidelity]
+     * (AtomicReference gravada na carga do contexto); aqui só é reaplicado na telemetria.
      * Não toca o estado nativo do núcleo sb: só a telemetria imutável (paridade bit a bit intacta).
      */
-    fun onTrainingFidelity(pureF16: Boolean, label: String) {
-        _telemetry.update { it.copy(trainingF16 = pureF16, trainingFidelity = label) }
+    fun onTrainingFidelityChanged() {
+        val f = LlmSessionFidelity.current
+        _telemetry.update { it.copy(trainingF16 = f.pureF16, trainingFidelity = f.label) }
     }
 
     /** Consolida as ativações preparadas pelo treino LoRA on-device (ciclo aceito). */
@@ -283,16 +286,22 @@ object SynapticBudgetEngine {
                 }
             }
         }
-        val prev = _telemetry.value
-        _telemetry.value = SynapticTelemetrySnapshot(
-            loaded = true, abi = SynapticBudgetNative.nativeAbi(), dim = dim,
+        // update (CAS): um onTrainingFidelityChanged() concorrente nunca é perdido, e a fidelidade
+        // vem sempre da fonte atômica, não do snapshot anterior.
+        val abi = SynapticBudgetNative.nativeAbi()
+        val epsList = eps.toList()
+        _telemetry.update { prev ->
+            val f = LlmSessionFidelity.current
+            SynapticTelemetrySnapshot(
+            loaded = true, abi = abi, dim = dim,
             protectedRank = t[0].toInt(), tasks = t[1].toInt(), freeFraction = t[2], totalEnergy = t[3], epsilon = t[4],
-            epsilonHistory = eps.toList(), forgettingBound = bound,
+            epsilonHistory = epsList, forgettingBound = bound,
             tau = tau, alpha = alpha, r2Exp = r2e, r2Pow = r2p, regime = regime,
             loraProjectedBlocks = t[7].toLong(), stagedRows = t[8].toInt(),
             bridgeActive = bridge ?: prev.bridgeActive, worldObservations = worldObservations,
             serializedBytes = lastSerialized, checksumHex = lastChecksum, persisted = persisted, restoredFromDisk = restored,
             selfTest = selfTestSummary, message = message,
-            trainingF16 = prev.trainingF16, trainingFidelity = prev.trainingFidelity)
+            trainingF16 = f.pureF16, trainingFidelity = f.label)
+        }
     }
 }
