@@ -177,3 +177,25 @@ if(GIRASSOL_HAS_LLAMA)
         message(STATUS "Girassol: llguidance ausente — gramática GBNF estrita (fallback)")
     endif()
 endif()
+
+# ---------------------------------------------------------------- Cérebro Cortical v8
+# Núcleo cortical autônomo v8 (ED-SDPC + H-SSM-Sparse + CLWM-AIF + OSN-ESC + PC-SM).
+# Invariantes A2/A3/A4 idênticas às do girassol_sb: 0 FMA, 0 libm, 0 heap no hot
+# path (toda memória fatiada de Arena64 sobre buffer .bss estático de 26 MiB —
+# ver girassol_v8_jni.cpp). O header canônico vive em core/v8/ (raiz do repo) e é
+# o MESMO arquivo validado pela bateria TEST-V8-1..5 do workflow
+# .github/workflows/girassol_v8_ci.yml (x86_64, arm64-v8a via QEMU e NDK).
+add_library(girassol_v8 SHARED girassol_v8_jni.cpp)
+target_include_directories(girassol_v8 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../../core/v8)
+set(GIRASSOL_V8_FP_FLAGS -std=c++20 -O2 -ffp-contract=off -fno-fast-math -fno-math-errno
+    -fno-unsafe-math-optimizations -fno-associative-math -fno-reciprocal-math
+    -fhonor-nans -fhonor-infinities)
+target_compile_options(girassol_v8 PRIVATE -Wall -Wextra -Werror ${GIRASSOL_V8_FP_FLAGS} ${GIRASSOL_HARDEN_COMPILE})
+# Blindagem idêntica à do girassol_sb: remove flags globais hostis ao determinismo.
+get_target_property(_v8_opts girassol_v8 COMPILE_OPTIONS)
+list(REMOVE_ITEM _v8_opts -Ofast -ffast-math -funsafe-math-optimizations -ffp-contract=fast -mfma)
+set_target_properties(girassol_v8 PROPERTIES COMPILE_OPTIONS "${_v8_opts}")
+target_link_options(girassol_v8 PRIVATE ${GIRASSOL_HARDEN_LINK})
+set_target_properties(girassol_v8 PROPERTIES LINK_DEPENDS "${GIRASSOL_EXPORTS_MAP}")
+target_link_libraries(girassol_v8 PRIVATE log)
