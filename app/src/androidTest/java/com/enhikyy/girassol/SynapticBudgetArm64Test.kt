@@ -29,7 +29,7 @@ class SynapticBudgetArm64Test {
     private val tag = "SynapticBudgetTest"
 
     @Test
-    fun selfTestsT1toT18MatchCanonicalHash() = runBlocking {
+    fun selfTestsT1toT18MatchCanonicalHash(): Unit = runBlocking {
         assertTrue("libgirassol_sb não carregou: ${SynapticBudgetNative.loadError}", SynapticBudgetNative.loaded)
         val r = SynapticBudgetEngine.runSelfTests()
         Log.i(tag, "ABI=${r.abi} (aparelho ${Build.SUPPORTED_ABIS.joinToString()}) checks=${r.checks} fails=${r.fails} T13_HASH=${r.t13Hash}")
@@ -43,7 +43,7 @@ class SynapticBudgetArm64Test {
     }
 
     @Test
-    fun grsRoundTripThroughEngineAndCodec() = runBlocking {
+    fun grsRoundTripThroughEngineAndCodec(): Unit = runBlocking {
         SynapticBudgetEngine.start(InstrumentationRegistry.getInstrumentation().targetContext)
         val t = withTimeout(30_000) { SynapticBudgetEngine.telemetry.first { it.ready } }
         val ram = InstrumentationRegistry.getInstrumentation().targetContext
