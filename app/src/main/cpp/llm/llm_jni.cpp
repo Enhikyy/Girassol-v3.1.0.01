@@ -241,4 +241,10 @@ Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmModelInfo(JNIEnv
     return str(env, s);
 }
 
+// v4.2: "f16|kv=f16|pedido=f16|pesos=F16|hd=64" ou "degradado|…|motivo=…" (vazio sem contexto).
+JNIEXPORT jstring JNICALL
+Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmTrainingFidelity(JNIEnv* env, jobject) {
+    return str(env, gLlm.trainingFidelity());
+}
+
 }  // extern "C"

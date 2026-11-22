@@ -216,6 +216,42 @@ static void llmTest() {
         } else {
             CHECK(rq.find("kv=q8_0") != std::string::npos, "Q8_0 mantido quando head_dim%32==0");
         }
+        CHECK(eq.trainingFidelity().rfind("degradado|", 0) == 0, "sessão abaixo de F16 sinalizada como degradada");
+        eq.unload();
+    }
+
+    // --- v4.2: F16 é o padrão nº 1 (treino LoRA/RSI) e o motor nunca infla o KV acima do pedido
+    {
+        girassol::llm::LlmEngine e16;
+        girassol::llm::LlmLoadConfig cfg;
+        cfg.nThreads = 2; cfg.nCtx = 256; cfg.flashAttn = true; cfg.kvType = girassol::llm::KvCacheType::F16;
+        CHECK(e16.load(path, cfg, &err), ("carrega com KV F16 (padrão) " + err).c_str());
+        const std::string rc = e16.runtimeConfig();
+        const std::string fid = e16.trainingFidelity();
+        std::printf("config F16: %s | fidelidade: %s\n", rc.c_str(), fid.c_str());
+        CHECK(rc.find("kv=f16") != std::string::npos, "KV F16 aplicado quando pedido");
+        const std::string w = e16.modelFtype();
+        if (w == "F16" || w == "BF16" || w == "F32") {
+            CHECK(fid.rfind("f16|kv=f16|pedido=f16|", 0) == 0, "sessão F16 pura sinalizada como apta a treino");
+        } else {
+            CHECK(fid.find("motivo=pesos") != std::string::npos, "pesos quantizados sinalizados como degradados");
+        }
+        const auto r16 = e16.generate("Voce e Ana.", "Escolha uma acao.", kGrammar, 48);
+        CHECK(r16.ok && !r16.text.empty() && r16.text.front() == '{', "geração com GBNF sobre KV F16");
+        e16.unload();
+        {
+            girassol::llm::LlmEngine e4;
+            cfg.kvType = girassol::llm::KvCacheType::Q4_0;
+            std::string e4err;
+            const bool ok4 = e4.load(path, cfg, &e4err);
+            const int32_t hd = ok4 ? e4.headDim() : -1;
+            if (ok4 && hd % 32 == 0) {
+                CHECK(e4.runtimeConfig().find("kv=q4_0") != std::string::npos, "Q4_0 aplicado quando head_dim%32==0");
+            } else {
+                // head_dim=8: Q4_0 impossível e F8/F16 são MAIORES -> recusa (Kotlin desce/decide)
+                CHECK(!ok4 && e4err.find("head_dim") != std::string::npos, "Q4_0 não é inflado para F8/F16 (disjuntor preservado)");
+            }
+        }
     }
 
     // --- v3.4: prefixo imutável + slots por cidadão + fast-forward + temperatura semeada

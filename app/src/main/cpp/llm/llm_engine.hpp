@@ -28,10 +28,11 @@ struct llama_adapter_lora;
 
 namespace girassol::llm {
 
-// F8_E4M3 (llama.cpp >= 1.0.0, GGML_TYPE_F8_E4M3): 1 byte/elem, bloco 1 (qualquer head_dim),
-// não exige flash attention. Na CPU arm64 a leitura é por tabela (sem kernel dotprod): é mais
-// lenta e menos precisa que Q8_0 (3 bits de mantissa), então NÃO é padrão de nenhum perfil.
-// Uso principal: degrau do fallback quando head_dim % 32 != 0 (antes caía direto em F16).
+// Política v4.2 (treino contínuo LoRA/RSI): F16 é o padrão nº 1 em todos os perfis. Os demais
+// tipos são só sobrevivência, escolhidos pelo Kotlin quando o Disjuntor de RAM não comporta F16
+// (escada F16 -> Q8_0 -> F8_E4M3 -> Q4_0, em ordem decrescente de bytes/elem).
+// F8_E4M3 (GGML_TYPE_F8_E4M3, llama.cpp >= 1.0.0): 1 byte/elem, bloco 1 (qualquer head_dim) e
+// não exige flash attention. O motor NUNCA troca o tipo pedido por um MAIOR (não fura o disjuntor).
 enum class KvCacheType : int { F16 = 0, Q8_0 = 1, Q4_0 = 2, F8_E4M3 = 3 };
 
 struct LlmLoadConfig {
@@ -142,8 +143,13 @@ public:
     // head_dim do modelo carregado e se o KV quantizado foi recusado por head_dim % 32 != 0.
     int32_t headDim() const;
     std::string modelFtype() const;
+    // v4.2 — fidelidade de treino da sessão ativa:
+    // "f16|kv=f16|pedido=f16|pesos=F16|hd=64" (F16 puro: KV F16 e pesos F16/BF16/F32) ou
+    // "degradado|kv=q8_0|pedido=f16|pesos=Q4_0|hd=64|motivo=pesos,kv". Vazio sem contexto.
+    std::string trainingFidelity() const;
 
 private:
+    std::string modelFtypeLocked() const;
     std::vector<int32_t> tokenize(const std::string& text, bool addSpecial) const;
     std::vector<int32_t> forcedTokens(const std::string& text) const;
     static constexpr size_t kMaxPiece = 24;
@@ -193,6 +199,7 @@ private:
     LlmLoadConfig cfg_;
     bool flashApplied_ = false;
     KvCacheType kvApplied_ = KvCacheType::F16;
+    KvCacheType kvRequested_ = KvCacheType::F16;
     std::vector<int32_t> cached_;  // tokens presentes na sequência 0 do KV-cache
     struct Slot { std::vector<int32_t> tokens; std::string file; };
     std::unordered_map<std::string, Slot> slots_;

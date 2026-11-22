@@ -9,11 +9,14 @@ import org.junit.Test
 class LlmQuantPolicyTest {
     private val gb = 1024L * 1024 * 1024
 
-    @Test fun kvCacheQ4EmQuatroGbEQ8Acima() {
-        assertEquals(LlmQuantPolicy.KV_Q4_0, LlmQuantPolicy.kvTypeFor(4 * gb - 200L * 1024 * 1024))
-        assertEquals(LlmQuantPolicy.KV_Q4_0, LlmQuantPolicy.kvTypeFor(4 * gb))
-        assertEquals(LlmQuantPolicy.KV_Q8_0, LlmQuantPolicy.kvTypeFor(8 * gb))
-        assertEquals(LlmQuantPolicy.KV_Q8_0, LlmQuantPolicy.kvTypeFor(12 * gb))
+    /** v4.2: F16 é o tipo preferido em TODOS os perfis (treino contínuo LoRA/RSI). */
+    @Test fun kvCacheF16PreferidoEmTodosOsPerfis() {
+        assertEquals(LlmQuantPolicy.KV_F16, LlmQuantPolicy.kvTypeFor(4 * gb - 200L * 1024 * 1024))
+        assertEquals(LlmQuantPolicy.KV_F16, LlmQuantPolicy.kvTypeFor(4 * gb))
+        assertEquals(LlmQuantPolicy.KV_F16, LlmQuantPolicy.kvTypeFor(8 * gb))
+        assertEquals(LlmQuantPolicy.KV_F16, LlmQuantPolicy.kvTypeFor(12 * gb))
+        for (ram in listOf(3631L, 8 * 1024L, 12 * 1024L)) assertEquals(LlmQuantPolicy.KV_F16, LlmQuantPolicy.profileFor(ram * 1024 * 1024).kvType)
+        assertEquals("f16", LlmQuantPolicy.kvName(LlmQuantPolicy.KV_F16))
         assertEquals("q4_0", LlmQuantPolicy.kvName(LlmQuantPolicy.KV_Q4_0))
         assertEquals("q8_0", LlmQuantPolicy.kvName(LlmQuantPolicy.KV_Q8_0))
         assertEquals("f8_e4m3", LlmQuantPolicy.kvName(LlmQuantPolicy.KV_F8_E4M3))
@@ -45,7 +48,7 @@ class LlmQuantPolicyTest {
             val bytes = size * mb
             assertNull("$size MB recusado", LlmQuantPolicy.admission(bytes, a22, p.nCtx, p.kvType))
             val est = LlmQuantPolicy.activeRamEstimate(bytes, p.nCtx, p.kvType) / mb
-            assertTrue("estimativa $est MB para $size MB", est in 150..450)
+            assertTrue("estimativa $est MB para $size MB", est in 250..550)
         }
     }
 
@@ -54,12 +57,48 @@ class LlmQuantPolicyTest {
         assertEquals(1024, LlmQuantPolicy.profileFor(4 * gb).nCtx)
         assertEquals(2048, LlmQuantPolicy.profileFor(8 * gb).nCtx)
         assertEquals(4096, LlmQuantPolicy.profileFor(12 * gb).nCtx)
-        assertEquals(LlmQuantPolicy.KV_Q4_0, LlmQuantPolicy.profileFor(4 * gb).kvType)
+        assertEquals(LlmQuantPolicy.KV_F16, LlmQuantPolicy.profileFor(4 * gb).kvType)
     }
 
-    @Test fun arquivoGiganteAindaRecusado() {
+    /** v4.2: nenhum .gguf é recusado; arquivo gigante só gera AVISO com o degrau esperado. */
+    @Test fun arquivoGiganteAceitoComAviso() {
         val p = LlmQuantPolicy.profileFor(a22)
-        assertTrue(LlmQuantPolicy.admission(3_000L * mb, a22, p.nCtx, p.kvType) != null)
+        val w = LlmQuantPolicy.admission(3_000L * mb, a22, p.nCtx, p.kvType)
+        assertTrue(w != null && w.startsWith("Aviso"))
+        assertTrue(w!!.contains("mapeável"))  // 3 GB cabe em F16 no orçamento, mas excede o mapeável estimado
+        val absurdo = LlmQuantPolicy.admission(20_000L * mb, a22, p.nCtx, p.kvType)
+        assertTrue(absurdo != null && absurdo.startsWith("Aviso") && absurdo.contains("disjuntor"))
+    }
+
+    /** v4.2: F16 sempre que couber; Q8_0 → F8_E4M3 → Q4_0 só quando o disjuntor não comporta. */
+    @Test fun escadaDeSobrevivenciaRespeitaDisjuntor() {
+        // arquivo 0 (residente) e n_ctx 1024: F16 264 MB, Q8_0 186, F8 181, Q4_0 144
+        fun pick(budgetMb: Long) = LlmQuantPolicy.chooseKv(0L, 1024) { it <= budgetMb * mb }
+        assertEquals(LlmQuantPolicy.KV_F16, pick(4_000))
+        assertEquals(LlmQuantPolicy.KV_F16, pick(264))
+        assertEquals(LlmQuantPolicy.KV_Q8_0, pick(200))
+        assertEquals(LlmQuantPolicy.KV_F8_E4M3, pick(183))
+        assertEquals(LlmQuantPolicy.KV_Q4_0, pick(150))
+        assertNull(pick(100))
+        // BabyLM/LFM compacto em F16 no Moto G62 (4 GB) não é rebaixado preventivamente
+        val p = LlmQuantPolicy.profileFor(a22)
+        assertEquals(LlmQuantPolicy.KV_F16, LlmQuantPolicy.chooseKv(462L * mb, p.nCtx) { it <= LlmQuantPolicy.budgetFor(a22) })
+        // a escada pode começar num degrau (ex.: motor recusou F16) e nunca sobe
+        assertEquals(LlmQuantPolicy.KV_F8_E4M3, LlmQuantPolicy.chooseKv(0L, 1024, LlmQuantPolicy.KV_F8_E4M3) { true })
+    }
+
+    @Test fun fidelidadeDeTreino() {
+        val pura = LlmQuantPolicy.parseFidelity("f16|kv=f16|pedido=f16|pesos=F16|hd=64")
+        assertTrue(pura.pureF16)
+        assertTrue(pura.label.startsWith("F16 puro"))
+        val ram = LlmQuantPolicy.parseFidelity("degradado|kv=q8_0|pedido=q8_0|pesos=F16|hd=64|motivo=kv", "disjuntor de RAM")
+        assertFalse(ram.pureF16)
+        assertEquals("q8_0", ram.kv)
+        assertTrue(ram.label.contains("disjuntor de RAM"))
+        val hd = LlmQuantPolicy.parseFidelity("degradado|kv=f8_e4m3|pedido=q8_0|pesos=Q4_0|hd=8|motivo=pesos,kv_head_dim")
+        assertTrue(hd.reason.contains("pesos quantizados") && hd.reason.contains("head_dim"))
+        assertFalse(LlmQuantPolicy.parseFidelity("").pureF16)
+        assertEquals("sem sessão", LlmQuantPolicy.parseFidelity("").label)
     }
 }
 

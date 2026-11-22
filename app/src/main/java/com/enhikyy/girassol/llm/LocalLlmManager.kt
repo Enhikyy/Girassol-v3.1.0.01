@@ -83,12 +83,17 @@ data class LlmStats(
     val dynamicBudgetMb: Long = -1,
     val budgetReserveMb: Long = 0,
     val budgetSource: String = "",
-    val pressureEvictions: Int = 0
+    val pressureEvictions: Int = 0,
+    /** v4.2: true = sessão em F16 puro (KV f16 + pesos F16/BF16/F32), apta a treino LoRA/RSI de alta precisão. */
+    val trainingF16: Boolean = false,
+    val trainingFidelity: String = ""
 )
 
 /**
- * Política de quantização para aparelhos ARM64 (Regra de Ouro KleidiAI): pesos Q4_0/Q8_0
- * usam os micro-kernels KleidiAI/i8mm do ggml-cpu; KV-cache Q4_0 em ≤ 4 GB e Q8_0 acima.
+ * Política de tipos v4.2 — prioridade absoluta de F16 (treino contínuo LoRA/RSI on-device):
+ * o KV-cache começa SEMPRE em F16 nos três perfis; Q8_0 → F8_E4M3 → Q4_0 são só degraus de
+ * sobrevivência, escolhidos em [chooseKv] quando o Disjuntor de RAM (orçamento dinâmico) não
+ * comporta o degrau anterior. Qualquer .gguf (tamanho ou quantização) é aceito na importação.
  * O "lazy mode" é aplicado no app: em ≤ 4 GB o modelo só carrega na primeira requisição
  * e é descarregado após [LAZY_IDLE_MS] ociosos (llama.cpp não possui flag --lazy-mode).
  */
@@ -96,8 +101,43 @@ object LlmQuantPolicy {
     const val KV_F16 = 0
     const val KV_Q8_0 = 1
     const val KV_Q4_0 = 2
-    /** llama.cpp 1.0.0 GGML_TYPE_F8_E4M3: opcional/fallback, nunca padrão de perfil (ver llm_engine.hpp). */
+    /** llama.cpp 1.0.0 GGML_TYPE_F8_E4M3: degrau de sobrevivência (ver llm_engine.hpp). */
     const val KV_F8_E4M3 = 3
+
+    /** Escada de sobrevivência em bytes/elem decrescentes: 2,0 → 1,0625 → 1,0 → 0,5625. */
+    val KV_LADDER: List<Int> = listOf(KV_F16, KV_Q8_0, KV_F8_E4M3, KV_Q4_0)
+
+    /**
+     * Primeiro degrau de [KV_LADDER] (a partir de [from]) cuja pegada ativa cabe em [fits].
+     * null = nem Q4_0 cabe agora → o disjuntor pausa a carga (o arquivo continua importado).
+     */
+    fun chooseKv(fileBytes: Long, nCtx: Int, from: Int = KV_F16, fits: (Long) -> Boolean): Int? =
+        KV_LADDER.drop(KV_LADDER.indexOf(from).coerceAtLeast(0)).firstOrNull { fits(activeRamEstimate(fileBytes, nCtx, it)) }
+
+    /** Fidelidade de treino reportada pelo motor ("f16|…" ou "degradado|…|motivo=…"). */
+    data class TrainingFidelity(val pureF16: Boolean = false, val kv: String = "", val weights: String = "", val reason: String = "", val raw: String = "") {
+        val label: String get() = when {
+            raw.isEmpty() -> "sem sessão"
+            pureF16 -> "F16 puro · apto a treino LoRA/RSI de alta precisão"
+            else -> "degradado (pesos $weights · KV $kv${if (reason.isNotEmpty()) " · $reason" else ""})"
+        }
+    }
+
+    /** [ramReason] não vazio = o próprio Kotlin rebaixou o KV pelo disjuntor de RAM. */
+    fun parseFidelity(raw: String, ramReason: String = ""): TrainingFidelity {
+        if (raw.isBlank()) return TrainingFidelity()
+        val f = raw.split('|')
+        val kv = f.drop(1).associate { p -> p.substringBefore('=') to p.substringAfter('=', "") }
+        val reasons = kv["motivo"].orEmpty().split(',').filter { it.isNotBlank() }.mapNotNull {
+            when (it) {
+                "pesos" -> "pesos quantizados no .gguf"
+                "kv_head_dim" -> "head_dim % 32 ≠ 0"
+                "kv" -> ramReason.ifBlank { "KV pedido abaixo de f16" }
+                else -> it
+            }
+        }
+        return TrainingFidelity(f[0] == "f16", kv["kv"].orEmpty(), kv["pesos"].orEmpty(), reasons.joinToString(", "), raw)
+    }
     const val LOW_RAM_BYTES = 4L * 1024 * 1024 * 1024 + 512L * 1024 * 1024
     const val LAZY_IDLE_MS = 90_000L
 
@@ -111,13 +151,15 @@ object LlmQuantPolicy {
     fun profileFor(totalMemBytes: Long): DeviceProfile {
         val gb = 1024L * 1024 * 1024
         return when {
-            totalMemBytes <= 5L * gb + gb / 2 -> DeviceProfile("4 GB", 1024, KV_Q4_0, "mmap com troca por turno, KV q4_0, filhos compartilham o .gguf base")
-            totalMemBytes <= 10L * gb -> DeviceProfile("8 GB", 2048, KV_Q8_0, "n_ctx 2048, KV q8_0, pool residente de 2 modelos (troca só o contexto)", poolCapacity = 2)
-            else -> DeviceProfile("12 GB", 4096, KV_Q8_0, "n_ctx 4096, KV q8_0, pool residente de 3 modelos (troca só o contexto)", poolCapacity = 3)
+            totalMemBytes <= 5L * gb + gb / 2 -> DeviceProfile("4 GB", 1024, KV_F16, "mmap com troca por turno, KV f16 (rebaixa só pelo disjuntor), filhos compartilham o .gguf base")
+            totalMemBytes <= 10L * gb -> DeviceProfile("8 GB", 2048, KV_F16, "n_ctx 2048, KV f16 (rebaixa só pelo disjuntor), pool residente de 2 modelos (troca só o contexto)", poolCapacity = 2)
+            else -> DeviceProfile("12 GB", 4096, KV_F16, "n_ctx 4096, KV f16 (rebaixa só pelo disjuntor), pool residente de 3 modelos (troca só o contexto)", poolCapacity = 3)
         }
     }
 
-    fun kvTypeFor(totalMemBytes: Long): Int = if (totalMemBytes <= LOW_RAM_BYTES) KV_Q4_0 else KV_Q8_0
+    /** v4.2: tipo PREFERIDO (F16 em todos os perfis); o efetivo sai de [chooseKv] na carga. */
+    @Suppress("UNUSED_PARAMETER")
+    fun kvTypeFor(totalMemBytes: Long): Int = KV_F16
     fun lazyFor(totalMemBytes: Long): Boolean = totalMemBytes <= LOW_RAM_BYTES
     fun kvName(t: Int): String = when (t) { KV_Q8_0 -> "q8_0"; KV_Q4_0 -> "q4_0"; KV_F8_E4M3 -> "f8_e4m3"; else -> "f16" }
 
@@ -167,15 +209,22 @@ object LlmQuantPolicy {
         return 96L * mb + (fileBytes * 0.35).toLong() + kvPerToken * nCtx
     }
 
-    /** null = aceitável; caso contrário a mensagem de recusa (português). */
-    fun admission(fileBytes: Long, totalMemBytes: Long, nCtx: Int, kvType: Int): String? {
+    /**
+     * v4.2: AVISO, nunca recusa — qualquer .gguf é importado. null = cabe no tipo preferido
+     * ([kvType], F16) pelo orçamento estático; senão descreve o degrau esperado ou a pausa do disjuntor.
+     */
+    fun admission(fileBytes: Long, totalMemBytes: Long, nCtx: Int, kvType: Int = KV_F16): String? {
         val mb = 1024L * 1024
-        val cap = maxModelFileFor(totalMemBytes)
-        if (fileBytes > cap) return "Modelo de ${fileBytes / mb} MB excede o máximo mapeável de ${cap / mb} MB neste aparelho"
-        val active = activeRamEstimate(fileBytes, nCtx, kvType)
         val budget = budgetFor(totalMemBytes)
-        if (active > budget) return "Modelo precisa de ~${active / mb} MB de RAM ativa (limite ${budget / mb} MB)"
-        return null
+        val cap = maxModelFileFor(totalMemBytes)
+        val kv = chooseKv(fileBytes, nCtx, kvType) { it <= budget }
+        return when {
+            kv == kvType && fileBytes <= cap -> null
+            kv == null -> "Aviso: ${fileBytes / mb} MB precisa de ~${activeRamEstimate(fileBytes, nCtx, KV_Q4_0) / mb} MB ativos mesmo em KV q4_0 " +
+                "(limite ${budget / mb} MB); importado, carrega quando o disjuntor permitir"
+            kv != kvType -> "Aviso: não cabe em KV ${kvName(kvType)}; deve rodar degradado em KV ${kvName(kv)}"
+            else -> "Aviso: ${fileBytes / mb} MB acima do mapeável estimado (${cap / mb} MB); importado mesmo assim"
+        }
     }
 
     data class PoolStatus(
@@ -279,7 +328,7 @@ object LocalLlmManager : NeuralDeliberationPort {
     @Volatile private var loadedKey: String? = null
     @Volatile private var scheduledKey: String? = null
     @Volatile private var lastSwitchMs = 0L
-    private var kvType = LlmQuantPolicy.KV_Q8_0
+    private var kvType = LlmQuantPolicy.KV_F16
     /** Perfil do aparelho (4 / 8 / 12 GB): n_ctx e tipo de KV. */
     @Volatile var profile: LlmQuantPolicy.DeviceProfile = LlmQuantPolicy.profileFor(4L * 1024 * 1024 * 1024); private set
     private val nCtx: Int get() = profile.nCtx
@@ -392,7 +441,8 @@ object LocalLlmManager : NeuralDeliberationPort {
                 size = if (c.isNull(1)) -1 else c.getLong(1)
             }
         }
-        if (size > 0) LlmQuantPolicy.admission(size, totalMem, nCtx, kvType)?.let { return ImportResult(null, it) }
+        // v4.2: nenhum tamanho/quantização é recusado; o aviso só informa o degrau esperado
+        val advice = if (size > 0) LlmQuantPolicy.admission(size, totalMem, nCtx, kvType) else null
         val dir = File(context.filesDir, "models/importados").apply { mkdirs() }
         val base = name.replace(Regex("[^A-Za-z0-9._-]"), "_").let { if (it.endsWith(".gguf", true)) it else "$it.gguf" }
         var safeName = base
@@ -406,14 +456,16 @@ object LocalLlmManager : NeuralDeliberationPort {
             if (r != 4 || String(magic, Charsets.US_ASCII) != "GGUF") return ImportResult(null, "Arquivo não é GGUF (cabeçalho inválido)")
             tmp.outputStream().use { out -> out.write(magic); ins.copyTo(out, 1 shl 16) }
         } ?: return ImportResult(null, "Não foi possível abrir o arquivo")
-        LlmQuantPolicy.admission(tmp.length(), totalMem, nCtx, kvType)?.let { tmp.delete(); return ImportResult(null, it) }
+        val finalAdvice = LlmQuantPolicy.admission(tmp.length(), totalMem, nCtx, kvType) ?: advice
+        finalAdvice?.let { Log.i(TAG, "$name: $it") }
         adapterFileFor(context, target).delete()
         tmp.renameTo(target)
         val m = ImportedModel(target.name, target.absolutePath, target.length(), true, headSha(target))
         ModelRegistryStore.upsert(context, RegisteredModel(m.key, m.path, m.bytes, m.sha256Head, null, null, null, true))
         _models.value = (_models.value.filter { it.key != m.key } + m).sortedBy { it.key }
         refreshStatus()
-        return ImportResult(m.key, "Importado: ${m.key} (${m.bytes / 1048576} MB, ~${activeEstimateMb(m)} MB de RAM ativa)")
+        return ImportResult(m.key, "Importado: ${m.key} (${m.bytes / 1048576} MB, ~${activeEstimateMb(m)} MB de RAM ativa em KV f16)" +
+            (finalAdvice?.let { " · $it" } ?: ""))
     }
 
     /** Remove um modelo importado (o cidadão continua vivo, pensando no modo simbólico). */
@@ -592,33 +644,48 @@ object LocalLlmManager : NeuralDeliberationPort {
         }
         val resident = pool > 1 && poolNow.paths.contains(file.absolutePath)
         // residente no pool: os pesos já estão mapeados, só o contexto (KV) é recriado
-        val active = if (resident) LlmQuantPolicy.activeRamEstimate(0L, nCtx, kvType)
-            else LlmQuantPolicy.activeRamEstimate(file.length(), nCtx, kvType)
-        if (pool > 1 && !resident && !budget.fits(active)) {
-            // pressão de RAM: despeja os modelos estacionados antes de recusar
+        val weightBytes = if (resident) 0L else file.length()
+        val preferredActive = LlmQuantPolicy.activeRamEstimate(weightBytes, nCtx, kvType)
+        if (pool > 1 && !resident && !budget.fits(preferredActive)) {
+            // pressão de RAM: despeja os modelos estacionados ANTES de rebaixar o KV (F16 tem prioridade)
             runCatching { LlmNativeBridge.nativeLlmSetPoolCapacity(1) }
             budget = RamBudget.read(ctx)
         }
         ready = false; loadedKey = null
         publishBudget(budget)
-        if (!budget.fits(active)) {
+        // v4.2: F16 primeiro; Q8_0 → F8_E4M3 → Q4_0 só se o disjuntor não comportar o degrau anterior
+        val chosenKv = LlmQuantPolicy.chooseKv(weightBytes, nCtx, kvType) { budget.fits(it) }
+        if (chosenKv == null) {
+            val minActive = LlmQuantPolicy.activeRamEstimate(weightBytes, nCtx, LlmQuantPolicy.KV_Q4_0)
             _stats.update { it.copy(status = LlmStatus.PAUSED_MEMORY,
                 lastError = "RAM insuficiente agora: ${budget.availableMb} MB livres (${budget.source}), reserva ${budget.reserveMb} MB " +
-                    "(Filament + gráfico + WAL + folga), modelo precisa de ~${active / 1048576} MB") }
+                    "(Filament + gráfico + WAL + folga), modelo precisa de ~${minActive / 1048576} MB mesmo em KV q4_0") }
             return false
         }
+        val ramReason = if (chosenKv != kvType)
+            "disjuntor de RAM: ${budget.dynamicBytes / 1048576} MB livres < ~${preferredActive / 1048576} MB em KV ${LlmQuantPolicy.kvName(kvType)}"
+            else ""
         _stats.update { it.copy(status = LlmStatus.LOADING, modelName = m.key, lastError = "") }
         val threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 4)
         fun load(kv: Int, flash: Boolean) = runCatching {
             LlmNativeBridge.nativeLlmLoad(file.absolutePath, threads, nCtx, flash, kv, slotDirFor(ctx, m.key).absolutePath, MAX_SLOTS, pool)
         }.getOrElse { it.message ?: "erro" }
-        var err = load(kvType, true)
-        // fallback seguro p/ arquiteturas híbridas (ex.: LFM2.5 conv+atenção): KV f16 e, por fim, sem flash-attn
-        if (err.isNotEmpty() && kvType != LlmQuantPolicy.KV_F16) {
-            Log.w(TAG, "${m.key}: KV ${LlmQuantPolicy.kvName(kvType)} recusado ($err); tentando f16")
-            err = load(LlmQuantPolicy.KV_F16, true)
+        // O motor nativo já tenta sem flash e F8_E4M3 (nunca um tipo MAIOR que o pedido). Se o tipo
+        // escolhido for recusado (head_dim, MLA…), desce a escada — sempre dentro do disjuntor.
+        var err = "sem degrau de KV compatível"
+        var appliedKv = chosenKv
+        for (kv in LlmQuantPolicy.KV_LADDER.drop(LlmQuantPolicy.KV_LADDER.indexOf(chosenKv))) {
+            if (!budget.fits(LlmQuantPolicy.activeRamEstimate(weightBytes, nCtx, kv))) continue
+            err = load(kv, true)
+            if (err.isEmpty()) { appliedKv = kv; break }
+            Log.w(TAG, "${m.key}: KV ${LlmQuantPolicy.kvName(kv)} recusado ($err); descendo a escada")
         }
-        if (err.isNotEmpty()) err = load(LlmQuantPolicy.KV_F16, false)
+        // último recurso (arquitetura que recusa todo KV quantizado): F16, se ainda couber
+        if (err.isNotEmpty() && appliedKv != LlmQuantPolicy.KV_F16 &&
+            budget.fits(LlmQuantPolicy.activeRamEstimate(weightBytes, nCtx, LlmQuantPolicy.KV_F16))) {
+            err = load(LlmQuantPolicy.KV_F16, false)
+            if (err.isEmpty()) appliedKv = LlmQuantPolicy.KV_F16
+        }
         if (err.isNotEmpty()) {
             _stats.update { it.copy(status = LlmStatus.ERROR, lastError = "${m.key}: $err") }
             return false
@@ -637,6 +704,13 @@ object LocalLlmManager : NeuralDeliberationPort {
         loadedKey = m.key
         lastUse = System.currentTimeMillis()
         val parts = desc.split('|')
+        val active = LlmQuantPolicy.activeRamEstimate(weightBytes, nCtx, appliedKv)
+        val why = ramReason.ifBlank {
+            if (appliedKv != chosenKv) "motor recusou KV ${LlmQuantPolicy.kvName(chosenKv)} (arquitetura/head_dim)" else ""
+        }
+        val fidelity = LlmQuantPolicy.parseFidelity(runCatching { LlmNativeBridge.nativeLlmTrainingFidelity() }.getOrDefault(""), why)
+        com.enhikyy.girassol.synaptic.SynapticBudgetEngine.onTrainingFidelity(fidelity.pureF16, fidelity.label)
+        if (!fidelity.pureF16) Log.w(TAG, "${m.key}: sessão ${fidelity.label}")
         _stats.update {
             it.copy(status = LlmStatus.READY, modelName = m.key, description = parts.getOrElse(0) { "" },
                 modelBytes = parts.getOrNull(1)?.toLongOrNull() ?: file.length(),
@@ -644,6 +718,7 @@ object LocalLlmManager : NeuralDeliberationPort {
                 quantAdvice = LlmQuantPolicy.weightAdvice(file.name + " " + parts.getOrElse(0) { "" }, ftype, LlmNativeBridge.cpuFlags.fp16),
                 weightType = ftype, headDim = headDim, activeEstimateMb = active / 1048576,
                 modelSwitches = it.modelSwitches + 1,
+                trainingF16 = fidelity.pureF16, trainingFidelity = fidelity.label,
                 nativeHeapMb = android.os.Debug.getNativeHeapAllocatedSize() / 1048576.0)
         }
         publishPool()

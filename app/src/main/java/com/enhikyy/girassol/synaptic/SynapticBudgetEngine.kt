@@ -14,6 +14,7 @@ import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -55,6 +56,9 @@ data class SynapticTelemetrySnapshot(
     val restoredFromDisk: Boolean = false,
     val selfTest: String = "",
     val message: String = "",
+    /** v4.2: sessão LLM ativa em F16 puro (gradientes LoRA/RSI de alta precisão) ou degradada. */
+    val trainingF16: Boolean = false,
+    val trainingFidelity: String = "sem sessão LLM",
 ) {
     val ready: Boolean get() = loaded && dim > 0
 }
@@ -127,7 +131,7 @@ object SynapticBudgetEngine {
 
     private fun startOnEngineThread(app: Context) {
         if (!SynapticBudgetNative.loaded) {
-            _telemetry.value = SynapticTelemetrySnapshot(message = "libgirassol_sb indisponível: ${SynapticBudgetNative.loadError}")
+            _telemetry.update { it.copy(message = "libgirassol_sb indisponível: ${SynapticBudgetNative.loadError}") }
             return
         }
         val am = app.getSystemService(android.app.ActivityManager::class.java)
@@ -175,6 +179,14 @@ object SynapticBudgetEngine {
             persist()
             publish("lote do mundo observado ($n amostras)", null)
         }
+    }
+
+    /**
+     * v4.2 — fidelidade de treino da sessão LLM ativa (vem do JNI a cada carga de contexto).
+     * Não toca o estado nativo do núcleo sb: só a telemetria imutável (paridade bit a bit intacta).
+     */
+    fun onTrainingFidelity(pureF16: Boolean, label: String) {
+        _telemetry.update { it.copy(trainingF16 = pureF16, trainingFidelity = label) }
     }
 
     /** Consolida as ativações preparadas pelo treino LoRA on-device (ciclo aceito). */
@@ -280,6 +292,7 @@ object SynapticBudgetEngine {
             loraProjectedBlocks = t[7].toLong(), stagedRows = t[8].toInt(),
             bridgeActive = bridge ?: prev.bridgeActive, worldObservations = worldObservations,
             serializedBytes = lastSerialized, checksumHex = lastChecksum, persisted = persisted, restoredFromDisk = restored,
-            selfTest = selfTestSummary, message = message)
+            selfTest = selfTestSummary, message = message,
+            trainingF16 = prev.trainingF16, trainingFidelity = prev.trainingFidelity)
     }
 }

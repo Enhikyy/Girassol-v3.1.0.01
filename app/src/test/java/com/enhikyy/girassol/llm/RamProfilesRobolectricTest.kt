@@ -45,7 +45,7 @@ class RamProfilesRobolectricTest {
         val p = LlmQuantPolicy.profileFor(total)
         assertEquals("4 GB", p.label)
         assertEquals(1, p.poolCapacity)
-        assertEquals(LlmQuantPolicy.KV_Q4_0, p.kvType)
+        assertEquals(LlmQuantPolicy.KV_F16, p.kvType)
         assertTrue(LlmQuantPolicy.lazyFor(total))
         assertFalse("4 GB não baixa Piper/Whisper (SenseVoice + TTS do Android offline)", VoicePacks.allowedFor(p))
         val b = RamBudget.read(ctx)

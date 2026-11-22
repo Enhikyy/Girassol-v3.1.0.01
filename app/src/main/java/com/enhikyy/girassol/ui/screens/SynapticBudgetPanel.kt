@@ -53,6 +53,7 @@ fun SynapticBudgetPanel() {
         KeyValue("Espectro de A", "$regime · R² exp ${t.r2Exp.f(3)} / pot ${t.r2Pow.f(3)}")
         KeyValue("LoRA on-device", "${t.loraProjectedBlocks} blocos projetados · ${t.stagedRows} ativações pendentes · ponte ${if (t.bridgeActive) "ativa" else "inativa"}")
         KeyValue("LoRA do mundo", "${t.worldObservations} amostras observadas")
+        KeyValue("Fidelidade de treino", t.trainingFidelity)
         KeyValue("Persistência", if (t.serializedBytes > 0) "GRSB ${t.serializedBytes / 1024} KB · FNV ${t.checksumHex} · ${if (t.persisted) "SQLite WAL" else "pendente"}" else if (t.restoredFromDisk) "restaurado do SQLite WAL" else "sem gravação ainda")
         if (t.epsilonHistory.size >= 2) EpsilonSparkline(t.epsilonHistory)
         if (t.selfTest.isNotEmpty()) Text(t.selfTest, style = MonoStyle,

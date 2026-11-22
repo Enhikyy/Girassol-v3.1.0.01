@@ -363,34 +363,40 @@ bool LlmEngine::createContextLocked(std::string* err) {
         cp.abort_callback_data = &abort_;
         return llama_init_from_model(model_, cp);
     };
-    // F8_E4M3 não é tipo quantizado para o ggml: funciona com ou sem flash attention.
-    // Q8_0/Q4_0 quantizam V e por isso exigem flash attention.
-    flashApplied_ = cfg.flashAttn;
-    kvApplied_ = (cfg.flashAttn || cfg.kvType == KvCacheType::F8_E4M3) ? cfg.kvType : KvCacheType::F16;
+    // v4.2: tenta o tipo PEDIDO (o Kotlin já escolheu pelo Disjuntor de RAM, F16 primeiro) e só
+    // recua para tipos de bytes/elem MENORES OU IGUAIS — nunca infla o KV acima do pedido.
+    //   * Q8_0/Q4_0 (bloco 32) exigem head_dim % 32 == 0 e V quantizado exige flash attention;
+    //   * F8_E4M3 (bloco 1) aceita qualquer head_dim e roda sem flash (arquiteturas MLA/DeepSeek
+    //     recusam FP8 — aí o contexto falha e o Kotlin desce a escada);
+    //   * F16 tenta com flash e depois sem flash (AUTO).
+    auto bytesX16 = [](KvCacheType t) { switch (t) { case KvCacheType::F16: return 32; case KvCacheType::Q8_0: return 17;
+                                                     case KvCacheType::F8_E4M3: return 16; default: return 9; } };
+    auto blocked32 = [](KvCacheType t) { return t == KvCacheType::Q8_0 || t == KvCacheType::Q4_0; };
+    const bool hdOk = headDim_ > 0 && headDim_ % 32 == 0;
+    kvRequested_ = cfg.kvType;
     kvHeadDimFallback_ = false;
-    // Pré-checagem: Q8_0/Q4_0 (bloco de 32) exigem head_dim múltiplo de 32. F8_E4M3 tem bloco 1,
-    // então é o degrau natural antes de F16 (metade da RAM de KV em relação a F16).
-    if ((kvApplied_ == KvCacheType::Q8_0 || kvApplied_ == KvCacheType::Q4_0) && (headDim_ <= 0 || headDim_ % 32 != 0)) {
-        kvApplied_ = KvCacheType::F8_E4M3;
-        kvHeadDimFallback_ = true;
-    }
-    ctx_ = makeCtx(flashApplied_, kvApplied_);
-    // Cascata: tipo pedido -> F8_E4M3 (arquiteturas MLA/DeepSeek recusam FP8) -> F16 -> sem flash.
-    if (!ctx_ && kvApplied_ != KvCacheType::F8_E4M3 && kvApplied_ != KvCacheType::F16) {
-        kvApplied_ = KvCacheType::F8_E4M3;
-        ctx_ = makeCtx(flashApplied_, KvCacheType::F8_E4M3);
-    }
-    if (!ctx_ && kvApplied_ != KvCacheType::F16) {
-        kvApplied_ = KvCacheType::F16;
-        ctx_ = makeCtx(flashApplied_, KvCacheType::F16);
-    }
-    if (!ctx_ && flashApplied_) {
-        flashApplied_ = false;
-        kvApplied_ = KvCacheType::F16;
-        ctx_ = makeCtx(false, KvCacheType::F16);
+    struct Attempt { bool flash; KvCacheType kv; };
+    Attempt plan[4];
+    int n = 0;
+    auto push = [&](bool f, KvCacheType t) {
+        if (blocked32(t) && !hdOk) { kvHeadDimFallback_ = true; return; }
+        if (bytesX16(t) > bytesX16(cfg.kvType)) return;
+        for (int k = 0; k < n; ++k) if (plan[k].flash == f && plan[k].kv == t) return;
+        if (n < 4) plan[n++] = Attempt{f, t};
+    };
+    push(cfg.flashAttn, cfg.kvType);
+    push(cfg.flashAttn, KvCacheType::F8_E4M3);
+    push(false, cfg.kvType);
+    push(false, KvCacheType::F8_E4M3);
+    ctx_ = nullptr;
+    for (int k = 0; k < n && !ctx_; ++k) {
+        flashApplied_ = plan[k].flash;
+        kvApplied_ = plan[k].kv;
+        ctx_ = makeCtx(plan[k].flash, plan[k].kv);
     }
     if (!ctx_) {
-        if (err) *err = "falha ao criar contexto";
+        if (err) *err = std::string("falha ao criar contexto (kv=") + kvName(cfg.kvType) +
+                        (kvHeadDimFallback_ ? ", head_dim=" + std::to_string(headDim_) + "%32!=0" : std::string()) + ")";
         return false;
     }
     // adaptador LoRA do modelo (residente) volta a valer no contexto novo
@@ -861,8 +867,28 @@ int32_t LlmEngine::headDim() const {
 }
 
 std::string LlmEngine::modelFtype() const {
-#if defined(GIRASSOL_HAS_LLAMA)
     std::lock_guard<std::mutex> lock(mu_);
+    return modelFtypeLocked();
+}
+
+std::string LlmEngine::trainingFidelity() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!ctx_) return "";
+    const std::string w = modelFtypeLocked();
+    const bool wHigh = w == "F16" || w == "BF16" || w == "F32";
+    const bool kvF16 = kvApplied_ == KvCacheType::F16;
+    std::string s = std::string(wHigh && kvF16 ? "f16" : "degradado") + "|kv=" + kvName(kvApplied_) +
+                    "|pedido=" + kvName(kvRequested_) + "|pesos=" + w + "|hd=" + std::to_string(headDim_);
+    if (!(wHigh && kvF16)) {
+        s += "|motivo=";
+        if (!wHigh) s += "pesos";
+        if (!kvF16) s += std::string(wHigh ? "" : ",") + (kvHeadDimFallback_ ? "kv_head_dim" : "kv");
+    }
+    return s;
+}
+
+std::string LlmEngine::modelFtypeLocked() const {
+#if defined(GIRASSOL_HAS_LLAMA)
     if (!model_) return "";
     const int ft = static_cast<int>(llama_model_ftype(model_)) & ~1024;  // 1024 = LLAMA_FTYPE_GUESSED
     switch (ft) {
