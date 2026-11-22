@@ -654,14 +654,15 @@ object LocalLlmManager : NeuralDeliberationPort {
         ready = false; loadedKey = null
         publishBudget(budget)
         // v4.2: F16 primeiro; Q8_0 → F8_E4M3 → Q4_0 só se o disjuntor não comportar o degrau anterior
-        val chosenKv = LlmQuantPolicy.chooseKv(weightBytes, nCtx, kvType) { budget.fits(it) }
-        if (chosenKv == null) {
+        val chosenKvOrNull = LlmQuantPolicy.chooseKv(weightBytes, nCtx, kvType) { budget.fits(it) }
+        if (chosenKvOrNull == null) {
             val minActive = LlmQuantPolicy.activeRamEstimate(weightBytes, nCtx, LlmQuantPolicy.KV_Q4_0)
             _stats.update { it.copy(status = LlmStatus.PAUSED_MEMORY,
                 lastError = "RAM insuficiente agora: ${budget.availableMb} MB livres (${budget.source}), reserva ${budget.reserveMb} MB " +
                     "(Filament + gráfico + WAL + folga), modelo precisa de ~${minActive / 1048576} MB mesmo em KV q4_0") }
             return false
         }
+        val chosenKv: Int = chosenKvOrNull
         val ramReason = if (chosenKv != kvType)
             "disjuntor de RAM: ${budget.dynamicBytes / 1048576} MB livres < ~${preferredActive / 1048576} MB em KV ${LlmQuantPolicy.kvName(kvType)}"
             else ""
