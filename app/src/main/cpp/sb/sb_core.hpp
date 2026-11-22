@@ -495,7 +495,7 @@ class MultiLayerBudget {
 //          payload | u64 FNV-1a 64 de (cabeçalho + payload). Little-endian.
 constexpr uint32_t kGrsbVersion = 1;
 constexpr size_t kGrsbHeaderBytes = 24;
-uint64_t fnv1a64(const unsigned char* p, size_t n, uint64_t h = 1469598103934665603ULL) noexcept;
+uint64_t fnv1a64(const unsigned char* p, size_t n, uint64_t h = 14695981039346656037ULL) noexcept;  // 0xcbf29ce484222325 (offset FNV-1a 64 padrão)
 
 template <int D>
 constexpr size_t grsb_bytes() noexcept { return kGrsbHeaderBytes + SynapticBudget<D>::kPayloadBytes + 8; }

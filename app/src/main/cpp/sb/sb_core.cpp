@@ -383,6 +383,6 @@ double sb_cumulative_forgetting_bound(double Finf, double c, const double* eps, 
 }
 
 uint64_t sb_fnv1a64(const unsigned char* p, size_t n) noexcept {
-  return p == nullptr ? 1469598103934665603ULL : girassol::sb::fnv1a64(p, n);
+  return p == nullptr ? 14695981039346656037ULL : girassol::sb::fnv1a64(p, n);
 }
 }
