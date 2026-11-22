@@ -958,7 +958,7 @@ inline void jacobi_eig(double* A, double* Vt, std::size_t r) noexcept {
                 const double app = A[p + p * r];
                 const double aqq = A[q + q * r];
                 const double tau = (aqq - app) / (2.0 * apq);
-                const double atau = (tau < 0.0) ? -tau : atau;
+                const double atau = (tau < 0.0) ? -tau : tau;
                 double t = 1.0 / ( atau + det_sqrt(atau * atau + 1.0) );
                 if (tau < 0.0) t = -t;
                 const double c = 1.0 / det_sqrt(t * t + 1.0);
