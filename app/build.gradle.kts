@@ -390,9 +390,9 @@ android {
                     arguments += "-DGIRASSOL_KLEIDIAI_DIR=${kleidiaiDir.absolutePath}"
                     if (llguidanceMode != "off") arguments += "-DGIRASSOL_LLGUIDANCE_DIR=${llguidanceOut.get().asFile.absolutePath}"
                 }
-                // Núcleo determinístico + motor LLM único. As dependências (libllama.so,
+                // Núcleo determinístico + orçamento sináptico (girassol_sb) + motor LLM único. As dependências (libllama.so,
                 // libggml*.so e os backends de CPU dinâmicos) são geradas pelo CMake junto.
-                targets += listOf("girassol_core", "girassol_llm")
+                targets += listOf("girassol_core", "girassol_sb", "girassol_llm")
             }
         }
     }
