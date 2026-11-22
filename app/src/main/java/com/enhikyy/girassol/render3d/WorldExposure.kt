@@ -36,8 +36,11 @@ object WorldExposure {
     const val NIGHT_SUN_LUX = 350f
     const val NIGHT_IBL_LUX = 250f
 
-    val DAY = ExposureSetting(16f, 1f / 125f, 100f, 65000f, 18000f)
-    val DUSK = ExposureSetting(11f, 1f / 60f, 100f, 25000f, 9000f)
+    /** v4.1 (Kodak 70 mm): IBL a 12–18 % da luz-chave → sombras profundas e bem recortadas. */
+    const val IBL_FRACTION_DAY = 0.15f
+    const val IBL_FRACTION_DUSK = 0.14f
+    val DAY = ExposureSetting(16f, 1f / 125f, 100f, 65000f, 65000f * IBL_FRACTION_DAY)
+    val DUSK = ExposureSetting(11f, 1f / 60f, 100f, 25000f, 25000f * IBL_FRACTION_DUSK)
     val NIGHT = ExposureSetting(4f, 1f / 30f, 400f, NIGHT_SUN_LUX, NIGHT_IBL_LUX)
     val INTERIOR = NIGHT
 

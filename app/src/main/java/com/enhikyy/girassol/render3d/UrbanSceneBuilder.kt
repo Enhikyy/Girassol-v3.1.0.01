@@ -19,6 +19,12 @@ import kotlin.math.abs
  *    máquinas e letreiros luminosos nos telhados;
  *  - mobiliário: postes de 6 m com braço (instanciados por guinada), fiação aérea em catenária,
  *    guarda-corpos metálicos junto à água, barreiras de obra, árvores.
+ * v4.1 (Kodak 70 mm): fachadas de alvenaria por edifício (concreto gasto, tijolo aparente em
+ * aparelho inglês ou reboco envelhecido), escadas de incêndio metálicas (plataformas gradeadas,
+ * guarda-corpos, lances diagonais e escada de recolhimento) nos prédios de tijolo, caixas d'água
+ * sobre cavaletes, árvores com tronco e galhos ramificados (primários + secundários) e copa
+ * orgânica em aglomerados de três tons, e luzes pontuais quentes de vitrines (3200 K) e janelas
+ * residenciais acesas (3000 K) para a cena Noite — a MESMA malha nas três fases do dia.
  * Determinístico: a mesma grade gera sempre a mesma cena (testado na JVM).
  */
 object UrbanSceneBuilder {
@@ -32,6 +38,33 @@ object UrbanSceneBuilder {
     const val LAMP_HEAD_Y = LAMP_H - 0.9f + LAMP_ARM_R - 0.06f
     const val MIN_FLOORS = 3
     const val MAX_FLOORS = 8
+    /** Temperaturas de cor das luzes noturnas (K). */
+    const val SHOPFRONT_KELVIN = 3200f
+    const val WINDOW_KELVIN = 3000f
+    /** Fração das janelas com luz pontual real (subconjunto das acesas no shader). */
+    const val WINDOW_LIGHT_FRACTION = 0.28f
+    /** Profundidade das plataformas da escada de incêndio (m). */
+    const val FIRE_ESCAPE_DEPTH = 1.15f
+
+    /** Revestimento da fachada: concreto gasto, tijolo aparente ou reboco envelhecido. */
+    enum class FacadeKind(val wallMat: String, val bandMat: String) {
+        CONCRETE("facade", "facade"), BRICK("brick", "concrete"), PLASTER("plaster", "plaster_band")
+    }
+
+    fun facadeKindFor(bk: Block): FacadeKind = when (hash(bk.x0, bk.z0, 29) % 5) {
+        0, 1 -> FacadeKind.BRICK
+        2 -> FacadeKind.PLASTER
+        else -> FacadeKind.CONCRETE
+    }
+
+    /** Prédios de tijolo com 4+ pavimentos ganham escada de incêndio na fachada +Z. */
+    fun hasFireEscape(bk: Block): Boolean = facadeKindFor(bk) == FacadeKind.BRICK && bk.floors >= 4
+
+    /** Espelho (em precisão dupla) do hash de janela do girassol_world.mat. */
+    fun windowHash(n: Double): Double { val x = kotlin.math.sin(n * 12.9898 + 78.233) * 43758.5453; return x - kotlin.math.floor(x) }
+
+    /** Semente das janelas (windowParams.w), igual à do renderer. */
+    val WINDOW_SEED: Double get() = ("window_glass".hashCode() and 0xffff) / 65535.0
 
     private fun hash(a: Int, b: Int, salt: Int = 0): Int {
         var h = a * 73856093 xor b * 19349663 xor salt * 83492791
@@ -84,6 +117,7 @@ object UrbanSceneBuilder {
         val lampsByYaw = HashMap<Int, MutableList<V3>>()
         val lamps = ArrayList<V3>()
         val glows = ArrayList<V3>()
+        val night = ArrayList<PointLightSpec>()
         val size = w * TILE_M
 
         // ---------------- chão
@@ -147,7 +181,7 @@ object UrbanSceneBuilder {
 
         // ---------------- edifícios
         val ids = WindowIds()
-        for (bk in blocks(w, tiles)) building(bk, ::m, glows, ids)
+        for (bk in blocks(w, tiles)) building(bk, ::m, glows, ids, night)
 
         // ---------------- postes (calçada voltada para a rua, a cada 2 tiles) + fiação
         val poleTops = HashMap<Int, MutableList<V3>>() // linha → topos (para a fiação)
@@ -229,7 +263,7 @@ object UrbanSceneBuilder {
             if (raised(t(tx, tz))) SIDEWALK_H else 0f
         }
         return WorldScene(WorldPreset.URBAN_OVERCAST, parts, inst, lamps, glows, V3(-160f, -0.1f, -160f), V3(size + 160f, MAX_FLOORS * FLOOR_H + 8f, size + 160f),
-            ceilingY = null, mapX = { it }, mapZ = { it }, floorAt = floorFn)
+            ceilingY = null, mapX = { it }, mapZ = { it }, floorAt = floorFn, nightLights = night)
     }
 
     /** Estilo do térreo: loja com marquise e vitrine, ou pilotis recuados com saguão envidraçado. */
@@ -250,7 +284,7 @@ object UrbanSceneBuilder {
      * O térreo é tratado à parte (vitrine ou pilotis), então aqui começa em [firstFloor].
      */
     private fun facade(m: (String) -> LitMeshBuilder, a: V3, b: V3, floors: Int, firstFloor: Int, depth: Float, teal: Boolean,
-                       ids: WindowIds, uBase: Float) {
+                       ids: WindowIds, uBase: Float, kind: FacadeKind, night: MutableList<PointLightSpec>) {
         val len = (b - a).length()
         if (len < 1f) return
         val ux = (b - a) * (1f / len)
@@ -260,7 +294,7 @@ object UrbanSceneBuilder {
         val bay = len / nb
         val ww = minOf(1.55f, bay * 0.62f)
         val sill = 0.90f; val wh = 1.65f
-        val wall = m("facade"); val spand = m(if (teal) "spandrel" else "facade")
+        val wall = m(kind.wallMat); val spand = m(if (teal && kind == FacadeKind.CONCRETE) "spandrel" else kind.wallMat)
         val rev = m("reveal"); val glass = m("window_glass"); val frame = m("frame"); val sillM = m("sill")
         for (k in firstFloor until floors) {
             val y0 = k * FLOOR_H
@@ -283,6 +317,13 @@ object UrbanSceneBuilder {
                 // vidro no fundo do requadro, id da janela em u
                 val id = ids.next++
                 glass.rectUv(pL + up * ys + inward, ux * ww, up * wh, id.toFloat(), id + 0.999f, 0f, 1f)
+                // janela residencial acesa: luz pontual quente 0,6 m à frente do vidro (fluxo ≈ 900 lm)
+                if (windowHash(id + WINDOW_SEED) < WINDOW_LIGHT_FRACTION)
+                    night += PointLightSpec(pL + ux * (ww / 2) + up * (ys + wh * 0.6f) + n * 0.6f, 72f, 1f, 5.5f, WINDOW_KELVIN)
+                if (kind == FacadeKind.BRICK) {
+                    // verga de tijolo em soldado e peitoril de pedra mais largo (alvenaria clássica)
+                    sillBox(m("concrete"), pL - ux * 0.10f + up * (yh + 0.02f), ux * (ww + 0.20f), n * 0.05f, up * 0.22f)
+                }
                 // caixilho: anel de 5 cm + montante central, 1 cm à frente do vidro
                 val fz = n * (-depth + 0.012f); val fw = 0.05f
                 frame.rect(pL + up * ys + fz, ux * ww, up * fw)
@@ -307,7 +348,7 @@ object UrbanSceneBuilder {
         b.rect(o + ex + ez, ez * -1f, ey)           // ponta direita (normal +ex)
     }
 
-    private fun building(bk: Block, m: (String) -> LitMeshBuilder, glows: MutableList<V3>, ids: WindowIds) {
+    private fun building(bk: Block, m: (String) -> LitMeshBuilder, glows: MutableList<V3>, ids: WindowIds, night: MutableList<PointLightSpec>) {
         val inset = 0.35f
         val x0 = bk.x0 * TILE_M + inset; val z0 = bk.z0 * TILE_M + inset
         val x1 = (bk.x1 + 1) * TILE_M - inset; val z1 = (bk.z1 + 1) * TILE_M - inset
@@ -315,14 +356,16 @@ object UrbanSceneBuilder {
         val depth = revealDepthFor(bk)
         val teal = hash(bk.x0, bk.z0, 17) % 2 == 0
         val style = groundStyleFor(bk)
+        val kind = facadeKindFor(bk)
         // 4 fachadas (anti-horário visto de cima): +Z, +X, −Z, −X
         val corners = listOf(V3(x0, 0f, z1), V3(x1, 0f, z1), V3(x1, 0f, z0), V3(x0, 0f, z0))
         for (f in 0 until 4) {
             val a = corners[f]; val b = corners[(f + 1) % 4]
-            facade(m, a, b, bk.floors, 1, depth, teal, ids, if (f % 2 == 0) a.x else a.z)
-            groundFloor(m, a, b, style, ids, glows)
+            facade(m, a, b, bk.floors, 1, depth, teal, ids, if (f % 2 == 0) a.x else a.z, kind, night)
+            groundFloor(m, a, b, style, ids, glows, kind, night)
         }
-        val c = m("concrete")
+        if (hasFireEscape(bk)) fireEscape(m("fire_escape"), x0, x1, z1, bk.floors, hash(bk.x0, bk.z0, 71))
+        val c = m(kind.bandMat)
         // frisos de laje em relevo (sombra de contato/SSAO marcam cada pavimento)
         for (k in 1 until bk.floors) {
             val y = k * FLOOR_H
@@ -349,6 +392,8 @@ object UrbanSceneBuilder {
         if ((x1 - x0) > 9f) hv.chamferBox(V3(cx + 1.8f, hgt, cz - 0.8f), V3(cx + 3.2f, hgt + 1.1f, cz + 0.8f), 0.05f)
         m("metal_dark").cylinder(cx + 1.0f, cz + 1.6f, hgt, hgt + 1.8f, 0.35f, segments = 12)
         m("metal_dark").cylinder(cx + 1.0f, cz + 1.6f, hgt + 1.8f, hgt + 1.95f, 0.45f, 0.30f, segments = 12)
+        // caixa d'água de madeira sobre cavalete metálico (telhados de alvenaria antiga)
+        if (kind != FacadeKind.CONCRETE && (x1 - x0) > 6f) waterTank(m, x1 - 2.2f, z0 + 2.2f, hgt, h)
         // antenas: mastro treliçado + parabólica (≈ 60 % dos telhados)
         if (h % 5 >= 2) antenna(m("metal_rail"), m("hvac"), x0 + 1.2f + (h % 7) * 0.2f, z0 + 1.2f, hgt, 2.4f + (h % 4) * 0.5f)
         // letreiro luminoso em ~40 % dos telhados, voltado para +Z ou +X
@@ -377,12 +422,13 @@ object UrbanSceneBuilder {
      * marquise em balanço de 1,2 m com faixa de luz; [GroundStyle.PILOTIS] = saguão envidraçado
      * recuado 1,6 m sob o volume, pilotis cilíndricos a cada vão e forro (laje inferior).
      */
-    private fun groundFloor(m: (String) -> LitMeshBuilder, a: V3, b: V3, style: GroundStyle, ids: WindowIds, glows: MutableList<V3>) {
+    private fun groundFloor(m: (String) -> LitMeshBuilder, a: V3, b: V3, style: GroundStyle, ids: WindowIds, glows: MutableList<V3>,
+                            kind: FacadeKind, night: MutableList<PointLightSpec>) {
         val len = (b - a).length()
         if (len < 1f) return
         val ux = (b - a) * (1f / len); val up = V3(0f, 1f, 0f); val n = ux.cross(up)
         val nb = maxOf(1, (len / 2.5f).toInt()); val bay = len / nb
-        val glass = m("window_glass"); val frame = m("frame"); val wall = m("facade")
+        val glass = m("window_glass"); val frame = m("frame"); val wall = m(kind.wallMat)
         when (style) {
             GroundStyle.SHOPFRONT -> {
                 val gy0 = 0.35f; val gy1 = 2.85f
@@ -404,6 +450,8 @@ object UrbanSceneBuilder {
                     frame.rect(pl + up * gy0 + fz, ux * gw, up * 0.06f)
                     frame.rect(pl + up * (gy1 - 0.06f) + fz, ux * gw, up * 0.06f)
                     frame.rect(pl + up * 2.2f + fz, ux * gw, up * 0.04f)
+                    // vitrine acesa: luz pontual 3200 K no interior da loja (fluxo ≈ 2500 lm)
+                    night += PointLightSpec(pl + ux * (gw / 2) + up * 2.2f + n * 0.35f, 200f, 1f, 8f, SHOPFRONT_KELVIN)
                 }
                 // marquise em balanço: laje fina + rufo + faixa emissiva por baixo
                 val my = 3.0f; val md = 1.2f
@@ -439,6 +487,87 @@ object UrbanSceneBuilder {
                 }
             }
         }
+    }
+
+    /**
+     * Escada de incêndio na fachada +Z (normal +Z, de x0 a x1 em z = [zf]): em cada pavimento a
+     * partir do 1º, plataforma gradeada de [FIRE_ESCAPE_DEPTH] m com guarda-corpo (corrimão,
+     * travessa intermediária e montantes), mãos-francesas para a parede, lance diagonal de degraus
+     * entre plataformas (alternando o sentido) e escada de recolhimento sob a primeira plataforma.
+     */
+    private fun fireEscape(b: LitMeshBuilder, x0: Float, x1: Float, zf: Float, floors: Int, h: Int) {
+        val w = minOf(4.6f, (x1 - x0) - 1.2f)
+        if (w < 2.4f) return
+        val cx = x0 + (x1 - x0) * (0.32f + (h % 30) / 100f)
+        val px0 = (cx - w / 2).coerceAtLeast(x0 + 0.3f); val px1 = (px0 + w).coerceAtMost(x1 - 0.3f)
+        val d = FIRE_ESCAPE_DEPTH
+        val z0 = zf + 0.02f; val z1 = zf + d
+        for (k in 1 until floors) {
+            val y = k * FLOOR_H - 0.06f
+            // moldura da plataforma + grade de barras chatas (vãos de 9 cm)
+            b.box(V3(px0, y - 0.08f, z0), V3(px1, y, z0 + 0.05f), bottom = true)
+            b.box(V3(px0, y - 0.08f, z1 - 0.05f), V3(px1, y, z1), bottom = true)
+            b.box(V3(px0, y - 0.08f, z0), V3(px0 + 0.05f, y, z1), bottom = true)
+            b.box(V3(px1 - 0.05f, y - 0.08f, z0), V3(px1, y, z1), bottom = true)
+            var gx = px0 + 0.09f
+            while (gx < px1 - 0.06f) { b.box(V3(gx, y - 0.035f, z0 + 0.05f), V3(gx + 0.012f, y - 0.005f, z1 - 0.05f), bottom = true); gx += 0.09f }
+            for (t in 0..2) { val zz = z0 + 0.05f + t * (d - 0.1f) / 2f; b.box(V3(px0, y - 0.06f, zz), V3(px1, y - 0.04f, zz + 0.02f), bottom = true) }
+            // guarda-corpo: corrimão a 1,0 m, travessa a 0,5 m e montantes a cada 0,12 m na frente
+            val ry = y + 1.0f
+            b.tube(V3(px0, ry, z1), V3(px1, ry, z1), 0.018f, segments = 5)
+            b.tube(V3(px0, ry, z0), V3(px0, ry, z1), 0.018f, segments = 5)
+            b.tube(V3(px1, ry, z0), V3(px1, ry, z1), 0.018f, segments = 5)
+            b.tube(V3(px0, y + 0.5f, z1), V3(px1, y + 0.5f, z1), 0.012f, segments = 4)
+            var bx = px0
+            while (bx <= px1 + 1e-3f) { b.tube(V3(bx, y, z1), V3(bx, ry, z1), 0.008f, segments = 3); bx += 0.12f }
+            for (zz in floatArrayOf(z0 + 0.4f, z0 + 0.8f)) {
+                b.tube(V3(px0, y, zz), V3(px0, ry, zz), 0.01f, segments = 3); b.tube(V3(px1, y, zz), V3(px1, ry, zz), 0.01f, segments = 3)
+            }
+            // mãos-francesas diagonais ancoradas na alvenaria
+            for (sx in floatArrayOf(px0 + 0.15f, px1 - 0.15f)) b.tube(V3(sx, y - 0.9f, z0), V3(sx, y - 0.08f, z1 - 0.1f), 0.022f, segments = 4)
+            // lance de escada até a plataforma de cima
+            if (k < floors - 1) {
+                val leftToRight = k % 2 == 1
+                val sx0 = if (leftToRight) px0 + 0.25f else px1 - 0.25f
+                val run = (w * 0.62f) * (if (leftToRight) 1f else -1f)
+                val sz0 = z1 - 0.62f; val sz1 = z1 - 0.06f
+                val top = y + FLOOR_H
+                b.tube(V3(sx0, y, sz0), V3(sx0 + run, top, sz0), 0.03f, segments = 4)
+                b.tube(V3(sx0, y, sz1), V3(sx0 + run, top, sz1), 0.03f, segments = 4)
+                b.tube(V3(sx0, y + 0.95f, sz1), V3(sx0 + run, top + 0.95f, sz1), 0.016f, segments = 4)
+                val steps = 14
+                for (st in 1 until steps) {
+                    val f = st / steps.toFloat()
+                    val sx = sx0 + run * f; val sy = y + (top - y) * f
+                    b.box(V3(minOf(sx, sx + 0.18f * kotlin.math.sign(run)) , sy - 0.02f, sz0), V3(maxOf(sx, sx + 0.18f * kotlin.math.sign(run)), sy, sz1), bottom = true)
+                }
+            }
+        }
+        // escada de recolhimento (marinheiro) pendurada sob a 1ª plataforma, parando 2,3 m acima da calçada
+        val lx = px1 - 0.55f; val lz = z1 - 0.25f
+        val ly0 = 2.3f; val ly1 = FLOOR_H - 0.06f
+        b.tube(V3(lx, ly0, lz), V3(lx, ly1, lz), 0.016f, segments = 4)
+        b.tube(V3(lx + 0.42f, ly0, lz), V3(lx + 0.42f, ly1, lz), 0.016f, segments = 4)
+        var ry = ly0 + 0.15f
+        while (ry < ly1) { b.tube(V3(lx, ry, lz), V3(lx + 0.42f, ry, lz), 0.01f, segments = 3); ry += 0.28f }
+    }
+
+    /** Caixa d'água de madeira (aduelas + cintas de aço) com teto cônico sobre cavalete de 4 pés. */
+    private fun waterTank(m: (String) -> LitMeshBuilder, x: Float, z: Float, y: Float, h: Int) {
+        val legH = 2.2f + (h % 3) * 0.3f; val r = 1.05f; val th = 2.3f
+        val steel = m("fire_escape")
+        for ((dx, dz) in arrayOf(-0.8f to -0.8f, 0.8f to -0.8f, 0.8f to 0.8f, -0.8f to 0.8f)) {
+            steel.tube(V3(x + dx * 1.1f, y, z + dz * 1.1f), V3(x + dx, y + legH, z + dz), 0.05f, segments = 6)
+        }
+        steel.tube(V3(x - 0.85f, y + legH * 0.5f, z - 0.85f), V3(x + 0.85f, y + legH * 0.5f, z + 0.85f), 0.02f, segments = 4)
+        steel.tube(V3(x + 0.85f, y + legH * 0.5f, z - 0.85f), V3(x - 0.85f, y + legH * 0.5f, z + 0.85f), 0.02f, segments = 4)
+        steel.box(V3(x - 1.15f, y + legH - 0.12f, z - 1.15f), V3(x + 1.15f, y + legH, z + 1.15f), bottom = true)
+        m("wood").cylinder(x, z, y + legH, y + legH + th, r, r * 0.97f, segments = 20, caps = false)
+        for (k in 0 until 4) {
+            val yy = y + legH + 0.25f + k * (th - 0.5f) / 3f
+            steel.cylinder(x, z, yy, yy + 0.05f, r + 0.02f, r + 0.02f, segments = 20, caps = false)
+        }
+        m("metal_dark").cylinder(x, z, y + legH + th, y + legH + th + 0.75f, r + 0.08f, 0.06f, segments = 20)
     }
 
     /** Antena de telhado: mastro, travessas e parabólica. */
@@ -486,25 +615,67 @@ object UrbanSceneBuilder {
     }
 
     /**
-     * Árvore multivolume: tronco cônico com raízes, 3 galhos e 5–7 volumes de copa (dois tons),
-     * determinística por [h]; grelha metálica de proteção quando plantada em praça.
+     * Árvore ramificada (v4.1): tronco cônico levemente curvo com raízes aparentes, 4–5 galhos
+     * primários saindo entre 45 % e 70 % da altura, cada um com 2–3 galhos secundários, e copa
+     * orgânica de aglomerados elipsoidais pequenos nas pontas (três tons de folha com
+     * translucidez/SSS no shader). Determinística por [h]; grelha de proteção quando em praça.
      */
     private fun tree(m: (String) -> LitMeshBuilder, x: Float, z: Float, y: Float, h: Int, grate: Boolean) {
-        val trunk = m("trunk")
+        val bark = m("bark")
         val s = 0.85f + (h % 7) * 0.06f
-        trunk.cylinder(x, z, y, y + 2.4f * s, 0.17f * s, 0.10f * s, segments = 10, caps = false)
-        for (k in 0 until 3) {
-            val ang = (h % 360) * 0.0174f + k * 2.094f
-            val by = y + (1.7f + 0.3f * k) * s
-            trunk.tube(V3(x, by, z), V3(x + kotlin.math.cos(ang) * 0.9f * s, by + 0.9f * s, z + kotlin.math.sin(ang) * 0.9f * s), 0.05f * s, segments = 6)
+        val trunkH = 3.4f * s
+        val lean = ((h % 13) - 6) * 0.012f
+        // tronco em 3 segmentos afunilando, com leve curvatura
+        val p0 = V3(x, y, z)
+        val p1 = V3(x + lean * 0.8f, y + trunkH * 0.40f, z + lean * 0.3f)
+        val p2 = V3(x + lean * 1.6f, y + trunkH * 0.72f, z - lean * 0.2f)
+        val p3 = V3(x + lean * 2.0f, y + trunkH, z - lean * 0.5f)
+        bark.taperTube(p0 - V3(0f, 0.05f, 0f), p1, 0.21f * s, 0.15f * s, segments = 10)
+        bark.taperTube(p1, p2, 0.15f * s, 0.11f * s, segments = 9)
+        bark.taperTube(p2, p3, 0.11f * s, 0.06f * s, segments = 8)
+        // raízes aparentes
+        for (k in 0 until 4) {
+            val a = k * 1.571f + (h % 9) * 0.2f
+            bark.taperTube(V3(x, y + 0.28f * s, z), V3(x + kotlin.math.cos(a) * 0.55f * s, y - 0.02f, z + kotlin.math.sin(a) * 0.55f * s), 0.09f * s, 0.02f, segments = 5)
         }
-        val clumps = 5 + h % 3
-        for (k in 0 until clumps) {
-            val ang = k * 6.2832f / clumps + (h % 17) * 0.1f
-            val r = if (k == 0) 0f else 0.85f * s
-            val cy = y + (3.1f + 0.5f * ((h shr k) and 1)) * s + if (k == 0) 0.5f * s else 0f
-            val rad = (if (k == 0) 1.35f else 0.85f + 0.12f * ((h shr (k + 2)) and 3)) * s
-            m(if (k % 2 == 0) "leaf" else "leaf_light").sphere(V3(x + kotlin.math.cos(ang) * r, cy, z + kotlin.math.sin(ang) * r), rad, rad * 0.82f, rad, rings = 6, segments = 10)
+        val leaves = arrayOf("leaf", "leaf_light", "leaf_dark")
+        val primaries = 4 + h % 2
+        var seed = h
+        fun rnd(): Float { seed = seed * 1103515245 + 12345; return ((seed ushr 8) and 0xffff) / 65535f }
+        // copa central sobre o topo do tronco
+        for (k in 0 until 3) {
+            val c = p3 + V3((rnd() - 0.5f) * 0.9f * s, (0.25f + rnd() * 0.5f) * s, (rnd() - 0.5f) * 0.9f * s)
+            val r = (0.62f + rnd() * 0.30f) * s
+            m(leaves[(h + k) % 3]).sphere(c, r, r * 0.78f, r * (0.9f + rnd() * 0.2f), rings = 6, segments = 9)
+        }
+        for (k in 0 until primaries) {
+            val ang = k * 6.2832f / primaries + (h % 17) * 0.13f + rnd() * 0.35f
+            val t = 0.45f + 0.25f * (k / (primaries - 1f).coerceAtLeast(1f)) + rnd() * 0.05f
+            val base = p0 + (p3 - p0) * t
+            val len = (1.25f + rnd() * 0.55f) * s * (1.15f - t * 0.4f)
+            val rise = (0.55f + rnd() * 0.35f) * len
+            val dir = V3(kotlin.math.cos(ang), 0f, kotlin.math.sin(ang))
+            val tip = base + dir * len + V3(0f, rise, 0f)
+            val r0 = 0.075f * s * (1.2f - t * 0.5f)
+            bark.taperTube(base, tip, r0, r0 * 0.45f, segments = 6)
+            val secondaries = 2 + ((h shr k) and 1)
+            for (j in 0 until secondaries) {
+                val f = 0.55f + j * 0.2f
+                val sb = base + (tip - base) * f
+                val sang = ang + (if (j % 2 == 0) 0.7f else -0.7f) + (rnd() - 0.5f) * 0.4f
+                val sl = len * (0.45f + rnd() * 0.2f)
+                val st = sb + V3(kotlin.math.cos(sang) * sl, sl * (0.45f + rnd() * 0.3f), kotlin.math.sin(sang) * sl)
+                bark.taperTube(sb, st, r0 * 0.42f, r0 * 0.16f, segments = 5)
+                // aglomerados de folhagem nas pontas dos secundários
+                for (q in 0 until 2) {
+                    val c = st + V3((rnd() - 0.5f) * 0.45f * s, (rnd() - 0.2f) * 0.35f * s, (rnd() - 0.5f) * 0.45f * s)
+                    val r = (0.42f + rnd() * 0.26f) * s
+                    m(leaves[(k + j + q) % 3]).sphere(c, r, r * (0.70f + rnd() * 0.15f), r * (0.85f + rnd() * 0.3f), rings = 5, segments = 8)
+                }
+            }
+            // aglomerado na ponta do primário
+            val r = (0.50f + rnd() * 0.25f) * s
+            m(leaves[(k + 1) % 3]).sphere(tip + V3(0f, 0.1f * s, 0f), r, r * 0.75f, r, rings = 5, segments = 8)
         }
         if (grate) {
             val g = m("metal_dark")

@@ -33,14 +33,20 @@ data class MatSpec(
     val emissive: FloatArray? = null,
     val emissiveDriver: EmissiveDriver = EmissiveDriver.NONE,
     /** v4.1: vidro de janela (u = id da janela; acesa/apagada e 2700–4500 K decididos no shader). */
-    val window: Boolean = false
+    val window: Boolean = false,
+    /** v4.1: verniz (clear coat) — no asfalto vale só sobre as poças (máscara de rugosidade no shader). */
+    val clearCoat: Float = 0f,
+    /** v4.1: translucidez da folhagem (subsurface scattering aproximado: luz do sol atravessando a folha). */
+    val translucency: Float = 0f,
+    /** v4.1: expoente de espalhamento subsuperficial (concentração do brilho contra o sol). */
+    val subsurfacePower: Float = 0f
 )
 
 /**
  * v4.1 — luz pontual de teto: [lux] de iluminância alvo a [targetDistM] metros abaixo (plano de
  * trabalho). Fluxo do Filament: Φ = E · 4π · d² lúmens (fonte isotrópica, lei do inverso do quadrado).
  */
-data class PointLightSpec(val pos: V3, val lux: Float, val targetDistM: Float, val falloffM: Float) {
+data class PointLightSpec(val pos: V3, val lux: Float, val targetDistM: Float, val falloffM: Float, val kelvin: Float = 4000f) {
     val lumens: Float get() = lux * 4f * Math.PI.toFloat() * targetDistM * targetDistM
 }
 
@@ -70,7 +76,9 @@ class WorldScene(
     /** Altura do piso caminhável na posição da cena (calçadas +0,15 m). */
     val floorAt: (Float, Float) -> Float,
     /** v4.1: luzes pontuais de teto (interior Lumon: 350 lux nas mesas, 250 lux nos corredores). */
-    val pointLights: List<PointLightSpec> = emptyList()
+    val pointLights: List<PointLightSpec> = emptyList(),
+    /** v4.1: luzes pontuais noturnas quentes (2700–3200 K) de vitrines e janelas residenciais. */
+    val nightLights: List<PointLightSpec> = emptyList()
 ) {
     val vertexCount: Int get() = parts.sumOf { it.mesh.vertexCount } + instanced.sumOf { it.mesh.vertexCount * it.offsets.size }
     val instanceCount: Int get() = instanced.sumOf { it.offsets.size }

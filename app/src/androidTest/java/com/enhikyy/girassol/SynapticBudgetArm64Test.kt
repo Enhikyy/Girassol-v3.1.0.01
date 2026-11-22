@@ -74,6 +74,51 @@ class SynapticBudgetArm64Test {
         Log.i(tag, "GRSB D=${info.dim} ${blob.size} B FNV=${info.checksumHex}")
     }
 
+    /**
+     * v4.1: SynapticBudget<256> — a dimensão padrão dos aparelhos de 8 e 12 GB — exercida
+     * diretamente pela ABI C (placement-new no DirectByteBuffer alinhado a 64 B): observação,
+     * commit, projeção, bloco GRSB de 1 051 728 B validado pelo codec Kotlin (FNV-1a 64) e
+     * restauração ida-e-volta bit a bit.
+     */
+    @Test
+    fun synapticBudget256RoundTripsThroughGrsb() {
+        var err: Throwable? = null
+        val th = Thread(null, {
+            err = runCatching {
+                val d = 256
+                val buf = ByteBuffer.allocateDirect((SynapticBudgetNative.nativeStateBytes(d) + 64).toInt()).order(ByteOrder.nativeOrder())
+                val off = SynapticBudgetNative.nativeAlignOffset(buf)
+                assertEquals(0, SynapticBudgetNative.nativeInit(buf, off, d))
+                val rows = 32
+                val x = DoubleArray(rows * d) { i -> (((i * 2654435761L) ushr 7) % 2001 - 1000).toDouble() / 1000.0 }
+                assertEquals(0, SynapticBudgetNative.nativeObserve(buf, off, d, x, rows, 1.0))
+                val rank = SynapticBudgetNative.nativeCommit(buf, off, d, rows)
+                assertTrue("commit D=256: $rank", rank >= 0)
+                val g = x.copyOfRange(0, d)
+                assertEquals(0, SynapticBudgetNative.nativeProject(buf, off, d, g, 1))
+                assertTrue(g.all { it.isFinite() })
+                val size = SynapticBudgetNative.nativeSerializedBytes(d)
+                assertEquals("GRSB D=256", 1_051_728L, size)
+                val blob = ByteArray(size.toInt())
+                assertTrue(SynapticBudgetNative.nativeSerialize(buf, off, d, blob) > 0)
+                val info = GirassolRecordCodec.inspectGrsb(blob)
+                assertEquals(256, info.dim)
+                assertEquals(GirassolRecordCodec.fnv1a64(blob, 0, blob.size - 8), info.checksum)
+                // restaura num estado novo e re-serializa: bytes idênticos
+                val buf2 = ByteBuffer.allocateDirect((SynapticBudgetNative.nativeStateBytes(d) + 64).toInt()).order(ByteOrder.nativeOrder())
+                val off2 = SynapticBudgetNative.nativeAlignOffset(buf2)
+                assertEquals(0, SynapticBudgetNative.nativeInit(buf2, off2, d))
+                assertEquals(0, SynapticBudgetNative.nativeDeserialize(buf2, off2, d, blob))
+                val blob2 = ByteArray(size.toInt())
+                assertTrue(SynapticBudgetNative.nativeSerialize(buf2, off2, d, blob2) > 0)
+                assertArrayEquals("re-serialização D=256 idêntica", blob, blob2)
+                Log.i(tag, "SynapticBudget<256> ABI=${SynapticBudgetNative.nativeAbi()} rank=$rank GRSB=${blob.size} B FNV=${info.checksumHex}")
+            }.exceptionOrNull()
+        }, "sb-test-256", 64L shl 20)
+        th.start(); th.join()
+        err?.let { throw it }
+    }
+
     @Test
     fun projectionNullsProtectedDirections() {
         var err: Throwable? = null

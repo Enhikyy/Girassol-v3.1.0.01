@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.runtime.key
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -134,7 +135,7 @@ fun GpuPanel() {
         KeyValue("Origem", g.source)
         if (r3d.active) KeyValue("Viewport agora", "${r3d.fps.f(0)} fps · FX ${r3d.effectLevel}")
         if (g.fpsDowngrades > 0) KeyValue("Quedas por FPS", g.fpsDowngrades.toString())
-        g.probeLog.forEach { Text("sonda · $it", style = MonoStyle, color = Lumon.CreamDim) }
+        g.probeLog.forEachIndexed { i, line -> key(i, line) { Text("sonda · $line", style = MonoStyle, color = Lumon.CreamDim) } }
         OutlinedButton(enabled = g.status != GpuCalStatus.RUNNING, modifier = Modifier.testTag("gpu_recalibrate"),
             onClick = { GpuCalibration.recalibrate(context) }) { Text("Recalibrar shaders") }
     }

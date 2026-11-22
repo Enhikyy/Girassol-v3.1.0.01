@@ -39,8 +39,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.ui.graphics.graphicsLayer
 import com.enhikyy.girassol.core.world.GenerationView
 import com.enhikyy.girassol.core.world.ReproductionMerit
-import com.enhikyy.girassol.llm.LlmStatus
-import com.enhikyy.girassol.llm.LocalLlmManager
 import com.enhikyy.girassol.ui.components.Shapes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -126,8 +124,6 @@ fun WorldScreen(onOpenCitizen: (String) -> Unit, onOpenMenu: () -> Unit = {}) {
     val snap by SimulationHub.render.collectAsStateWithLifecycle()
     val status by SimulationHub.status.collectAsStateWithLifecycle()
     val dash by SimulationHub.dashboard.collectAsStateWithLifecycle()
-    val llm by LocalLlmManager.stats.collectAsStateWithLifecycle()
-    val models by LocalLlmManager.models.collectAsStateWithLifecycle()
     val pending by SimulationHub.chatPending.collectAsStateWithLifecycle()
     val preferred by RenderModePolicy.preferred.collectAsStateWithLifecycle()
     val focusReq by WorldFocus.request.collectAsStateWithLifecycle()
@@ -170,9 +166,10 @@ fun WorldScreen(onOpenCitizen: (String) -> Unit, onOpenMenu: () -> Unit = {}) {
             }
         }
     ) {
+        // v4.1: viewport limpo — só o balão do cidadão selecionado (nenhum texto flutuante de debug)
         SpeechBalloons(s, projected, selected, balloonWindow(tps), onTap = focusCitizen)
 
-        // HUD superior: pílulas de vidro (menu + relógio/população) e ETA da próxima geração
+        // HUD superior: pílula Liquid Glass com menu + horário/ciclo (e a população viva)
         Column(Modifier.align(Alignment.TopStart).statusBarsPadding().padding(start = 12.dp, top = 8.dp, end = 176.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(
@@ -187,24 +184,10 @@ fun WorldScreen(onOpenCitizen: (String) -> Unit, onOpenMenu: () -> Unit = {}) {
                     Text("${SimClock.label(s.tick)} · ${SimClock.period(s.tick)}" + if (!status.running) " · pausado" else "",
                         style = MaterialTheme.typography.labelMedium, color = Lumon.Sunflower, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.testTag("hud_clock"))
-                    val activeModels = models.count { it.active }
-                    val modelLine = when {
-                        models.isEmpty() -> "sem modelos"
-                        llm.status == LlmStatus.READY || llm.status == LlmStatus.BUSY -> "$activeModels .gguf · ${llm.tokensPerSecond.f(1)} tok/s"
-                        else -> "$activeModels .gguf · ${llm.status.label}"
-                    }
-                    Text("${s.population} ${if (s.population == 1) "cidadão" else "cidadãos"} · $modelLine",
+                    Text("${s.population} ${if (s.population == 1) "cidadão" else "cidadãos"}",
                         style = MaterialTheme.typography.labelSmall, color = Lumon.Cream, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.testTag("hud_population"))
                 }
-            }
-            val g = dash?.generation
-            if (g != null && s.population > 0) {
-                Text(etaLabel(g, tps),
-                    style = MaterialTheme.typography.labelSmall, color = if (g.status == ReproductionMerit.Status.PRONTO) Lumon.Ok else Lumon.Sunflower,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.liquidGlass(Shapes.Capsule, tone = GlassTone.CLEAR, elevation = 8.dp)
-                        .padding(horizontal = 12.dp, vertical = 5.dp).testTag("hud_eta"))
             }
         }
 
@@ -240,13 +223,10 @@ fun WorldScreen(onOpenCitizen: (String) -> Unit, onOpenMenu: () -> Unit = {}) {
                     WorldViewState.setCamera(CameraMode.TOP_2D); RenderModePolicy.set(context, RenderMode.ECO_2D)
                 }
             }
-            val t = pov
-            if (is3d && camMode == CameraMode.FIRST_PERSON_POV && t != null) PovMinimap(t, Modifier.padding(top = 4.dp))
+            // v4.1: em POV a telemetria (posição, rumo, meta) fica no cartão do cidadão e na aba
+            // Sistema — nada de caixas de texto/radar sobre a viewport
+            if (pov != null) Box(Modifier.size(0.dp).testTag("world_pov_active"))
         }
-        val tp = pov
-        if (is3d && camMode == CameraMode.FIRST_PERSON_POV && tp != null)
-            PovHud(tp, "${SimClock.label(s.tick)} · ${SimClock.period(s.tick)}",
-                Modifier.align(Alignment.TopStart).statusBarsPadding().padding(start = 12.dp, top = 150.dp, end = 148.dp))
 
         // rodapé: cartão do cidadão + barra rápida (fica acima da navegação flutuante e do teclado)
         Column(
@@ -443,7 +423,7 @@ private var lastOut2d: Map<String, Offset> = emptyMap()
 @Composable
 private fun SpeechBalloons(s: WorldRenderSnapshot, projected: Map<String, Offset>, selected: String?, window: Long, onTap: (String) -> Unit) {
     val speaking = s.agents
-        .filter { it.speech.isNotBlank() && it.speechAgeTicks <= window && projected.containsKey(it.id) }
+        .filter { it.id == selected && it.speech.isNotBlank() && it.speechAgeTicks <= window && projected.containsKey(it.id) }
         .sortedBy { it.speechAgeTicks }
         .take(MAX_BALLOONS)
     val thinker = selected?.let { id -> s.agents.firstOrNull { it.id == id && projected.containsKey(id) && speaking.none { sp -> sp.id == id } } }

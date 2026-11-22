@@ -1,23 +1,33 @@
-// Pós-processamento analógico "Dehancer / Kodak 500T" do Projeto Girassol.
-// A View principal renderiza a cidade num RenderTarget (já com tonemapping Filmic e a
-// gradação 500T); esta passagem de tela cheia (triângulo em espaço de dispositivo) aplica
-// os quatro efeitos analógicos sobre a imagem:
-//   1. bloom   — difusão gaussiana dupla (raio curto + raio largo) das altas luzes;
-//   2. halação — franja vermelho-alaranjada (1.0, 0.32, 0.12) que vaza da camada de
-//                emulsão vermelha ao redor das fontes de luz, como no filme sem anti-halo;
-//   3. sombras densas — "toe" da curva característica: pretos comprimidos e levemente
-//                frios, sem esmagar os meios-tons;
-//   4. grão Kodak — ruído animado por quadro, dependente da luminância (mais forte nos
-//                meios-tons), com agregados por canal para o aspecto de cristais de prata.
-// O custo é fixo (26 amostras) e independente da cena, adequado a GPUs Adreno/Mali de
-// entrada a 30 fps; níveis de efeito inferiores desligam esta passagem.
+// v4.1 — Pós-processamento "Dehancer / Kodak 70 mm" do Projeto Girassol.
+//
+// A View principal renderiza a cidade num RenderTarget (tonemapping ACES + gradação Kodak 70 mm
+// assada na LUT 3D do Filament, bloom nativo de 7 níveis em modo ADD). Esta passagem de tela
+// cheia (triângulo em espaço de dispositivo, o equivalente a um material de domínio postProcess
+// na API Java do Filament, que não expõe a injeção de materiais de pós no pipeline) aplica:
+//
+//   1. Curva Kodak 70 mm
+//      - toe denso: contraste acentuado nas baixas luzes ("sombras bem sombreadas") com viragem
+//        fria/ardósia abaixo de luminância 0,12, preservando micro-detalhe (curva de potência
+//        relativa, sem lavar os pretos com névoa cinza);
+//      - shoulder estourado: S-curve suave nas altas luzes; acima do joelho a cor converge para
+//        marfim/âmbar quente #FFF4E0 com dessaturação progressiva pela luminância (sol baixo,
+//        postes, vitrines, janelas e painéis de teto estouram de forma orgânica).
+//   2. Halação óptica: extração das luminâncias acima de 0,80, desfoque gaussiano em DOIS
+//      estágios (anel interno 9 tap σ≈2,5 px e anel externo 12 tap σ≈9 px, pesos gaussianos) e
+//      reinjeção do halo vermelho-alaranjado vec3(1.0, 0.24, 0.06) apenas onde o halo largo
+//      excede o núcleo — isto é, nas bordas de alto contraste.
+//   3. Grão orgânico 70 mm: cristais de prata halogenada (ruído por canal correlacionado, célula
+//      de 1,25 px, 24 quadros/s) ponderado pela luminância — presente em meios-tons e sombras,
+//      ausente nas altas luzes estouradas.
+//   4. Vinheta óptica suave de 14 % (queda cos⁴ aproximada de uma prime 50/70 mm).
+//
+// Custo fixo: 22 amostras da cena por pixel, mediump-safe (fp16), adequado a Adreno/Mali/Xclipse.
 material {
     name : girassol_dehancer_post,
     shadingModel : unlit,
     vertexDomain : device,
     requires : [ uv0 ],
-    // v3.9: o triângulo de tela cheia já entrega UV de RenderTarget (origem embaixo, como o GL).
-    // Com o padrão flipUV:true do matc a cena saía DE CABEÇA PARA BAIXO nas GPUs reais.
+    // o triângulo de tela cheia já entrega UV de RenderTarget (origem embaixo, como o GL)
     flipUV : false,
     depthWrite : false,
     depthCulling : false,
@@ -25,12 +35,13 @@ material {
     parameters : [
         { type : sampler2d, name : sceneColor, precision : medium },
         { type : float2, name : texelSize },
-        // x = bloom, y = halação, z = densidade das sombras, w = grão
+        // x = bloom do bright-pass próprio, y = halação, z = densidade do toe, w = grão
         { type : float4, name : strength },
         { type : float, name : time },
-        // v3.6: joelho do bright-pass em LDR (x = início, y = fim). O limiar 1.15 em luz
-        // linear da cena equivale a ~0.82 depois do tone mapping Filmic.
-        { type : float2, name : brightKnee }
+        // joelho do bright-pass da halação em LDR (x = início 0,80, y = fim)
+        { type : float2, name : brightKnee },
+        // x = vinheta (0,14), y = joelho do shoulder, z = viragem fria das sombras, w = reservado
+        { type : float4, name : film }
     ]
 }
 
@@ -48,21 +59,38 @@ fragment {
         return fract((p3.x + p3.y) * p3.z);
     }
 
-    // Altas luzes acima do limiar, com joelho suave.
+    // Altas luzes acima do limiar (0,80), com joelho suave.
     vec3 girassolBright(vec3 c) {
         float l = girassolLuma(c);
         float k = smoothstep(materialParams.brightKnee.x, materialParams.brightKnee.y, l);
         return c * k;
     }
 
-    // Ombro suave: acima de 0.80 a luminância é comprimida exponencialmente e nunca passa
-    // de 0.96 — sem branco chapado, mesmo com bloom + halação somados (fp16/mediump-safe).
-    vec3 girassolShoulder(vec3 c) {
+    // Toe denso: abaixo de 0,35 a luminância segue l' = l · (l / 0,35)^(toe), contínua em 0,35,
+    // com micro-contraste preservado (multiplicador por pixel) e viragem ardósia abaixo de 0,12.
+    vec3 girassolToe(vec3 c, float toe, float cool) {
         float l = girassolLuma(c);
-        if (l <= 0.80) return c;
-        float ls = 0.80 + 0.16 * (1.0 - exp(-(l - 0.80) / 0.16));
-        c *= ls / l;
-        return min(c, vec3(0.985));
+        float pivot = 0.35;
+        float lt = l < pivot ? l * pow(max(l / pivot, 1e-4), toe) : l;
+        vec3 o = c * (lt / max(l, 1e-4));
+        float deep = 1.0 - smoothstep(0.0, 0.12, lt);
+        vec3 slate = vec3(0.86, 0.95, 1.10);
+        return mix(o, o * slate, deep * cool);
+    }
+
+    // Shoulder estourado: S-curve acima do joelho; a cor converge para marfim/âmbar #FFF4E0 e
+    // dessatura progressivamente com a luminância, sem clipar em branco chapado.
+    vec3 girassolShoulder(vec3 c, float knee) {
+        float l = girassolLuma(c);
+        if (l <= knee) return c;
+        float x = (l - knee) / (1.0 - knee);
+        float s = 1.0 - exp(-x * 1.6);                         // compressão exponencial
+        float ls = knee + (1.0 - knee) * s * (0.98 - 0.08 * s);
+        vec3 o = c * (ls / max(l, 1e-4));
+        vec3 ivory = vec3(1.0, 0.905, 0.745);                  // #FFF4E0 em linear-ish de tela
+        float blow = smoothstep(0.0, 1.0, x);
+        o = mix(o, ivory * ls, blow * 0.65);                   // dessaturação para marfim quente
+        return min(o, vec3(0.992));
     }
 
     void material(inout MaterialInputs material) {
@@ -71,43 +99,50 @@ fragment {
         vec2 px = materialParams.texelSize;
         vec3 base = textureLod(materialParams_sceneColor, uv, 0.0).rgb;
 
-        // --- 1 + 2: bloom e halação (anel de 12 amostras em dois raios + centro) ---
-        vec3 nearSum = girassolBright(base);
-        vec3 wideSum = vec3(0.0);
+        // --- 2: halação — gaussiana em dois estágios sobre o bright-pass (> 0,80) ---
         const float TAU = 6.2831853;
-        for (int i = 0; i < 12; i++) {
-            float a = TAU * (float(i) + 0.5) / 12.0;
-            vec2 dir = vec2(cos(a), sin(a));
-            nearSum += girassolBright(textureLod(materialParams_sceneColor, uv + dir * px * 3.5, 0.0).rgb);
-            wideSum += girassolBright(textureLod(materialParams_sceneColor, uv + dir * px * 11.0, 0.0).rgb);
+        vec3 inner = girassolBright(base) * 0.2042;            // peso central da gaussiana interna
+        for (int i = 0; i < 8; i++) {
+            float a = TAU * (float(i) + 0.5) / 8.0;
+            vec2 d = vec2(cos(a), sin(a)) * px * 2.5;
+            inner += girassolBright(textureLod(materialParams_sceneColor, uv + d, 0.0).rgb) * 0.0995;
         }
-        vec3 bloomNear = nearSum / 13.0;
-        vec3 bloomWide = wideSum / 12.0;
-        vec3 bloom = bloomNear * 0.6 + bloomWide * 0.4;
-        vec3 halationTint = vec3(1.0, 0.32, 0.12);
-        // a halação nasce do halo largo e não do núcleo: a luz atravessa a base e volta
-        float halo = girassolLuma(max(bloomWide - bloomNear * 0.35, vec3(0.0)));
-        vec3 halation = halationTint * halo;
+        vec3 outer = vec3(0.0);
+        for (int i = 0; i < 12; i++) {
+            float a = TAU * (float(i) + 0.25) / 12.0;
+            vec2 d = vec2(cos(a), sin(a)) * px * 9.0;
+            float w = (i % 2 == 0) ? 0.0950 : 0.0717;          // dois raios intercalados (9 e 13 px)
+            vec2 dd = (i % 2 == 0) ? d : d * 1.45;
+            outer += girassolBright(textureLod(materialParams_sceneColor, uv + dd, 0.0).rgb) * w;
+        }
+        vec3 halTint = vec3(1.0, 0.24, 0.06);
+        // o halo nasce onde a luz larga excede o núcleo: bordas de alto contraste
+        float halo = girassolLuma(max(outer - inner * 0.45, vec3(0.0)));
+        vec3 halation = halTint * halo;
+        vec3 bloom = inner * 0.55 + outer * 0.45;
 
-        vec3 c = girassolShoulder(base + bloom * materialParams.strength.x + halation * materialParams.strength.y);
+        vec3 c = base + bloom * materialParams.strength.x + halation * materialParams.strength.y;
 
-        // --- 3: sombras densas (toe da curva característica) ---
+        // --- 1: curva Kodak 70 mm (toe denso + shoulder estourado) ---
+        c = girassolToe(c, materialParams.strength.z, materialParams.film.z);
+        c = girassolShoulder(c, materialParams.film.y);
+
+        // --- 3: grão de prata 70 mm ponderado pela luminância ---
         float l = girassolLuma(c);
-        float toe = materialParams.strength.z;
-        float dense = l / (l + toe * (1.0 - l) + 1e-4);          // comprime perto do preto
-        float shadowMask = 1.0 - smoothstep(0.0, 0.35, l);
-        c *= mix(1.0, dense / max(l, 1e-4), shadowMask);
-        c = mix(c, c * vec3(0.92, 0.97, 1.06), shadowMask * 0.5); // pretos levemente frios
-
-        // --- 4: grão de filme Kodak (dependente da luminância, por canal) ---
-        vec2 cell = floor(gl_FragCoord.xy / 1.5);
-        float t = floor(materialParams.time * 24.0);               // 24 quadros/s como no filme
+        vec2 cell = floor(gl_FragCoord.xy / 1.25);
+        float t = floor(materialParams.time * 24.0);
         float gR = girassolHash(cell + vec2(t * 13.1, t * 7.7));
         float gG = girassolHash(cell + vec2(t * 3.3 + 17.0, t * 11.9));
         float gB = girassolHash(cell + vec2(t * 5.9 + 41.0, t * 2.1));
-        vec3 grain = vec3(gR, gG * 0.85 + gR * 0.15, gB * 0.8 + gR * 0.2) - 0.5;
-        float mid = 4.0 * l * (1.0 - l);                           // máximo nos meios-tons
-        c += grain * materialParams.strength.w * (0.35 + 0.65 * mid);
+        vec3 grain = vec3(gR, gG * 0.80 + gR * 0.20, gB * 0.75 + gR * 0.25) - 0.5;
+        float shadowsMids = (1.0 - smoothstep(0.55, 0.90, l)) * (0.45 + 0.55 * smoothstep(0.0, 0.25, l));
+        c += grain * materialParams.strength.w * shadowsMids;
+
+        // --- 4: vinheta óptica (14 % nos cantos) ---
+        vec2 q = uv * 2.0 - 1.0;
+        float r2 = dot(q, q) * 0.5;
+        float vig = 1.0 - materialParams.film.x * smoothstep(0.08, 1.0, r2);
+        c *= vig;
 
         material.baseColor = vec4(max(c, vec3(0.0)), 1.0);
     }

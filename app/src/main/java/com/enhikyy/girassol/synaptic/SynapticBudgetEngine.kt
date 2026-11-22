@@ -73,7 +73,7 @@ data class SynapticSelfTestResult(
 /**
  * Motor do Orçamento Sináptico. Dono único do estado nativo (ByteBuffer direto alinhado a 64 B),
  * executado numa thread dedicada com pilha de 64 MB (observe/commit usam O(D²) doubles de pilha;
- * D=256 ≈ 1,5 MB). D escolhido pela RAM: 4 GB → 64, 8 GB → 128, 12 GB → 256.
+ * D=256 ≈ 1,5 MB). D = 256 nos aparelhos de 8 e 12 GB (sem teto de 4 GB); 128 só no emulador do CI (< 4 GB).
  *
  * Fontes de observação:
  *  • LoRA on-device (llama.cpp): a ponte nativa projeta G_A em (I − P) antes do Adam e prepara as

@@ -37,6 +37,28 @@ object SunCycle {
         return Sun(dir, 0.85f * daylight, tint, emissive, glow, sky, daylight)
     }
 
+    /** v4.1 (Kodak 70 mm): elevação cinematográfica do sol — Dia/Tarde 28° (névoa distante), Entardecer 15° dourado. */
+    const val DAY_ELEVATION_DEG = 28f
+    const val DUSK_ELEVATION_DEG = 15f
+
+    /**
+     * Direção PARA o sol (normalizada) com a elevação cinematográfica fixa da fase e o azimute do
+     * ciclo contínuo [f]: a luz-chave rasante desenha sombras longas e bem recortadas nas fachadas.
+     */
+    fun cinematicDir(f: Float, phase: TimePhase): FloatArray {
+        val elevDeg = when (phase) {
+            TimePhase.MORNING, TimePhase.AFTERNOON -> DAY_ELEVATION_DEG
+            TimePhase.DUSK -> DUSK_ELEVATION_DEG
+            else -> return at(f).dir.let { d -> val n = kotlin.math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]); floatArrayOf(d[0] / n, d[1] / n, d[2] / n) }
+        }
+        val ang = (f - 0.25f) * 2f * PI.toFloat()
+        var hx = -cos(ang) * 0.85f; var hz = -0.35f
+        val hn = kotlin.math.sqrt(hx * hx + hz * hz).coerceAtLeast(1e-4f)
+        hx /= hn; hz /= hn
+        val e = elevDeg * PI.toFloat() / 180f
+        return floatArrayOf(hx * cos(e), sin(e), hz * cos(e))
+    }
+
     private fun smooth(e0: Float, e1: Float, x: Float): Float {
         val t = ((x - e0) / (e1 - e0)).coerceIn(0f, 1f)
         return t * t * (3f - 2f * t)

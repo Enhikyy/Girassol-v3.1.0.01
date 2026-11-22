@@ -216,6 +216,25 @@ class LitMeshBuilder {
         }
     }
 
+    /** Tubo cônico de [a] (raio [r0]) a [b] (raio [r1]) — troncos e galhos que afinam. */
+    fun taperTube(a: V3, b: V3, r0: Float, r1: Float, segments: Int = 7) {
+        val axis = (b - a).normalized()
+        val side = TangentFrame.anyPerpendicular(axis)
+        val side2 = axis.cross(side)
+        val base = vertexCount
+        val len = (b - a).length()
+        for (i in 0..segments) {
+            val ang = (2.0 * PI * i / segments).toFloat()
+            val n = side * cos(ang) + side2 * sin(ang)
+            vertex(a + n * r0, axis, n, 0f, ang * r0)
+            vertex(b + n * r1, axis, n, len, ang * r0)
+        }
+        for (i in 0 until segments) {
+            val k = base + i * 2
+            tri(k, k + 2, k + 3); tri(k, k + 3, k + 1)
+        }
+    }
+
     /** Esfera UV (cabeça, luminárias). */
     fun sphere(c: V3, rx: Float, ry: Float, rz: Float, rings: Int = 8, segments: Int = 12) {
         val base = vertexCount

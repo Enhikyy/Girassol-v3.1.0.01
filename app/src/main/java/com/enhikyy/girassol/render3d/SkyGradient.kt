@@ -26,8 +26,9 @@ object SkyGradient {
             floatArrayOf(1.0f, 0.86f, 0.66f), 5.0f, 0f, 0.55f, 0.10f)
         TimePhase.DUSK -> sky(floatArrayOf(0.17f, 0.20f, 0.38f), 0.42f, floatArrayOf(0.98f, 0.56f, 0.32f), 0.95f,
             floatArrayOf(1.0f, 0.52f, 0.22f), 7.0f, 0.15f, 0.40f, 0.16f)
-        TimePhase.NIGHT -> sky(floatArrayOf(0.025f, 0.035f, 0.08f), 0.30f, floatArrayOf(0.12f, 0.13f, 0.19f), 0.42f,
-            floatArrayOf(0.75f, 0.80f, 1.0f), 0.6f, 1f, 0.70f, 0.08f)
+        // v4.1: céu noturno profundo #070B14 no zênite, horizonte azul-ardósia escuro sem névoa cinza
+        TimePhase.NIGHT -> sky(NIGHT_ZENITH, 4.5f, floatArrayOf(0.040f, 0.055f, 0.095f), 4.0f,
+            floatArrayOf(0.75f, 0.80f, 1.0f), 0.6f, 1f, 0.70f, 0.03f)
         TimePhase.INTERIOR -> sky(floatArrayOf(0.02f, 0.02f, 0.02f), 0.1f, floatArrayOf(0.03f, 0.03f, 0.03f), 0.1f,
             floatArrayOf(0f, 0f, 0f), 0f, 0f, 1f, 0.05f)
     }
@@ -43,6 +44,9 @@ object SkyGradient {
         return Sky(l(a.zenith, b.zenith), f(a.zenithI, b.zenithI), l(a.horizon, b.horizon), f(a.horizonI, b.horizonI),
             l(a.sun, b.sun), f(a.sunI, b.sunI), f(a.stars, b.stars), f(a.gradientExp, b.gradientExp), f(a.haze, b.haze), l(a.fog, b.fog))
     }
+
+    /** #070B14 em sRGB (especificação da cena Noite). */
+    val NIGHT_ZENITH = floatArrayOf(0x07 / 255f, 0x0B / 255f, 0x14 / 255f)
 
     /** Cosseno do raio angular do disco solar (≈ 1,6° aparente, exagerado para leitura no celular). */
     const val SUN_DISK_COS = 0.99961f

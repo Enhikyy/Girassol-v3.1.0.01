@@ -32,12 +32,15 @@ data class HardwareProfile(
  * preservando o determinismo entre aparelhos.
  */
 object HardwareAutoTuner {
-    /** Dimensão D do Orçamento Sináptico pela RAM total: 4 GB → 64, 8 GB → 128, 12 GB+ → 256. */
-    fun synapticDimForRam(totalRamMb: Long): Int = when {
-        totalRamMb < 6144 -> 64
-        totalRamMb < 10240 -> 128
-        else -> 256
-    }
+    /**
+     * Dimensão D do Orçamento Sináptico pela RAM total. v4.1: D = 256 (≈ 1 MB off-heap) em todos os
+     * aparelhos-alvo de 8 GB e 12 GB — sem teto de 4 GB. Só ambientes com menos de 4 GB (o emulador
+     * headless do CI, 2 GB) usam D = 128; D = 64 permanece apenas na ABI para blocos .grs antigos.
+     */
+    fun synapticDimForRam(totalRamMb: Long): Int = if (totalRamMb < SYNAPTIC_FULL_MIN_RAM_MB) 128 else 256
+
+    /** Abaixo disso não há aparelho-alvo (só o emulador do CI). */
+    const val SYNAPTIC_FULL_MIN_RAM_MB = 4096L
 
     /** v4.1 — nível de renderização da Aba Mundo (RAM total + GL_RENDERER). */
     fun renderTier(context: Context, glRenderer: String?): RenderTier {

@@ -12,6 +12,10 @@
 // Janelas: windowParams.x > 0 liga o modo "vidro de janela": u = id da janela + u local,
 // um hash do id decide acesa/apagada (fração windowParams.y), a temperatura de cor
 // (2700–4500 K, conversão de Kelvin para RGB linear no shader) e a persiana.
+// v4.1 (Kodak 70 mm): extra.x = verniz (clear coat) mascarado pela rugosidade — no asfalto só as
+// poças (rugosidade ≤ ~0,2) ganham a película especular que alonga os reflexos dos postes e
+// vitrines; extra.y/z = translucidez e expoente do espalhamento subsuperficial da folhagem (luz do
+// sol atravessando a folha contra a câmera), somado como emissivo nas duas variantes.
 material {
     name : ${NAME},
     shadingModel : ${SHADING},
@@ -40,6 +44,8 @@ material {
         { type : float4, name : sunColor },
         // somente fallback: rgb = luminância difusa do céu por albedo
         { type : float4, name : skyAmbient },
+        // x = clear coat, y = translucidez (SSS), z = expoente do SSS, w = reservado
+        { type : float4, name : extra },
         { type : float4[64], name : instanceOffsets }
     ]
 }
@@ -84,6 +90,17 @@ fragment {
             materialParams.windowParams.z;
     }
 
+    // Transmissão subsuperficial aproximada (folha contra o sol): cor do albedo tingida pelo sol,
+    // concentrada na direção oposta à câmera (V·L negativo) e envolvida pela normal (wrap).
+    vec3 girassolSss(vec3 base, vec3 n, vec3 v) {
+        float tr = materialParams.extra.y;
+        if (tr <= 0.0) return vec3(0.0);
+        vec3 l = normalize(materialParams.sunDirAmount.xyz);
+        float back = pow(max(dot(-v, l), 0.0), max(materialParams.extra.z, 1.0));
+        float wrap = clamp((dot(-n, l) + 0.5) / 1.5, 0.0, 1.0);
+        return base * materialParams.sunColor.rgb * materialParams.sunDirAmount.w * tr * (back * 0.8 + wrap * 0.2);
+    }
+
     void material(inout MaterialInputs material) {
         vec2 rawUv = getUV0();
         vec2 uv = rawUv * materialParams.uvScale.xy + materialParams.uvScale.zw;
@@ -100,6 +117,7 @@ fragment {
         float ndl = max(dot(fn, normalize(materialParams.sunDirAmount.xyz)), 0.0);
         float up = 0.55 + 0.45 * fn.y;
         vec3 lit = base * (materialParams.skyAmbient.rgb * up * ao + materialParams.sunColor.rgb * ndl * materialParams.sunDirAmount.w);
+        lit += girassolSss(base, fn, normalize(getWorldCameraPosition() - wp));
         vec3 e = texture(materialParams_emissiveTex, uv).rgb * materialParams.emissiveColor.rgb * materialParams.emissiveColor.w;
         if (isWindow) {
             // vidro: reflexo aproximado do céu (Fresnel de Schlick) + interior aceso
@@ -124,9 +142,14 @@ fragment {
         material.ambientOcclusion = max(orm.r, materialParams.surface.w);
         material.roughness = clamp(orm.g + materialParams.surface.y, 0.045, 1.0);
         material.metallic = clamp(orm.b * materialParams.surface.z, 0.0, 1.0);
+        // verniz só onde a superfície já é lisa (poças: rugosidade 0,10 vs asfalto seco 0,82)
+        float puddle = 1.0 - smoothstep(0.14, 0.30, material.roughness);
+        material.clearCoat = materialParams.extra.x * puddle;
+        material.clearCoatRoughness = 0.05;
         vec3 e = texture(materialParams_emissiveTex, uv).rgb;
         // emissiveColor.rgb = cor linear, .w = intensidade (≈ nits relativos à exposição)
         material.emissive = vec4(e * materialParams.emissiveColor.rgb * materialParams.emissiveColor.w, 0.0);
+        material.emissive.rgb += girassolSss(material.baseColor.rgb, getWorldNormalVector(), getWorldViewVector());
         if (isWindow) {
             material.emissive = vec4(girassolWindow(rawUv) * materialParams.emissiveColor.rgb * materialParams.emissiveColor.w, 0.0);
         }

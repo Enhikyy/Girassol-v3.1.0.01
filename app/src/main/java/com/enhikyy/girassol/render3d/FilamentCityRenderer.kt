@@ -79,7 +79,11 @@ class FilamentCityRenderer(
         private const val TAG = "GirassolFilament"
         /** Emissivo noturno de referência (usado também pelo [SunCycle] do Modo Eco 2D). */
         const val NIGHT_EMISSIVE = 1.4f
-        const val BRIGHT_KNEE_LDR = 0.82f
+        const val BRIGHT_KNEE_LDR = 0.80f
+        /** Joelho do shoulder Kodak 70 mm (altas luzes que convergem para marfim #FFF4E0). */
+        const val SHOULDER_KNEE = 0.78f
+        /** Viragem fria/ardósia das sombras abaixo de luminância 0,12. */
+        const val TOE_COOL = 0.55f
         const val PRIMARY_TEX = 1024
         const val SECONDARY_TEX = 512
         const val CITIZEN_FAR_M = 60f
@@ -99,19 +103,22 @@ class FilamentCityRenderer(
             TimePhase.AFTERNOON -> PhaseLight(12.0f, 21000f, floatArrayOf(1.0f, 0.80f, 0.58f), 8000f, 0f, 0.60f, 0.90f, 0.30f, 0.012f)
             // entardecer: sol baixo e alaranjado, janelas acendendo, postes ligando
             TimePhase.DUSK -> PhaseLight(11f, 9000f, floatArrayOf(1.0f, 0.62f, 0.36f), 6000f, 6000f, 1.0f, 1.2f, 1.5f, 0.014f)
-            TimePhase.NIGHT -> PhaseLight(4.6f, 2f, floatArrayOf(0.62f, 0.72f, 1.0f), 6f, 12000f, 1.60f, 1.40f, 3.0f, 0.016f)
+            // v4.1: lua azul-ardósia dessaturada; névoa noturna rala (sem véu cinza sobre o #070B14)
+            TimePhase.NIGHT -> PhaseLight(4.6f, 2f, floatArrayOf(0.46f, 0.54f, 0.70f), 6f, 12000f, 1.60f, 1.40f, 3.0f, 0.005f)
             TimePhase.INTERIOR -> PhaseLight(8.2f, 650f, floatArrayOf(1.0f, 0.98f, 0.94f), 300f, 0f, 0f, 0f, 0f, 0f)
         }
 
         /** sRGB → linear (Colors.toLinear ACCURATE) antes de qualquer cor ir ao motor. */
         fun linear(c: FloatArray): FloatArray = Colors.toLinear(Colors.Conversion.ACCURATE, c.copyOf(3))
-        private val LAMP_LINEAR by lazy { linear(floatArrayOf(1.0f, 0.72f, 0.42f)) }
+        /** Postes de sódio/LED quente a 2700 K (Colors.cct devolve RGB linear normalizado). */
+        private val LAMP_LINEAR by lazy { Colors.cct(LAMP_KELVIN) }
+        const val LAMP_KELVIN = 2700f
+        /** Fluxo de referência dos postes à noite (lm): as luzes de vitrine/janela escalam por ele. */
+        const val NIGHT_LAMP_LUMENS = 12000f
         /** Luminárias do teto Lumon: branco neutro-frio de escritório (≈ 4000 K). */
         private val CEILING_LINEAR by lazy { linear(floatArrayOf(1.0f, 0.95f, 0.88f)) }
         /** Fração de janelas acesas (decidida por janela no shader, hash da posição). */
         const val WINDOW_LIT_FRACTION = 0.45f
-        /** Luzes pontuais do teto no nível Lite (só as das mesas). */
-        const val INTERIOR_POINT_LIGHTS_LITE = 30
         /** Raio da cúpula do céu (m): dentro do plano distante (700–900 m) em qualquer modo de câmera. */
         const val SKY_RADIUS_M = 520f
         /** Neblina neutra suave (sRGB). */
@@ -119,9 +126,10 @@ class FilamentCityRenderer(
 
         /** Direção representativa do sol (para o céu procedural) por fase. */
         fun phaseSunDir(p: TimePhase): FloatArray = when (p) {
-            TimePhase.MORNING -> floatArrayOf(-0.62f, 0.48f, -0.36f)
-            TimePhase.AFTERNOON -> floatArrayOf(0.74f, 0.22f, -0.34f)
-            TimePhase.DUSK -> floatArrayOf(0.86f, 0.10f, -0.30f)
+            // v4.1: mesmas elevações cinematográficas de SunCycle.cinematicDir (28° / 28° / 15°)
+            TimePhase.MORNING -> floatArrayOf(-0.62f, 0.381f, -0.36f)
+            TimePhase.AFTERNOON -> floatArrayOf(0.74f, 0.433f, -0.34f)
+            TimePhase.DUSK -> floatArrayOf(0.86f, 0.244f, -0.30f)
             TimePhase.NIGHT -> floatArrayOf(0.30f, 0.80f, 0.40f)
             TimePhase.INTERIOR -> floatArrayOf(0f, 1f, 0f)
         }
@@ -185,11 +193,13 @@ class FilamentCityRenderer(
     private var sunEntity = 0
     private var sunShadowKey = ""
     private val lampEntities = ArrayList<Int>()
+    /** v4.1: vitrines (3200 K) e janelas residenciais (≈ 3000 K) — entidade e fluxo nominal (lm). */
+    private val nightEntities = ArrayList<Pair<Int, Float>>()
     private val pointEntities = ArrayList<Int>()
 
     // ---- v4.1: nível de hardware (HardwareAutoTuner) e cúpula de céu em gradiente
     /** Nível efetivo de renderização; [tierOverride] força um nível (testes/roteiro de captura). */
-    var tier: RenderTier = RenderTier.LITE; private set
+    var tier: RenderTier = RenderTier.MID; private set
     var tierOverride: RenderTier? = null
     private lateinit var skyMat: Material
     private var skyMi: MaterialInstance? = null
@@ -422,6 +432,7 @@ class FilamentCityRenderer(
         ProceduralAssetsNative.PARTITION -> floatArrayOf(0.67f, 0.71f, 0.68f)
         ProceduralAssetsNative.BILLBOARD -> floatArrayOf(0.05f, 0.05f, 0.06f)
         ProceduralAssetsNative.GRASS -> floatArrayOf(0.05f, 0.09f, 0.03f)
+        ProceduralAssetsNative.BRICK -> floatArrayOf(0.25f, 0.085f, 0.05f)
         else -> floatArrayOf(0.3f, 0.3f, 0.3f)
     }
 
@@ -443,6 +454,8 @@ class FilamentCityRenderer(
         // janelas: interior aceso por janela (fração acesa, intensidade, semente) decidido no shader
         if (spec.window) mi.setParameter("windowParams", 1f, WINDOW_LIT_FRACTION, 1f, (spec.id.hashCode() and 0xffff) / 65535f)
         else mi.setParameter("windowParams", 0f, 0f, 0f, 0f)
+        // v4.1: verniz das poças, translucidez/SSS da folhagem
+        mi.setParameter("extra", spec.clearCoat, spec.translucency, spec.subsurfacePower, 0f)
     }
 
     private fun fallbackRough(surface: Int): Float = when (surface) {
@@ -490,6 +503,8 @@ class FilamentCityRenderer(
         glowVb?.let { engine.destroyVertexBuffer(it) }; glowIb?.let { engine.destroyIndexBuffer(it) }; glowVb = null; glowIb = null
         for (e in lampEntities) { scene.removeEntity(e); engine.destroyEntity(e); EntityManager.get().destroy(e) }
         lampEntities.clear()
+        for ((e, _) in nightEntities) { scene.removeEntity(e); engine.destroyEntity(e); EntityManager.get().destroy(e) }
+        nightEntities.clear()
         for (e in pointEntities) { scene.removeEntity(e); engine.destroyEntity(e); EntityManager.get().destroy(e) }
         pointEntities.clear()
         if (sunEntity != 0) { scene.removeEntity(sunEntity); engine.destroyEntity(sunEntity); EntityManager.get().destroy(sunEntity); sunEntity = 0 }
@@ -612,11 +627,21 @@ class FilamentCityRenderer(
                 scene.addEntity(e)
                 lampEntities += e
             }
+            // v4.1: luzes pontuais quentes de vitrines e janelas (2700–3200 K) — refletem em
+            // especulares longos no asfalto molhado (clear coat das poças)
+            for (nl in w.nightLights.take(nightLightBudget())) {
+                val e = EntityManager.get().create()
+                val c = Colors.cct(nl.kelvin)
+                LightManager.Builder(LightManager.Type.POINT).color(c[0], c[1], c[2]).intensity(0f)
+                    .position(nl.pos.x, nl.pos.y, nl.pos.z).falloff(nl.falloffM).castShadows(false).build(engine, e)
+                scene.addEntity(e)
+                nightEntities += e to nl.lumens
+            }
         }
         // v4.1: luzes pontuais do teto do salão Lumon (níveis 1–3): 350 lux nas mesas, 250 lux nos
         // corredores. Fluxo φ = E·4π·d² (lm) e raio de atenuação da especificação.
         if (p.ceilingPointLights && tier.pointLights) {
-            val budget = if (tier == RenderTier.LITE) INTERIOR_POINT_LIGHTS_LITE else w.pointLights.size
+            val budget = w.pointLights.size
             for (pl in w.pointLights.take(budget)) {
                 val e = EntityManager.get().create()
                 LightManager.Builder(LightManager.Type.POINT).color(CEILING_LINEAR[0], CEILING_LINEAR[1], CEILING_LINEAR[2])
@@ -629,12 +654,18 @@ class FilamentCityRenderer(
         }
     }
 
-    /** Postes com luz pontual por nível (LITE 16 · MID 32 · ULTRA 64 · emulador 0 — só emissivo + glow). */
+    /** Postes com luz pontual por nível (8 GB 40 · 12 GB 64 · emulador 0 — só emissivo + glow). */
     private fun streetLampBudget(): Int = when (tier) {
         RenderTier.EMULATOR -> 0
-        RenderTier.LITE -> 16
-        RenderTier.MID -> 32
+        RenderTier.LITE, RenderTier.MID -> 40
         RenderTier.ULTRA -> 64
+    }
+
+    /** Vitrines/janelas com luz pontual por nível (8 GB 48 · 12 GB 96 · emulador 0). */
+    private fun nightLightBudget(): Int = when (tier) {
+        RenderTier.EMULATOR -> 0
+        RenderTier.LITE, RenderTier.MID -> 48
+        RenderTier.ULTRA -> 96
     }
 
     // ================================================================== texturas / IBL
@@ -762,7 +793,7 @@ class FilamentCityRenderer(
         val z = linear(s.zenith); val h = linear(s.horizon); val sc = linear(s.sun)
         val d = when (phase) {
             TimePhase.NIGHT -> phaseSunDir(TimePhase.NIGHT)
-            else -> SunCycle.at(dayPhase.takeIf { !it.isNaN() } ?: 0.4f).dir
+            else -> SunCycle.cinematicDir(dayPhase.takeIf { !it.isNaN() } ?: 0.4f, phase)
         }
         val n = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).coerceAtLeast(1e-4f)
         mi.setParameter("zenithColor", z[0], z[1], z[2], s.zenithI)
@@ -922,7 +953,8 @@ class FilamentCityRenderer(
             postMi.setParameter("sceneColor", color, TextureSampler(TextureSampler.MinFilter.LINEAR, TextureSampler.MagFilter.LINEAR, TextureSampler.WrapMode.CLAMP_TO_EDGE))
             postMi.setParameter("texelSize", 1f / widthPx, 1f / heightPx)
             postMi.setParameter("strength", strength[0], strength[1], strength[2], strength[3])
-            postMi.setParameter("brightKnee", BRIGHT_KNEE_LDR, 1.0f)
+            postMi.setParameter("brightKnee", BRIGHT_KNEE_LDR, 0.97f)
+            postMi.setParameter("film", profile().vignette, SHOULDER_KNEE, TOE_COOL, 0f)
             true
         }.getOrElse { Log.w(TAG, "girassol_dehancer_post indisponível; seguindo sem a passada analógica", it); false }
         postActive = ok
@@ -989,9 +1021,11 @@ class FilamentCityRenderer(
             // emulador/SwiftShader: sem bloom (sem cubemap de reflexo, NaN se propagariam pela cadeia)
             enabled = p.bloomEnabled && !WorldGpu.softwareGl; strength = p.bloomStrength; levels = p.bloomLevels; resolution = if (p.bloomQuarterRes) (heightPx / 4).coerceIn(90, p.bloomResolution) else p.bloomResolution
             threshold = true; highlight = p.effectiveBloomHighlight; lensFlare = false; starburst = false
+            blendMode = View.BloomOptions.BlendMode.ADD
         })
         view.setVignetteOptions(View.VignetteOptions().apply {
-            enabled = l.vignette; midPoint = 0.48f; roundness = 0.6f; feather = 0.62f; color = floatArrayOf(0f, 0f, 0f, 1f)
+            // a vinheta óptica de 14 % é aplicada na passada girassol_dehancer_post (sem dobrar aqui)
+            enabled = l.vignette && p.vignette == 0f; midPoint = 0.48f; roundness = 0.6f; feather = 0.62f; color = floatArrayOf(0f, 0f, 0f, 1f)
         })
         applyFog(p)
         view.setDynamicResolutionOptions(View.DynamicResolutionOptions().apply { enabled = false; minScale = p.resolutionScale; maxScale = p.resolutionScale })
@@ -1267,7 +1301,7 @@ class FilamentCityRenderer(
             val dir = when (ph) {
                 TimePhase.INTERIOR -> floatArrayOf(0.18f, 1f, 0.12f)
                 TimePhase.NIGHT -> phaseSunDir(TimePhase.NIGHT)
-                else -> SunCycle.at(dayPhase.takeIf { !it.isNaN() } ?: 0.4f).dir
+                else -> SunCycle.cinematicDir(dayPhase.takeIf { !it.isNaN() } ?: 0.4f, phase)
             }
             val n = sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2])
             lm.setDirection(li, -dir[0] / n, -dir[1] / n, -dir[2] / n)
@@ -1276,7 +1310,9 @@ class FilamentCityRenderer(
             lm.setIntensity(li, cur[1])
         }
         for (e in lampEntities) lm.setIntensity(lm.getInstance(e), cur[3])
-        if (WorldGpu.softwareGl) applyEmuLighting(ph)
+        val nightK = cur[3] / NIGHT_LAMP_LUMENS
+        for ((e, lumens) in nightEntities) lm.setIntensity(lm.getInstance(e), lumens * nightK)
+        if (WorldGpu.softwareGl) applyEmuLighting(ph) else applyLitSss(ph)
         updateSky()
         updateIblIntensity()
         for ((id, mi) in sharedMis) {
@@ -1293,6 +1329,26 @@ class FilamentCityRenderer(
     }
 
     /**
+     * Caminho lit (aparelhos reais): a translucidez da folhagem é somada como emissivo em unidades
+     * de tela (emissive.w = 0 no shader), então o sol vai na mesma escala do fallback:
+     * luminância difusa = E · exposição / π, com a direção cinematográfica da fase.
+     */
+    private fun applyLitSss(ph: TimePhase) {
+        val exposure = (1.0 / (1.2 * Math.pow(2.0, cur[0].toDouble()))).toFloat()
+        val sunAmt = if (ph == TimePhase.INTERIOR) 0f else cur[1] * exposure / Math.PI.toFloat()
+        val dir = if (ph == TimePhase.NIGHT) phaseSunDir(TimePhase.NIGHT) else SunCycle.cinematicDir(dayPhase.takeIf { !it.isNaN() } ?: 0.4f, ph)
+        val sc = linear(phaseLight(ph).sunColor)
+        for ((id, mi) in sharedMis) if (WorldMaterials.spec(id).translucency > 0f) {
+            mi.setParameter("sunDirAmount", dir[0], dir[1], dir[2], sunAmt)
+            mi.setParameter("sunColor", sc[0], sc[1], sc[2], 1f)
+        }
+        for (p in worldParts) if (p.mi != null && p.spec.translucency > 0f) {
+            p.mi.setParameter("sunDirAmount", dir[0], dir[1], dir[2], sunAmt)
+            p.mi.setParameter("sunColor", sc[0], sc[1], sc[2], 1f)
+        }
+    }
+
+    /**
      * Emulador: alimenta o girassol_world_fallback com sol/céu em luminância de tela, derivados da MESMA câmera
      * física (EV100 interpolado → 1/(1,2·2^EV)) e das mesmas iluminâncias de [WorldExposure].
      */
@@ -1303,14 +1359,14 @@ class FilamentCityRenderer(
         val dir = when (ph) {
             TimePhase.INTERIOR -> floatArrayOf(0.18f, 1f, 0.12f)
             TimePhase.NIGHT -> phaseSunDir(TimePhase.NIGHT)
-            else -> SunCycle.at(dayPhase.takeIf { !it.isNaN() } ?: 0.4f).dir
+            else -> SunCycle.cinematicDir(dayPhase.takeIf { !it.isNaN() } ?: 0.4f, phase)
         }
         val sc = linear(phaseLight(ph).sunColor)
         val tint = linear(when (ph) {
             TimePhase.MORNING -> floatArrayOf(0.86f, 0.92f, 1.0f)
             TimePhase.AFTERNOON -> floatArrayOf(0.95f, 0.90f, 0.88f)
             TimePhase.DUSK -> floatArrayOf(1.0f, 0.80f, 0.70f)
-            TimePhase.NIGHT -> floatArrayOf(0.70f, 0.78f, 1.0f)
+            TimePhase.NIGHT -> floatArrayOf(0.30f, 0.36f, 0.50f)
             TimePhase.INTERIOR -> floatArrayOf(1.0f, 0.98f, 0.94f)
         })
         fun set(mi: MaterialInstance) {

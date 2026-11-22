@@ -26,6 +26,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -312,7 +313,9 @@ fun WorldEngineCard() {
             style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim, modifier = Modifier.testTag("engine_status"))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             SimulationHub.SPEEDS.forEach { s ->
-                GlassPill("${s}x", status.targetTps == s, "speed_$s", Modifier.weight(1f)) { SimulationHub.setSpeed(s); if (!status.running) SimulationHub.start() }
+                key(s) {
+                    GlassPill("${s}x", status.targetTps == s, "speed_$s", Modifier.weight(1f)) { SimulationHub.setSpeed(s); if (!status.running) SimulationHub.start() }
+                }
             }
         }
         val cap = hw?.maxTicksPerSecond

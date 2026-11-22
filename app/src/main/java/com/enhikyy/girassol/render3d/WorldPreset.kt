@@ -74,7 +74,7 @@ data class CinematicProfile(
     // bloom
     val bloomEnabled: Boolean = true,
     val bloomStrength: Float,
-    val bloomLevels: Int = 6,
+    val bloomLevels: Int = BLOOM_LEVELS,
     val bloomResolution: Int = 512,
     /** Pedido da especificação; o Filament 1.75 exige highlight ≥ 10 (ver [effectiveBloomHighlight]). */
     val bloomHighlight: Float = 1.0f,
@@ -89,12 +89,14 @@ data class CinematicProfile(
     val specularIbl: Boolean = true,
     /** Gradação "Kodak 70 mm" (curvas + mixer de canais assados na LUT 3D do Filament). */
     val kodakLut: Boolean = true,
-    /** Halação quente da passada girassol_dehancer_post (0 = desligada). */
-    val halation: Float = 0.15f,
-    /** Grão Kodak da passada girassol_dehancer_post (0 = desligado). */
-    val grain: Float = 0.045f,
-    /** Resolução das texturas procedurais (512 Lite, 1024 Mid/Ultra). */
-    val textureSize: Int = 1024,
+    /** Halação vermelho-alaranjada da passada girassol_dehancer_post (0 = desligada). */
+    val halation: Float = HALATION,
+    /** Grão de prata 70 mm da passada girassol_dehancer_post (0 = desligado). */
+    val grain: Float = GRAIN,
+    /** Vinheta óptica da passada girassol_dehancer_post (14 % nas bordas, lente prime 50/70 mm). */
+    val vignette: Float = VIGNETTE,
+    /** Resolução das texturas procedurais PBR (2048² nos aparelhos de 8/12 GB; 256² só no emulador). */
+    val textureSize: Int = 2048,
     /** Luzes pontuais do teto do salão Lumon. */
     val ceilingPointLights: Boolean = true
 ) {
@@ -103,8 +105,16 @@ data class CinematicProfile(
 
     companion object {
         const val FILAMENT_MIN_HIGHLIGHT = 10f
-        val URBAN = CinematicProfile(ssaoRadius = 0.85f, ssaoIntensity = 1.40f, saturation = 1.14f, bloomStrength = 0.24f, fog = true)
-        val INTERIOR = CinematicProfile(ssaoRadius = 0.55f, ssaoIntensity = 1.65f, saturation = 1.05f, bloomStrength = 0.18f, fog = false)
+        /** BloomOptions da especificação Kodak 70 mm: 7 níveis, força 0,30, highlight 1,0, mistura ADD. */
+        const val BLOOM_LEVELS = 7
+        const val BLOOM_STRENGTH = 0.30f
+        const val HALATION = 0.22f
+        const val GRAIN = 0.040f
+        const val VIGNETTE = 0.14f
+        val URBAN = CinematicProfile(ssaoRadius = 0.85f, ssaoIntensity = 1.40f, saturation = 1.10f, bloomStrength = BLOOM_STRENGTH, fog = true,
+            contrast = 1.12f)
+        val INTERIOR = CinematicProfile(ssaoRadius = 0.60f, ssaoIntensity = 1.80f, saturation = 1.04f, bloomStrength = BLOOM_STRENGTH, fog = false,
+            contrast = 1.12f)
 
         fun of(p: WorldPreset) = if (p == WorldPreset.URBAN_OVERCAST) URBAN else INTERIOR
 
@@ -123,27 +133,25 @@ data class CinematicProfile(
         }
 
         /**
-         * v4.1 — perfil efetivo = degradação por [EffectLevel] ∩ teto do [RenderTier]:
-         *  LITE  → sombras 1024, LUT Kodak 70 mm, bloom 1/4, sem SSAO/SSR/halação/grão, sem IBL especular;
-         *  MID   → sombras 2048, bloom + halação quente, IBL especular, sem SSAO/SSR/grão;
-         *  ULTRA → tudo (SSAO, grão Kodak, SSR);
-         *  EMULATOR → sem sombras nem pós (o fallback unlit faz tonemapping no shader).
+         * v4.1 — perfil efetivo = degradação por [EffectLevel] (FPS/térmica/sentinela) × [RenderTier].
+         * Aparelhos reais de 8 GB (MID) e 12 GB (ULTRA) recebem o pipeline COMPLETO — SSAO pleno,
+         * sombras de contato, SSR, bloom 7 níveis, halação, grão 70 mm, IBL especular e texturas
+         * 2048² — sem teto de RAM; o ULTRA só sobe as sombras para 4096. O perfil simplificado
+         * existe exclusivamente para o EMULATOR (GL_RENDERER SwiftShader / Android Emulator).
          */
         fun forTier(p: WorldPreset, tier: RenderTier, l: EffectLevel): CinematicProfile {
             val b = forLevel(p, l)
+            val post = l != EffectLevel.NONE
             return when (tier) {
                 RenderTier.EMULATOR -> b.copy(castShadows = false, screenSpaceContactShadows = false, ssaoEnabled = false, ssrEnabled = false,
                     bloomEnabled = false, taa = false, fxaa = false, specularIbl = false, kodakLut = false, halation = 0f, grain = 0f,
                     textureSize = tier.textureSize, ceilingPointLights = false, iblFaceSize = minOf(b.iblFaceSize, 64), fog = false)
-                RenderTier.LITE -> b.copy(shadowMapSize = minOf(b.shadowMapSize, 1024), shadowCascades = minOf(b.shadowCascades, 2),
-                    ssaoEnabled = false, ssrEnabled = false, taa = false, bloomQuarterRes = true, bloomLevels = minOf(b.bloomLevels, 4),
-                    specularIbl = false, kodakLut = b.kodakLut, halation = 0f, grain = 0f, textureSize = tier.textureSize,
-                    iblFaceSize = minOf(b.iblFaceSize, 64), contactShadowSteps = minOf(b.contactShadowSteps, 8))
-                RenderTier.MID -> b.copy(shadowMapSize = minOf(b.shadowMapSize, 2048), ssaoEnabled = false, ssrEnabled = false,
-                    halation = if (l == EffectLevel.NONE) 0f else 0.15f, grain = 0f, textureSize = tier.textureSize,
-                    iblFaceSize = minOf(b.iblFaceSize, 128))
-                RenderTier.ULTRA -> b.copy(halation = if (l == EffectLevel.NONE) 0f else 0.15f,
-                    grain = if (l == EffectLevel.NONE) 0f else 0.045f, textureSize = tier.textureSize)
+                RenderTier.LITE, RenderTier.MID -> b.copy(shadowMapSize = if (l == EffectLevel.FULL) RenderTier.MID.shadowMapSize else b.shadowMapSize,
+                    halation = if (post) HALATION else 0f, grain = if (post) GRAIN else 0f, vignette = if (post) VIGNETTE else 0f,
+                    textureSize = RenderTier.MID.textureSize)
+                RenderTier.ULTRA -> b.copy(shadowMapSize = if (l == EffectLevel.FULL) RenderTier.ULTRA.shadowMapSize else b.shadowMapSize,
+                    halation = if (post) HALATION else 0f, grain = if (post) GRAIN else 0f, vignette = if (post) VIGNETTE else 0f,
+                    textureSize = tier.textureSize)
             }
         }
     }

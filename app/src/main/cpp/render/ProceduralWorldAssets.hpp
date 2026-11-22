@@ -1,4 +1,4 @@
-// v4.0 — Ativos procedurais da aba Mundo (C++20, sem dependências): texturas PBR 1024×1024
+// v4.1 — Ativos procedurais da aba Mundo (C++20, sem dependências): texturas PBR até 2048×2048
 // (albedo sRGB, ORM linear R=AO G=rugosidade B=metálico, normal em espaço tangente, emissivo
 // sRGB), cadeias de mip com renormalização das normais e um ambiente IBL procedural
 // (cubemap RGBA16F pré-filtrado por GGX + harmônicos esféricos de 3 bandas já no formato
@@ -26,7 +26,8 @@ enum class Surface : int {
     Partition = 6,   // divisória off-white #D6DBD7, laminado texturizado (rugosidade 0.68)
     Billboard = 7,   // letreiro luminoso de cobertura (emissivo)
     Grass = 8,       // canteiros: solo + grama baixa
-    Count = 9
+    Brick = 9,       // v4.1: tijolo aparente desgastado (aparelho inglês), juntas de argamassa, eflorescência e fuligem
+    Count = 10
 };
 
 /** Uma camada de mip dentro de um buffer contíguo RGBA8. */
@@ -48,8 +49,10 @@ void generateSurface(Surface s, int size, uint64_t seed,
                      uint8_t* albedo, uint8_t* orm, uint8_t* normal, uint8_t* emissive);
 
 /** Constantes exigidas pela especificação (testadas). */
-inline constexpr float kPuddleRoughness = 0.12f;
-inline constexpr float kDryAsphaltRoughness = 0.85f;
+inline constexpr float kPuddleRoughness = 0.10f;
+inline constexpr float kDryAsphaltRoughness = 0.82f;
+inline constexpr float kBrickRoughness = 0.86f;
+inline constexpr float kMortarRoughness = 0.94f;
 inline constexpr float kTealMetallic = 0.65f;
 inline constexpr float kTealRoughness = 0.35f;
 inline constexpr float kCarpetRoughness = 0.90f;

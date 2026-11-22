@@ -14,6 +14,9 @@ import java.nio.ByteOrder
 
 /** Utilitários de GPU do Filament para a Aba Mundo (buffers, texturas procedurais, IBL). */
 internal object WorldGpu {
+    /** v4.1: filtragem anisotrópica 16x (texturas 2048² em ângulo rasante: asfalto, fachadas, carpete). */
+    const val MAX_ANISOTROPY = 16f
+
     private const val TAG = "GirassolWorldGpu"
 
     fun direct(bytes: Long): ByteBuffer = ByteBuffer.allocateDirect(bytes.toInt()).order(ByteOrder.nativeOrder())
@@ -55,7 +58,7 @@ internal object WorldGpu {
     @Volatile var allowSurfaces = true
     @Volatile var allowIbl = true
     private val hwSampler = TextureSampler(TextureSampler.MinFilter.LINEAR_MIPMAP_LINEAR, TextureSampler.MagFilter.LINEAR,
-        TextureSampler.WrapMode.REPEAT).apply { anisotropy = 8f }
+        TextureSampler.WrapMode.REPEAT).apply { anisotropy = MAX_ANISOTROPY }
     private val swSampler = TextureSampler(TextureSampler.MinFilter.LINEAR, TextureSampler.MagFilter.LINEAR,
         TextureSampler.WrapMode.REPEAT)
     val repeatSampler: TextureSampler get() = if (softwareGl) swSampler else hwSampler

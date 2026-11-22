@@ -16,7 +16,7 @@ object WorldMaterials {
 
     val all: List<MatSpec> = listOf(
         // ---- urbano
-        MatSpec("asphalt", PA.WET_ASPHALT, metersU = 4f, normalStrength = 1f),
+        MatSpec("asphalt", PA.WET_ASPHALT, metersU = 4f, normalStrength = 1f, clearCoat = 1f),
         MatSpec("sidewalk", PA.SIDEWALK, metersU = 4f),
         MatSpec("curb", PA.CONCRETE, metersU = 1.2f, tint = lin(0.96f, 0.95f, 0.93f)),
         MatSpec("gutter", PA.CONCRETE, metersU = 2f, tint = lin(0.42f, 0.43f, 0.44f)),
@@ -24,17 +24,23 @@ object WorldMaterials {
         // v4.1: fachada de concreto #6E767A (sem janelas pintadas — as janelas são geometria real)
         MatSpec("facade", PA.CONCRETE, metersU = 3f, tint = lin(0.66f, 0.71f, 0.73f)),
         MatSpec("spandrel", PA.CONCRETE, metersU = 3f, tint = lin(0.30f, 0.62f, 0.66f)),
+        // v4.1: alvenaria — tijolo aparente desgastado (1,2 m por repetição) e reboco envelhecido
+        MatSpec("brick", PA.BRICK, metersU = 1.2f, normalStrength = 1.1f),
+        MatSpec("plaster", PA.CONCRETE, metersU = 2.5f, tint = lin(0.86f, 0.80f, 0.70f), normalStrength = 0.8f),
+        MatSpec("plaster_band", PA.CONCRETE, metersU = 2.5f, tint = lin(0.62f, 0.58f, 0.52f)),
+        // escada de incêndio: aço pintado de preto com ferrugem (grelha, guarda-corpo e lances)
+        MatSpec("fire_escape", -1, tint = lin(0.11f, 0.095f, 0.085f), rough = 0.58f, metal = 0.85f),
         MatSpec("reveal", PA.CONCRETE, metersU = 1f, tint = lin(0.78f, 0.80f, 0.80f)),
         MatSpec("sill", PA.CONCRETE, metersU = 1f, tint = lin(0.95f, 0.94f, 0.91f)),
         MatSpec("frame", -1, tint = lin(0.20f, 0.21f, 0.22f), rough = 0.35f, metal = 1f),
-        // vidro: rugosidade 0,08; interior aceso 2700–4500 K decidido por janela no shader
-        MatSpec("window_glass", -1, tint = lin(0.035f, 0.045f, 0.05f), rough = 0.08f,
+        // vidro reflexivo: rugosidade 0,06; interior aceso 2700–4500 K decidido por janela no shader
+        MatSpec("window_glass", -1, tint = lin(0.035f, 0.045f, 0.05f), rough = GLASS_ROUGHNESS,
             emissive = floatArrayOf(1f, 1f, 1f), emissiveDriver = EmissiveDriver.WINDOWS, window = true),
         MatSpec("marquee", -1, tint = lin(0.18f, 0.19f, 0.20f), rough = 0.4f, metal = 0.8f),
         MatSpec("wood", -1, tint = lin(0.46f, 0.30f, 0.18f), rough = 0.62f),
         MatSpec("planter", PA.CONCRETE, metersU = 1.5f, tint = lin(0.85f, 0.85f, 0.83f)),
         MatSpec("soil", -1, tint = lin(0.12f, 0.08f, 0.05f), rough = 0.95f),
-        MatSpec("leaf_light", -1, tint = lin(0.24f, 0.36f, 0.16f), rough = 0.82f),
+        MatSpec("leaf_light", -1, tint = lin(0.24f, 0.36f, 0.16f), rough = 0.82f, translucency = 0.55f, subsurfacePower = 3f),
         MatSpec("concrete", PA.CONCRETE, metersU = 3f),
         MatSpec("grass", PA.GRASS, metersU = 4f),
         MatSpec("field", PA.GRASS, metersU = 4f, tint = lin(0.92f, 0.86f, 0.62f)),
@@ -46,8 +52,10 @@ object WorldMaterials {
         MatSpec("lamp_head", -1, tint = lin(0.22f, 0.22f, 0.22f), rough = 0.4f, metal = 0.6f,
             emissive = lin(1.0f, 0.70f, 0.38f), emissiveDriver = EmissiveDriver.STREET_LAMP),
         MatSpec("water", -1, tint = lin(0.035f, 0.05f, 0.055f), rough = 0.05f),
-        MatSpec("leaf", -1, tint = lin(0.14f, 0.24f, 0.12f), rough = 0.85f),
+        MatSpec("leaf", -1, tint = lin(0.14f, 0.24f, 0.12f), rough = 0.85f, translucency = 0.45f, subsurfacePower = 4f),
+        MatSpec("leaf_dark", -1, tint = lin(0.09f, 0.17f, 0.08f), rough = 0.88f, translucency = 0.35f, subsurfacePower = 4f),
         MatSpec("trunk", -1, tint = lin(0.20f, 0.15f, 0.11f), rough = 0.9f),
+        MatSpec("bark", PA.CONCRETE, metersU = 0.8f, metersV = 2.4f, tint = lin(0.62f, 0.48f, 0.36f), normalStrength = 1.4f),
         MatSpec("barrier_orange", -1, tint = lin(0.86f, 0.34f, 0.08f), rough = 0.5f),
         MatSpec("barrier_white", -1, tint = lin(0.82f, 0.82f, 0.80f), rough = 0.5f),
         MatSpec("hvac", -1, tint = lin(0.50f, 0.52f, 0.53f), rough = 0.45f, metal = 0.7f),
@@ -57,6 +65,11 @@ object WorldMaterials {
         MatSpec("carpet", PA.CARPET, metersU = 2f, normalStrength = 1f),
         MatSpec("coffer", PA.COFFER, metersU = 2.4f, emissive = lin(1.0f, 0.98f, 0.93f), emissiveDriver = EmissiveDriver.CEILING),
         MatSpec("beam", -1, tint = lin(0.80f, 0.82f, 0.80f), rough = 0.82f),
+        // v4.1: brutalismo Severance — vigas de concreto aparente e dutos de HVAC suspensos
+        MatSpec("beam_concrete", PA.CONCRETE, metersU = 2.4f, tint = lin(1.10f, 1.10f, 1.08f)),
+        MatSpec("duct", -1, tint = lin(0.62f, 0.64f, 0.66f), rough = 0.38f, metal = 1f),
+        MatSpec("duct_hanger", -1, tint = lin(0.30f, 0.31f, 0.32f), rough = 0.45f, metal = 1f),
+        MatSpec("diffuser", -1, tint = lin(0.86f, 0.87f, 0.86f), rough = 0.5f, metal = 0.2f),
         MatSpec("partition", PA.PARTITION, metersU = 1.6f),
         MatSpec("wall", PA.PARTITION, metersU = 3f, tint = lin(0.97f, 0.98f, 0.97f)),
         MatSpec("baseboard", -1, tint = lin(0.05f, 0.12f, 0.09f), rough = 0.6f),
@@ -75,8 +88,11 @@ object WorldMaterials {
     fun spec(id: String): MatSpec = byId[id] ?: error("material desconhecido: $id")
     val surfacesUsed: Set<Int> get() = all.filter { it.surface >= 0 }.map { it.surface }.toSet()
     fun surfacesFor(p: WorldPreset): List<Int> = if (p == WorldPreset.URBAN_OVERCAST)
-        listOf(PA.WET_ASPHALT, PA.CONCRETE, PA.SIDEWALK, PA.GRASS, PA.BILLBOARD)
-    else listOf(PA.CARPET, PA.COFFER, PA.PARTITION)
+        listOf(PA.WET_ASPHALT, PA.CONCRETE, PA.SIDEWALK, PA.BRICK, PA.GRASS, PA.BILLBOARD)
+    else listOf(PA.CARPET, PA.COFFER, PA.PARTITION, PA.CONCRETE)
+
+    /** v4.1: vidro reflexivo das janelas (especificação: rugosidade 0,06). */
+    const val GLASS_ROUGHNESS = 0.06f
 
     /** Roupas sóbrias (sRGB): carvão, marinho, ardósia, aveia, verde-garrafa, vinho fosco, cinza-grafite. */
     val SHIRTS = listOf(0x2E3236, 0x23304A, 0x4A5560, 0xB8AE98, 0x22382E, 0x5A2E33, 0x3C3F44, 0x6B6F73).map(::hex)

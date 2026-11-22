@@ -222,6 +222,55 @@ Texel concreteBoard(const Ctx& c, float u, float v) {
     return t;
 }
 
+/**
+ * Tijolo aparente desgastado: fiadas de 7,5 cm (tijolo 6,5 cm + junta 1 cm) em aparelho inglês
+ * (fiada de frente alternada com fiada de topo), 1 repetição = 1,2 m. Cada tijolo tem tom e
+ * desgaste próprios (hash), arestas lascadas, eflorescência salina perto da base das juntas,
+ * fuligem/escorrimento vertical de baixa frequência e argamassa recuada (AO + relevo).
+ */
+Texel brick(const Ctx& c, float u, float v) {
+    Texel t;
+    constexpr int kCourses = 16;                       // 1,2 m / 7,5 cm
+    const float cv = v * kCourses;
+    const int course = static_cast<int>(cv);
+    const float fv = fract(cv);
+    const bool header = (course & 1) == 1;             // fiada de topo (tijolos de 11 cm)
+    const int perRow = header ? 10 : 5;                // 1,2 m / 24 cm ou 12 cm
+    const float shift = header ? 0.5f / perRow : 0.f;
+    const float cu = fract(u + shift) * perRow;
+    const int col = static_cast<int>(cu);
+    const float fu = fract(cu);
+    const float jointV = 0.133f;                       // 1 cm de 7,5 cm
+    const float jointU = header ? 0.083f : 0.042f;     // 1 cm de 12 cm / 24 cm
+    const float ev = std::min(fv, 1.f - fv), eu = std::min(fu, 1.f - fu);
+    const float inMortar = std::max(1.f - smoothstep(0.f, jointV * 0.5f, ev), 1.f - smoothstep(0.f, jointU * 0.5f, eu));
+    const uint32_t id = hash3(col + (header ? 4096 : 0), course, c.seed + 5u);
+    const float tone = static_cast<float>(id & 0xffu) / 255.f;
+    const float burn = static_cast<float>((id >> 8) & 0xffu) / 255.f;
+    const float grit = fbm(u, v, 128, 3, c.seed + 21u);
+    const float chip = smoothstep(0.62f, 0.78f, vnoise(u, v, 64, 64, c.seed + 23u));
+    // paleta: vermelho-terracota, alaranjado e tijolos queimados (escuros)
+    Rgb base = mixc(hexLin(0x8A3B26), hexLin(0xA65A3A), tone);
+    base = mixc(base, hexLin(0x4E2418), smoothstep(0.78f, 1.0f, burn));
+    base = base * (0.86f + 0.24f * grit);
+    // fuligem e escorrimento (faixas verticais suaves) + eflorescência acima das juntas
+    const float soot = smoothstep(0.45f, 0.85f, fbm(u * 0.5f, v * 0.125f, 3, 4, c.seed + 29u, 1));
+    const float effl = smoothstep(0.58f, 0.80f, fbm(u, v, 12, 3, c.seed + 31u)) * (1.f - smoothstep(0.f, 0.35f, fv));
+    base = mixc(base, hexLin(0x2A2522), soot * 0.38f);
+    base = mixc(base, hexLin(0xC9C2B4), effl * 0.30f);
+    const Rgb mortar = hexLin(0x8F8A80) * (0.82f + 0.30f * grit);
+    t.albedo = mixc(base, mortar, inMortar);
+    t.rough = lerp(kBrickRoughness + (grit - 0.5f) * 0.06f, kMortarRoughness, inMortar);
+    t.rough = lerp(t.rough, 0.70f, effl * 0.4f);
+    // relevo: face do tijolo levemente abaulada, arestas lascadas, argamassa 6 mm recuada
+    const float bulge = 0.08f * (1.f - (2.f * eu) * (2.f * eu) * 0.15f) * (1.f - (2.f * ev) * 0.1f);
+    float h = 0.62f + bulge + 0.10f * grit - 0.18f * chip * smoothstep(0.25f, 0.f, std::min(ev, eu));
+    h = lerp(h, 0.22f + 0.06f * grit, inMortar);
+    t.height = h;
+    t.ao = lerp(0.92f + 0.08f * grit, 0.52f, inMortar) * (1.f - 0.15f * chip);
+    return t;
+}
+
 Texel carpet(const Ctx& c, float u, float v) {
     Texel t;
     const float tx = u * 4.f, tz = v * 4.f;
@@ -361,6 +410,7 @@ float bumpStrength(Surface s) {
         case Surface::Partition: return 1.2f;
         case Surface::Billboard: return 0.5f;
         case Surface::Grass: return 4.0f;
+        case Surface::Brick: return 8.0f;
         default: return 1.f;
     }
 }
@@ -411,6 +461,7 @@ void generateSurface(Surface s, int size, uint64_t seed, uint8_t* albedo, uint8_
                 case Surface::Partition: t = partition(c, u, v); break;
                 case Surface::Billboard: t = billboard(c, u, v); break;
                 case Surface::Grass: t = grass(c, u, v); break;
+                case Surface::Brick: t = brick(c, u, v); break;
                 default: break;
             }
             const std::size_t k = (static_cast<std::size_t>(y) * size + x) * 4;

@@ -15,6 +15,9 @@ import kotlin.math.sin
  *    (base estrela de 5 pés, coluna a gás, assento, encosto com apoio lombar, braços).
  * v4.1: pilares brutalistas com capitel, corredor dos fundos com portas, passadeiras nos
  * corredores e luzes pontuais de teto (350 lux nas mesas / 250 lux nos corredores, níveis 1–3).
+ * v4.1 (Severance): vigas primárias de concreto aparente 0,55 × 0,70 m sobre as linhas de
+ * pilares, dutos HVAC retangulares de chapa galvanizada suspensos por tirantes (com flanges a
+ * cada 1,2 m e difusores quadrados), sobre o carpete verde profundo com micro-relevo.
  * A posição da simulação (cidade S × S m) é remapeada linearmente para dentro do salão.
  */
 object LumonHallBuilder {
@@ -26,6 +29,13 @@ object LumonHallBuilder {
     const val HEIGHT = 3.4f
     const val BEAM_W = 0.30f
     const val BEAM_D = 0.55f
+    /** Vigas primárias de concreto aparente sobre as linhas de pilares (largura × altura de alma). */
+    const val PRIMARY_BEAM_W = 0.55f
+    const val PRIMARY_BEAM_D = 0.70f
+    /** Dutos HVAC retangulares: seção 0,70 × 0,38 m, topo 0,78 m abaixo do teto. */
+    const val DUCT_W = 0.70f
+    const val DUCT_H = 0.38f
+    const val DUCT_TOP = HEIGHT - 0.78f
     const val PARTITION_H = 1.25f
     const val DESK_H = 0.76f
     const val MARGIN = 2.5f
@@ -79,6 +89,9 @@ object LumonHallBuilder {
         return out
     }
 
+    /** Linhas (z) dos troncos de duto: entre a borda das ilhas e o corredor de cada fileira. */
+    fun ductLines(): List<Float> = (0 until PODS_Z).map { j -> HALL_D * (j + 0.5f) / PODS_Z - 2.9f }
+
     fun build(citySizeM: Float): WorldScene {
         val parts = ArrayList<ScenePart>()
         val ceil = HEIGHT + BEAM_D
@@ -108,6 +121,54 @@ object LumonHallBuilder {
             beams.box(V3(0f, HEIGHT, z - BEAM_W / 2), V3(HALL_W, ceil, z + BEAM_W / 2), top = false, bottom = true)
         }
         parts += ScenePart("beam", beams.build(), castShadows = false, layer = WorldLayers.CEILING)
+        // vigas primárias de concreto aparente (pórticos sobre os pilares), projetando sombra
+        val primary = LitMeshBuilder()
+        val pb = PRIMARY_BEAM_W / 2
+        for (i in 1 until PODS_X) {
+            val x = HALL_W * i / PODS_X
+            primary.chamferBox(V3(x - pb, HEIGHT - PRIMARY_BEAM_D, 0f), V3(x + pb, HEIGHT, HALL_D), 0.025f)
+            primary.box(V3(x - pb, HEIGHT - PRIMARY_BEAM_D, 0f), V3(x + pb, HEIGHT, HALL_D), top = false, bottom = true, sides = false)
+        }
+        for (j in 1 until PODS_Z) {
+            val z = HALL_D * j / PODS_Z
+            primary.chamferBox(V3(0f, HEIGHT - PRIMARY_BEAM_D, z - pb), V3(HALL_W, HEIGHT, z + pb), 0.025f)
+            primary.box(V3(0f, HEIGHT - PRIMARY_BEAM_D, z - pb), V3(HALL_W, HEIGHT, z + pb), top = false, bottom = true, sides = false)
+        }
+        parts += ScenePart("beam_concrete", primary.build(), castShadows = true, layer = WorldLayers.CEILING)
+        // dutos HVAC suspensos: um tronco ao longo de X por fileira de ilhas, entre as mesas
+        val duct = LitMeshBuilder(); val hanger = LitMeshBuilder(); val diff = LitMeshBuilder()
+        for (z in ductLines()) {
+            val y0 = DUCT_TOP - DUCT_H; val y1 = DUCT_TOP
+            val dz0 = z - DUCT_W / 2; val dz1 = z + DUCT_W / 2
+            duct.box(V3(1.2f, y0, dz0), V3(HALL_W - 1.2f, y1, dz1), top = true, bottom = true)
+            // flanges de emenda a cada 1,2 m
+            var fx = 1.2f
+            while (fx < HALL_W - 1.2f) {
+                duct.box(V3(fx - 0.02f, y0 - 0.025f, dz0 - 0.025f), V3(fx + 0.02f, y1 + 0.025f, dz1 + 0.025f), top = true, bottom = true)
+                fx += 1.2f
+            }
+            // tirantes roscados + cantoneira em trapézio a cada 2,4 m
+            var hx = 2.4f
+            while (hx < HALL_W - 1.2f) {
+                for (zz in floatArrayOf(dz0 - 0.06f, dz1 + 0.06f)) hanger.tube(V3(hx, y0 - 0.05f, zz), V3(hx, HEIGHT, zz), 0.008f, segments = 4)
+                hanger.box(V3(hx - 0.025f, y0 - 0.07f, dz0 - 0.09f), V3(hx + 0.025f, y0 - 0.03f, dz1 + 0.09f), top = true, bottom = true)
+                hx += 2.4f
+            }
+            // difusores quadrados de 4 vias pendurados a cada 4,8 m (colarinho + placa aletada)
+            var gx = 3.6f
+            while (gx < HALL_W - 2f) {
+                duct.box(V3(gx - 0.12f, y0 - 0.22f, z - 0.12f), V3(gx + 0.12f, y0, z + 0.12f))
+                diff.box(V3(gx - 0.30f, y0 - 0.27f, z - 0.30f), V3(gx + 0.30f, y0 - 0.22f, z + 0.30f), top = true, bottom = true)
+                for (r in 1..3) {
+                    val e = 0.30f - r * 0.075f
+                    diff.box(V3(gx - e, y0 - 0.29f, z - e), V3(gx + e, y0 - 0.27f, z + e), top = false, bottom = true)
+                }
+                gx += 4.8f
+            }
+        }
+        parts += ScenePart("duct", duct.build(), castShadows = true, layer = WorldLayers.CEILING)
+        parts += ScenePart("duct_hanger", hanger.build(), castShadows = false, layer = WorldLayers.CEILING)
+        parts += ScenePart("diffuser", diff.build(), castShadows = false, layer = WorldLayers.CEILING)
         // ilhas de trabalho
         val part = LitMeshBuilder(); val desk = LitMeshBuilder(); val metal = LitMeshBuilder()
         for (j in 0 until PODS_Z) for (i in 0 until PODS_X) {

@@ -65,15 +65,18 @@ int runWorldAssetsTests() {
     WCHECK(chain.size() == 11 && mipLevelCount(1024) == 11 && chain.back().size == 1, "cadeia de mip 1024×1024 tem 11 níveis até 1×1");
     size_t expect = 0; for (int s = 1024; s >= 1; s /= 2) expect += static_cast<size_t>(s) * s * 4;
     WCHECK(mipChainBytes(1024) == expect, "bytes da cadeia de mip RGBA8");
+    // v4.1: texturas 2048² nos aparelhos de 8/12 GB
+    WCHECK(mipLevelCount(2048) == 12 && mipChain(2048).back().size == 1, "cadeia de mip 2048×2048 tem 12 níveis até 1×1");
 
     // asfalto molhado em resolução real (1024²)
     Maps asphalt(1024);
     asphalt.gen(Surface::WetAsphalt, 42);
-    const float puddles = roughnessFraction(asphalt.orm.data(), 1024, 0.10f, 0.14f);
-    const float dry = roughnessFraction(asphalt.orm.data(), 1024, 0.78f, 0.93f);
-    std::printf("asfalto: poças(r≈0.12)=%.3f seco(r≈0.85)=%.3f\n", puddles, dry);
-    WCHECK(puddles > 0.06f && puddles < 0.45f, "poças fBm com rugosidade 0.12 cobrem 6–45 % do asfalto");
-    WCHECK(dry > 0.25f, "asfalto seco texturizado com rugosidade ≈0.85");
+    const float puddles = roughnessFraction(asphalt.orm.data(), 1024, 0.08f, 0.12f);
+    const float dry = roughnessFraction(asphalt.orm.data(), 1024, 0.75f, 0.90f);
+    std::printf("asfalto: poças(r≈0.10)=%.3f seco(r≈0.82)=%.3f\n", puddles, dry);
+    WCHECK(kPuddleRoughness == 0.10f && kDryAsphaltRoughness == 0.82f, "constantes v4.1: poça 0.10 / asfalto seco 0.82");
+    WCHECK(puddles > 0.06f && puddles < 0.45f, "poças fBm com rugosidade 0.10 cobrem 6–45 % do asfalto");
+    WCHECK(dry > 0.25f, "asfalto seco texturizado com rugosidade ≈0.82");
     WCHECK(normalsUnit(asphalt), "normais do asfalto unitárias em todos os mips");
     Maps asphalt2(1024);
     asphalt2.gen(Surface::WetAsphalt, 42);
@@ -128,6 +131,22 @@ int runWorldAssetsTests() {
     Maps coffer(256);
     coffer.gen(Surface::Coffer, 3);
     WCHECK(emissiveFraction(coffer.emissive.data(), 256) > 0.4f, "caixotão com painel emissivo embutido");
+    // v4.1: tijolo aparente (juntas de argamassa recuadas, tijolos com rugosidade ≈0.86)
+    {
+        Maps br(512);
+        br.gen(Surface::Brick, 9);
+        const float rB = meanChannel(br.albedo, 512, 0), gB = meanChannel(br.albedo, 512, 1), bB = meanChannel(br.albedo, 512, 2);
+        const float mortar = roughnessFraction(br.orm.data(), 512, 0.91f, 0.99f);
+        const float bricks = roughnessFraction(br.orm.data(), 512, 0.78f, 0.91f);
+        std::printf("tijolo: albedo sRGB=(%.3f %.3f %.3f) argamassa=%.3f tijolos=%.3f\n", rB, gB, bB, mortar, bricks);
+        WCHECK(rB > gB && gB > bB * 0.9f && rB > 0.25f, "tijolo com albedo terracota (R > G > B)");
+        WCHECK(mortar > 0.05f && mortar < 0.40f, "núcleo das juntas de argamassa (rugosidade ≈0.94) ocupa 5–40 %");
+        WCHECK(bricks > 0.45f, "faces dos tijolos com rugosidade ≈0.86");
+        WCHECK(normalsUnit(br), "normais do tijolo unitárias em todos os mips");
+        Maps br2(512);
+        br2.gen(Surface::Brick, 9);
+        WCHECK(br.albedo == br2.albedo && br.normal == br2.normal, "tijolo determinístico");
+    }
     for (int k = 0; k < static_cast<int>(Surface::Count); ++k) {
         Maps m(64);
         m.gen(static_cast<Surface>(k), 1);

@@ -21,7 +21,9 @@ object ProceduralAssetsNative {
     const val PARTITION = 6
     const val BILLBOARD = 7
     const val GRASS = 8
-    const val SURFACE_COUNT = 9
+    /** v4.1: tijolo aparente desgastado (aparelho inglês, argamassa recuada, eflorescência). */
+    const val BRICK = 9
+    const val SURFACE_COUNT = 10
 
     /** Céus (mesma ordem de `girassol::render::SkyPreset`). */
     const val SKY_MORNING = 0
