@@ -38,3 +38,8 @@
 -keep class kotlin.jvm.functions.Function1 { *; }
 # Ingestão/transcrição da Biblioteca (chama o Sherpa) e mapa de exceções nativas.
 -keep class com.enhikyy.girassol.knowledge.** { *; }
+
+# ---- v8: Cérebro Cortical (núcleo nativo libgirassol_v8.so) ----
+# Métodos external do objeto fachada são resolvidos por nome (Java_com_girassol_brain_GirassolV8_*)
+# no carregamento da JNI; o R8 não pode renomear/remover nenhum deles em build Release.
+-keep class com.girassol.brain.GirassolV8 { native <methods>; }

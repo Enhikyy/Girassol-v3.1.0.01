@@ -12,3 +12,8 @@ native-tests/build/
 .kotlin/
 # assets gerados dos asset packs (modelos GGUF/ONNX baixados e verificados no build)
 pack_*/src/main/assets/
+
+# Núcleo cortical v8 — binários nativos de teste e bibliotecas compiladas
+test_v8
+test_v8_arm64
+*.so
