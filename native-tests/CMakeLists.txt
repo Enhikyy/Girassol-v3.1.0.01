@@ -14,7 +14,8 @@ add_executable(girassol_native_tests native_tests.cpp world_tick_tests.cpp cogni
     ${SRC}/hardware/soc_hardware_probe.cpp
     ${SRC}/llm/llm_engine.cpp
     ${SRC}/llm/lora_ondevice.cpp
-    ${SRC}/llm/llg_sampler.cpp)
+    ${SRC}/llm/llg_sampler.cpp
+    ${SRC}/sb/sb_core.cpp)
 target_include_directories(girassol_native_tests PRIVATE ${SRC})
 target_compile_options(girassol_native_tests PRIVATE -Wall -Wextra -O1 -g -ffp-contract=off ${SAN_FLAGS})
 target_link_options(girassol_native_tests PRIVATE -fsanitize=address,undefined)

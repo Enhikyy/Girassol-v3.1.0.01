@@ -18,6 +18,7 @@ class GirassolApplication : Application() {
         RenderModePolicy.load(this)
         SimulationHub.ensureLoaded(this)
         MemoryGuard.start(this)
+        com.enhikyy.girassol.synaptic.SynapticBudgetEngine.start(this)
     }
 
     /** Sob pressão de memória o modelo GGUF é descarregado antes que o Low Memory Killer aja. */

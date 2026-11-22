@@ -2,6 +2,8 @@
 // de CPU (libggml-cpu-android_*.so) é escolhido pelo Kotlin a partir do HWCAP e carregado
 // por nativeLlmLoadCpuBackend() antes do primeiro modelo.
 #include <jni.h>
+#include <atomic>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -12,6 +14,8 @@
 
 namespace {
 girassol::llm::LlmEngine gLlm;
+// Tabela da ponte do Orçamento Sináptico (libgirassol_sb.so), entregue pelo Kotlin.
+std::atomic<const GirassolSbBridge*> gSbBridge{nullptr};
 
 // v3.8: UTF-16 ⇄ UTF-8 padrão (common/jni_utf.hpp). O UTF-8 modificado de
 // GetStringUTFChars entregava emoji como pares substitutos de 6 bytes ao tokenizador.
@@ -191,6 +195,7 @@ Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmTrainLora(
     girassol::llm::LoraTrainConfig c;
     c.adapterPath = readStr(env, adapterPath);
     c.rank = rank; c.alpha = alpha; c.epochs = epochs; c.lr = lr; c.topK = topK; c.maxTokens = maxTokens; c.nThreads = threads;
+    c.sbBridge = gSbBridge.load(std::memory_order_acquire);
     gLlm.trainLora(v, c);
     const std::string s = gLlm.loraStatus();
     return str(env, s);
@@ -202,6 +207,18 @@ Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmApplyLora(JNIEnv
     gLlm.applyLora(readStr(env, path), scale, &err);
     const std::string s = err;
     return str(env, s);
+}
+
+// Recebe o endereço da tabela GirassolSbBridge (SynapticBudgetNative.nativeBridgeHandle).
+// 0 desliga a projeção. Magia/versão validadas antes de aceitar o ponteiro.
+JNIEXPORT jboolean JNICALL
+Java_com_enhikyy_girassol_nativebridge_LlmNativeBridge_nativeLlmSetGradientProjector(JNIEnv*, jobject, jlong handle) {
+    if (handle == 0) { gSbBridge.store(nullptr, std::memory_order_release); return JNI_TRUE; }
+    const auto* b = reinterpret_cast<const GirassolSbBridge*>(static_cast<uintptr_t>(handle));
+    if (b->magic != GIRASSOL_SB_BRIDGE_MAGIC || b->version != GIRASSOL_SB_BRIDGE_VERSION || b->project_f32 == nullptr)
+        return JNI_FALSE;
+    gSbBridge.store(b, std::memory_order_release);
+    return JNI_TRUE;
 }
 
 JNIEXPORT void JNICALL

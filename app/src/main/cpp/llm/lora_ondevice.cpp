@@ -527,6 +527,10 @@ LoraTrainReport OnDeviceLoraTrainer::train(llama_model* model, const std::string
             norm = std::sqrt(norm) / static_cast<double>(en - st);
             const double scale = (1.0 / static_cast<double>(en - st)) * (norm > 1.0 ? 1.0 / norm : 1.0);
             weights.step++;
+            // Orçamento Sináptico: G_A <- G_A (I - P) antes do passo (protege o subespaço de
+            // ativações consolidado de ciclos anteriores; gB é livre — B é a saída do adaptador).
+            if (cfg.sbBridge != nullptr && cfg.sbBridge->project_f32 != nullptr)
+                rep.sbProjectedBlocks += cfg.sbBridge->project_f32(gA.data(), R, nIn);
             adam(weights.a, gA, weights.ma, weights.va, scale);
             adam(weights.b, gB, weights.mb, weights.vb, scale);
         }
@@ -572,6 +576,10 @@ LoraTrainReport OnDeviceLoraTrainer::train(llama_model* model, const std::string
     if (rep.accepted) {
         std::filesystem::rename(tmp, cfg.adapterPath, ec);
         if (ec) { rep.accepted = false; rep.error = "rename do adaptador falhou"; }
+    }
+    if (rep.accepted && cfg.sbBridge != nullptr && cfg.sbBridge->stage_activations_f32 != nullptr && !A.empty()) {
+        // ativações de entrada do ffn_down deste ciclo (n_tokens x n_ff) -> área de preparação
+        rep.sbStagedRows = cfg.sbBridge->stage_activations_f32(A.data(), static_cast<int64_t>(A.size() / static_cast<size_t>(nIn)), nIn);
     }
     if (!rep.accepted) {
         std::filesystem::remove(tmp, ec);

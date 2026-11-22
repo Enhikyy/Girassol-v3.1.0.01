@@ -27,6 +27,50 @@
 #include "cognitive/anokhin_functional_system.hpp"
 #include "evolution/cma_es.hpp"
 #include <cstring>
+#include "sb/sb_core.hpp"
+#include "sb/girassol_sb_bridge.h"
+
+// Ponte de teste: mesmo contrato da libgirassol_sb.so, com estado D=64 estático.
+struct SbTestBridge {
+    static girassol::sb::SynapticBudget<64>& sb() { static girassol::sb::SynapticBudget<64> s; return s; }
+    static inline double worst = 0.0;
+    static inline int64_t staged = 0;
+    static void reset() {
+        sb() = girassol::sb::SynapticBudget<64>();
+        static double X[96 * 64];
+        uint64_t s = 99;
+        for (double& v : X) { s ^= s << 13; s ^= s >> 7; s ^= s << 17; v = static_cast<double>(s % 2001) / 1000.0 - 1.0; }
+        sb().observe(X, 96, 1.0);
+        sb().commit(16);
+        worst = 0.0; staged = 0;
+    }
+    static int64_t project(float* G, int64_t rows, int64_t cols) {
+        int64_t done = 0;
+        double tmp[64];
+        for (int64_t r = 0; r < rows; ++r)
+            for (int64_t b = 0; b + 64 <= cols; b += 64) {
+                float* g = G + r * cols + b;
+                for (int i = 0; i < 64; ++i) tmp[i] = g[i];
+                sb().project_rows(tmp, 1);
+                for (int i = 0; i < 64; ++i) g[i] = static_cast<float>(tmp[i]);
+                double scale = 0.0, mx = 0.0;
+                for (int i = 0; i < 64; ++i) scale = std::fmax(scale, std::fabs(static_cast<double>(g[i])));
+                for (int k = 0; k < sb().rank(); ++k) {
+                    double d = 0.0;
+                    for (int i = 0; i < 64; ++i) d += static_cast<double>(g[i]) * sb().basis_row(k)[i];
+                    mx = std::fmax(mx, std::fabs(d));
+                }
+                if (scale > 0.0) worst = std::fmax(worst, mx / scale);
+                ++done;
+            }
+        return done;
+    }
+    static int64_t stage(const float*, int64_t rows, int64_t cols) { staged += rows * (cols / 64); return rows * (cols / 64); }
+    static int32_t dim() { return 64; }
+    static const GirassolSbBridge kTable;
+};
+const GirassolSbBridge SbTestBridge::kTable = {GIRASSOL_SB_BRIDGE_MAGIC, GIRASSOL_SB_BRIDGE_VERSION, &SbTestBridge::project,
+                                               &SbTestBridge::stage, &SbTestBridge::dim};
 
 static int gFailures = 0;
 int runWorldTickTests();
@@ -255,7 +299,15 @@ static void llmTest() {
         girassol::llm::LlmEngine el2;
         CHECK(el2.load(path, 2, 512, &err), "recarrega");
         CHECK(el2.applyLora(ad, 1.0f, &e2), ("aplica adaptador salvo: " + e2).c_str());
+        // Orçamento Sináptico real (D=64) ligado ao treino: projeta G_A antes do Adam.
+        SbTestBridge::reset();
+        lc.sbBridge = &SbTestBridge::kTable;
         const auto lr2 = el2.trainLora(mem, lc);
+        std::printf("lora+sb: blocos projetados=%lld, ativações preparadas=%lld, |G u|max=%.3e\n",
+                    static_cast<long long>(lr2.sbProjectedBlocks), static_cast<long long>(lr2.sbStagedRows), SbTestBridge::worst);
+        CHECK(lr2.sbProjectedBlocks > 0, "project_rows do Orçamento Sináptico aplicado ao gradiente esparso do LoRA");
+        CHECK(SbTestBridge::worst < 1e-5, "gradiente projetado ortogonal ao subespaço protegido (float32)");
+        CHECK(!lr2.accepted || lr2.sbStagedRows > 0, "ativações do ciclo aceito preparadas para consolidação");
         std::printf("lora ciclo 2: ok=%d aceito=%d ciclo=%d held %.4f→%.4f %s\n", lr2.ok, lr2.accepted, lr2.cycle, lr2.heldNllBase, lr2.heldNllAdapted, lr2.error.c_str());
         CHECK(lr2.ok && lr2.cycle >= 1, "segundo ciclo incremental retoma os pesos anteriores");
         el2.unload();

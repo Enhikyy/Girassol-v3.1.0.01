@@ -37,7 +37,7 @@ class GirassolDatabase(private val context: Context) :
 
     companion object {
         const val DB_NAME = "girassol.db"
-        const val DB_VERSION = 4
+        const val DB_VERSION = 5
 
         @Volatile private var instance: GirassolDatabase? = null
         /** Instância única (escritor + registro de modelos compartilham a mesma conexão WAL). */
@@ -95,6 +95,15 @@ class GirassolDatabase(private val context: Context) :
                 PRIMARY KEY (world_seed, id)
             )""",
             "CREATE INDEX IF NOT EXISTS idx_chat_citizen ON chat_messages(citizen_id, id)",
+            // v4.1: estado serializado (GRSB + FNV-1a 64) do Orçamento Sináptico, um por dimensão D.
+            """CREATE TABLE IF NOT EXISTS synaptic_budget_state (
+                dim INTEGER PRIMARY KEY,
+                blob BLOB NOT NULL,
+                checksum TEXT NOT NULL,
+                tasks INTEGER NOT NULL,
+                protected_rank INTEGER NOT NULL,
+                updated_utc INTEGER NOT NULL
+            )""",
             """CREATE TABLE IF NOT EXISTS stress_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 world_tick INTEGER NOT NULL,

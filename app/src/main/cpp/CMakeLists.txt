@@ -123,6 +123,27 @@ set_target_properties(girassol_core PROPERTIES LINK_DEPENDS "${GIRASSOL_EXPORTS_
 # OpenCL/Vulkan são sondados via dlopen: nunca ligados estaticamente.
 target_link_libraries(girassol_core PRIVATE log dl android aaudio)
 
+# ---------------------------------------------------------------- Orçamento Sináptico (sb)
+# Núcleo determinístico bit-a-bit (IEEE-754 binary64): compilado com flags PRÓPRIAS e isoladas,
+# nunca herdando -Ofast/-ffast-math/FMA de flags globais. arm64-v8a usa NEON-double e x86_64
+# usa SSE2 (padrão das ABIs); -ffp-contract=off proíbe fmadd/vfmadd. O hash T13 canônico é
+# 9ab8752a00f798b6 em x86_64 e em arm64-v8a (validado no CI via NDK clang + qemu-aarch64).
+add_library(girassol_sb SHARED sb/sb_core.cpp sb/sb_tests.cpp sb/girassol_sb_jni.cpp)
+target_include_directories(girassol_sb PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sb)
+set(GIRASSOL_SB_FP_FLAGS -std=c++20 -O2 -ffp-contract=off -fno-fast-math -fno-unsafe-math-optimizations
+    -fno-associative-math -fno-reciprocal-math -fhonor-nans -fhonor-infinities)
+target_compile_options(girassol_sb PRIVATE -Wall -Wextra ${GIRASSOL_SB_FP_FLAGS} ${GIRASSOL_HARDEN_COMPILE})
+target_compile_definitions(girassol_sb PRIVATE SB_TESTS_AS_LIBRARY=1)
+# Remove qualquer -Ofast/-ffast-math que um toolchain/flag global tenha injetado neste alvo.
+get_target_property(_sb_opts girassol_sb COMPILE_OPTIONS)
+list(REMOVE_ITEM _sb_opts -Ofast -ffast-math -funsafe-math-optimizations -ffp-contract=fast -mfma)
+set_target_properties(girassol_sb PROPERTIES COMPILE_OPTIONS "${_sb_opts}")
+string(REPLACE "-Ofast" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+string(REPLACE "-ffast-math" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+target_link_options(girassol_sb PRIVATE ${GIRASSOL_HARDEN_LINK})
+set_target_properties(girassol_sb PROPERTIES LINK_DEPENDS "${GIRASSOL_EXPORTS_MAP}")
+target_link_libraries(girassol_sb PRIVATE log)
+
 # ---------------------------------------------------------------- motor LLM (único)
 # libgirassol_llm.so liga dinamicamente a libllama.so; o Kotlin escolhe (HWCAP) qual
 # libggml-cpu-*.so carregar via ggml_backend_load() antes do primeiro modelo.

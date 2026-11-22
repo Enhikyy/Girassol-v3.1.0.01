@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 
+#include "../sb/girassol_sb_bridge.h"
+
 struct llama_model;
 struct llama_context;
 struct llama_adapter_lora;
@@ -30,6 +32,10 @@ struct LoraTrainConfig {
     float heldOutFraction = 0.25f;
     int32_t nThreads = 2;
     uint64_t seed = 1935;
+    // Orçamento Sináptico: se presente, as linhas do gradiente esparso de A (rank x n_ff) são
+    // projetadas em (I - P) ANTES do passo do Adam (project_rows em blocos de D), e uma amostra
+    // das ativações do ciclo aceito é preparada para consolidação (observe + commit).
+    const GirassolSbBridge* sbBridge = nullptr;
 };
 
 struct LoraTrainReport {
@@ -44,6 +50,8 @@ struct LoraTrainReport {
     double millis = 0;
     int32_t cycle = 0;
     int32_t rank = 0;
+    int64_t sbProjectedBlocks = 0;   // blocos de D colunas projetados pelo Orçamento Sináptico
+    int64_t sbStagedRows = 0;        // ativações preparadas para consolidação
 };
 
 /** Estado persistente do adaptador (A: r×n_in, B: n_out×r, momentos do Adam). */

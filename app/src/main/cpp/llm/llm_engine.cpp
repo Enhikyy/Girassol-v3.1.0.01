@@ -833,11 +833,12 @@ void LlmEngine::clearLora() {
 std::string LlmEngine::loraStatus() const {
     std::lock_guard<std::mutex> lock(mu_);
     const LoraTrainReport& r = lastLora_;
-    char buf[512];
+    char buf[640];
     std::snprintf(buf, sizeof(buf),
-                  "{\"active\":%s,\"cycles\":%d,\"rank\":%d,\"target\":\"%s\",\"lastOk\":%s,\"lastAccepted\":%s,"
+                  "{\"sbProjectedBlocks\":%lld,\"sbStagedRows\":%lld,\"active\":%s,\"cycles\":%d,\"rank\":%d,\"target\":\"%s\",\"lastOk\":%s,\"lastAccepted\":%s,"
                   "\"trainTokens\":%d,\"heldTokens\":%d,\"trainNllBefore\":%.5f,\"trainNllAfter\":%.5f,"
                   "\"heldNllBase\":%.5f,\"heldNllAdapted\":%.5f,\"millis\":%.1f,\"error\":\"%s\"}",
+                  static_cast<long long>(r.sbProjectedBlocks), static_cast<long long>(r.sbStagedRows),
                   adapter_ ? "true" : "false", lora_.cycles, lora_.rank, lora_.target.c_str(), r.ok ? "true" : "false",
                   r.accepted ? "true" : "false", r.trainTokens, r.heldTokens, r.trainNllBefore, r.trainNllAfter, r.heldNllBase,
                   r.heldNllAdapted, r.millis, r.error.c_str());

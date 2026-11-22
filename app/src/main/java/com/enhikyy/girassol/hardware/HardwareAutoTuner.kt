@@ -32,6 +32,13 @@ data class HardwareProfile(
  * preservando o determinismo entre aparelhos.
  */
 object HardwareAutoTuner {
+    /** Dimensão D do Orçamento Sináptico pela RAM total: 4 GB → 64, 8 GB → 128, 12 GB+ → 256. */
+    fun synapticDimForRam(totalRamMb: Long): Int = when {
+        totalRamMb < 6144 -> 64
+        totalRamMb < 10240 -> 128
+        else -> 256
+    }
+
     fun detect(context: Context): HardwareProfile {
         val am = context.getSystemService(ActivityManager::class.java)
         val mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }

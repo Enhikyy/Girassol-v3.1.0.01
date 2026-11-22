@@ -89,14 +89,14 @@ fun KnowledgeLibraryPanel(dash: DashboardSnapshot?) {
             Text(if (busy) "Processando…" else "Adicionar documento ou áudio")
         }
         if (msg.isNotEmpty()) Text(msg, style = MaterialTheme.typography.bodySmall, color = Lumon.Teal)
-        v?.documents?.take(8)?.forEach { d ->
-            KeyValue("${d.title} · ${d.format}", "${d.chunks} trechos · ${d.reads} leituras")
+        v?.documents?.take(8)?.forEachIndexed { i, d ->
+            androidx.compose.runtime.key("doc", i, d.title) { KeyValue("${d.title} · ${d.format}", "${d.chunks} trechos · ${d.reads} leituras") }
         }
         if (!v?.lexicon.isNullOrEmpty()) Text("Léxico emergente", style = MaterialTheme.typography.labelSmall, color = Lumon.Sunflower)
-        v?.lexicon?.take(10)?.forEach { e ->
+        v?.lexicon?.take(10)?.forEach { e -> androidx.compose.runtime.key("lex", e.glyph) {
             Text("${e.glyph} = \"${e.phrase}\" · ${e.uses} usos${e.coiner?.let { " · cunhado por $it" } ?: ""}", style = MonoStyle, color = Lumon.Cream,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
+        } }
         v?.compressedSpeechSample?.take(3)?.forEach { Text("› $it", style = MonoStyle, color = Lumon.CreamDim, maxLines = 2, overflow = TextOverflow.Ellipsis) }
     }
 }
@@ -137,7 +137,7 @@ fun MeshSyncPanel(dash: DashboardSnapshot?) {
             OutlinedButton(onClick = { MeshSyncManager.stop() }, modifier = Modifier.fillMaxWidth()) { Text("Encerrar malha") }
             if (mesh.peers.isEmpty()) Text("Procurando pares via NSD (_girassol._tcp) e beacon UDP 47653…", style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
             val citizens = SimulationHub.aliveCitizenIds()
-            mesh.peers.forEach { p ->
+            mesh.peers.forEach { p -> androidx.compose.runtime.key("peer", p.name, p.host, p.port) {
                 Text("${p.name} · ${p.host}:${p.port} · ${p.via}", style = MonoStyle, color = Lumon.Cream)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { scope.launch { msg = MeshSyncManager.pushSnapshot(p) } }, modifier = Modifier.weight(1f)) { Text("Enviar .grs") }
@@ -146,17 +146,17 @@ fun MeshSyncPanel(dash: DashboardSnapshot?) {
                         scope.launch { msg = MeshSyncManager.migrate(p, c.first) }
                     }, modifier = Modifier.weight(1f)) { Text("Migrar ${citizens.getOrNull(migrantIdx % citizens.size.coerceAtLeast(1))?.second ?: "-"}") }
                 }
-            }
+            } }
             if (citizens.size > 1) Text("Tocar para escolher outro cidadão", style = MaterialTheme.typography.bodySmall, color = Lumon.Teal,
                 modifier = Modifier.clickable { migrantIdx++ })
             if (mesh.lastBytesSent > 0) KeyValue("Último envio diferencial", "${mesh.lastBytesSent / 1024} KB (economia ${mesh.lastBytesSaved / 1024} KB)")
         }
-        mesh.received.takeLast(3).forEach { name ->
+        mesh.received.takeLast(3).forEach { name -> androidx.compose.runtime.key("rx", name) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(name, style = MonoStyle, color = Lumon.CreamDim, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 OutlinedButton(onClick = { scope.launch { msg = MeshSyncManager.importReceived(name) } }) { Text("Importar") }
             }
-        }
+        } }
         if (msg.isNotEmpty()) Text(msg, style = MaterialTheme.typography.bodySmall, color = Lumon.Teal)
         mesh.log.take(4).forEach { Text(it, style = MonoStyle, color = Lumon.CreamDim, maxLines = 2, overflow = TextOverflow.Ellipsis) }
     }
@@ -214,7 +214,7 @@ fun ThemeGrid(context: android.content.Context = LocalContext.current) {
     Column(Modifier.fillMaxWidth().testTag("theme_grid"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         NativeThemes.ALL.chunked(2).forEach { row ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                row.forEach { t ->
+                row.forEach { t -> androidx.compose.runtime.key(t.key) {
                     val sel = t.key == current.key
                     Row(Modifier.weight(1f).heightIn(min = 48.dp).clip(RoundedCornerShape(14.dp)).background(Color(t.background.toInt()))
                         .border(if (sel) 2.dp else 1.dp, Color(t.primary.toInt()).copy(alpha = if (sel) 1f else 0.55f), RoundedCornerShape(14.dp))
@@ -224,7 +224,7 @@ fun ThemeGrid(context: android.content.Context = LocalContext.current) {
                         Text(t.label, style = MaterialTheme.typography.labelMedium, color = Color(t.text.toInt()), softWrap = true,
                             modifier = Modifier.padding(start = 8.dp))
                     }
-                }
+                } }
                 if (row.size == 1) Box(Modifier.weight(1f))
             }
         }

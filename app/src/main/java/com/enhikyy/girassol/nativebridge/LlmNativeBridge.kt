@@ -140,6 +140,12 @@ object LlmNativeBridge {
     @JvmStatic external fun nativeLlmSystemInfo(): String
 
     /**
+     * v4.1 — instala (handle ≠ 0) ou remove (0) a ponte do Orçamento Sináptico
+     * (GirassolSbBridge, libgirassol_sb): G_A do LoRA é projetado em (I − P) antes do Adam.
+     */
+    @JvmStatic external fun nativeLlmSetGradientProjector(handle: Long): Boolean
+
+    /**
      * v3.5 — treina um ciclo LoRA (rank r sobre blk.{L-1}.ffn_down) nos textos episódicos.
      * Retorna o JSON de status (active, cycles, lastAccepted, NLLs, erro).
      */

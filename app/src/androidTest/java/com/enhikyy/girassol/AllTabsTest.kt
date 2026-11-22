@@ -8,6 +8,7 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToKey
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -85,10 +86,17 @@ class AllTabsTest {
         rule.onNodeWithTag("tab_SISTEMA").performClick()
         rule.waitUntilAtLeastOneExists(hasTestTag("system_list"), 10_000)
         // publicado pelo MemoryGuard (/proc/meminfo + ActivityManager − Filament − WAL)
-        rule.waitUntil(40_000) {
-            runCatching { rule.onNodeWithTag("system_list").performScrollToNode(hasText("Orçamento dinâmico de RAM")); true }.getOrDefault(false)
-        }
+        // v4.1: rolagem por chave estável (sem medir dentro do waitUntil — evitava o
+        // "performMeasureAndLayout called during measure layout").
+        rule.onNodeWithTag("system_list").performScrollToKey("synaptic_budget")
+        rule.waitForIdle()
+        rule.waitUntil(30_000) { rule.onAllNodes(hasTestTag("synaptic_budget")).fetchSemanticsNodes().isNotEmpty() }
+        rule.onNodeWithTag("system_list").performScrollToKey("continuous")
+        rule.waitForIdle()
+        rule.waitUntil(40_000) { rule.onAllNodes(hasText("Orçamento dinâmico de RAM")).fetchSemanticsNodes().isNotEmpty() }
         // cadeia SHA-256 e vozes ficam em "Detalhes técnicos do hardware"
+        rule.onNodeWithTag("system_list").performScrollToKey("hw_details")
+        rule.waitForIdle()
         rule.onNodeWithTag("system_list").performScrollToNode(hasTestTag("hw_details_toggle"))
         rule.onNodeWithTag("hw_details_toggle").performClick()
         rule.waitForIdle()

@@ -83,11 +83,12 @@ fun SystemScreen() {
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp).testTag("system_list"),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 8.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        item { WorldEngineCard() }
-        item { TelemetryCard() }
-        item { KnowledgeLibraryPanel(dash) }
-        item { MeshSyncPanel(dash) }
-        item {
+        item(key = "world_engine", contentType = "card") { WorldEngineCard() }
+        item(key = "telemetry", contentType = "card") { TelemetryCard() }
+        item(key = "synaptic_budget", contentType = "card") { SynapticBudgetPanel() }
+        item(key = "knowledge", contentType = "card") { KnowledgeLibraryPanel(dash) }
+        item(key = "mesh", contentType = "card") { MeshSyncPanel(dash) }
+        item(key = "continuous", contentType = "card") {
             SectionCard("Execução contínua") {
                 KeyValue("Estado térmico", thermalLabel(status.thermalStatus) + if (status.thermalCapped) " (limitado)" else "")
                 KeyValue("Perfil do aparelho", LocalLlmManager.profile.label + " · " + LocalLlmManager.profile.description)
@@ -105,9 +106,9 @@ fun SystemScreen() {
                     style = MaterialTheme.typography.bodySmall, color = Lumon.CreamDim)
             }
         }
-        item { FounderModelsPanel() }
-        item { SigningPanel() }
-        item {
+        item(key = "founders", contentType = "card") { FounderModelsPanel() }
+        item(key = "signing", contentType = "card") { SigningPanel() }
+        item(key = "persistence", contentType = "card") {
             SectionCard("Persistência e determinismo") {
                 KeyValue("Semente do mundo", status.seed.toString())
                 KeyValue("Restaurado de snapshot", if (status.restoredFromSnapshot) "sim" else "não")
@@ -128,7 +129,7 @@ fun SystemScreen() {
                 if (status.lastMessage.isNotEmpty()) Text(status.lastMessage, style = MaterialTheme.typography.bodySmall, color = Lumon.Teal)
             }
         }
-        item {
+        item(key = "hw_details", contentType = "card") {
             Collapsible("Detalhes técnicos do hardware", "hw_details_toggle",
                 subtitle = "CPU (avx2/dotprod/fp16), memória, GPU, energia, módulos C++ e diagnóstico") {
             run {
@@ -142,7 +143,7 @@ fun SystemScreen() {
                         KeyValue("Classe de desempenho", h.performanceClass.toString())
                         KeyValue("Nível · teto de ticks/s", "${h.tier.label} · ${h.maxTicksPerSecond}")
                         KeyValue("Núcleo nativo C++", if (h.nativeLoaded) "carregado" else "indisponível (fallback Kotlin)")
-                        h.nativeCapabilities.toSortedMap().forEach { (k, v) -> KeyValue(k, v) }
+                        h.nativeCapabilities.toSortedMap().forEach { (k, v) -> androidx.compose.runtime.key(k) { KeyValue(k, v) } }
                     }
                 }
             }
@@ -202,7 +203,7 @@ fun SystemScreen() {
                 SectionCard("Voz dos cidadãos") { PocketTtsToggle(); VoiceBackendsPanel() }
             }
         }
-        item {
+        item(key = "danger", contentType = "card") {
             SectionCard("Zona de perigo") {
                 Button(onClick = { confirmReset = true }, colors = ButtonDefaults.buttonColors(containerColor = Lumon.Danger)) { Text("Reiniciar mundo") }
             }

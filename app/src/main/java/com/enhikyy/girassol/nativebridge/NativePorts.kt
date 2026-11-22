@@ -38,6 +38,8 @@ object NativeLoraTrainer : LoraTrainerPort {
         val ys = FloatArray(samples.size * state.outDim)
         samples.forEachIndexed { i, s -> s.x.copyInto(xs, i * state.inDim); ys[i * state.outDim] = s.y }
         val (next, first, last) = trainPacked(state, xs, ys, samples.size, epochs, lr, ewcLambda)
+        // v4.1: as features do lote alimentam o Orçamento Sináptico (somente observação; o treino não muda).
+        com.enhikyy.girassol.synaptic.SynapticBudgetEngine.observeWorldBatch(xs, samples.size, state.inDim)
         return LoraTrainResult(next, first, last, backend)
     }
 }

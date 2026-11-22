@@ -24,6 +24,19 @@ jobs:
           cmake -S . -B build -G Ninja
           cmake --build build
           ./build/girassol_native_tests
+      - name: Núcleo sináptico — T1–T18 e hash T13 em x86_64 e arm64-v8a (qemu)
+        run: |
+          sudo apt-get install -y qemu-user
+          SB_OUT=$RUNNER_TEMP/sb scripts/check_sb_determinism.sh "${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}" 2>&1 | tee $RUNNER_TEMP/sb_determinism.txt
+          mkdir -p $RUNNER_TEMP/sb && cp $RUNNER_TEMP/sb_determinism.txt $RUNNER_TEMP/sb/
+      - name: Publicar logs do núcleo sináptico
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sb-determinism
+          path: |
+            ${{ runner.temp }}/sb/*.log
+            ${{ runner.temp }}/sb/sb_determinism.txt
       - name: Baixar llama.cpp e modelo GGUF de teste
         run: |
           set -e

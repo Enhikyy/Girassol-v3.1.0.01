@@ -467,6 +467,8 @@ object LocalLlmManager : NeuralDeliberationPort {
                     LORA_EPOCHS, LORA_LR, LORA_TOP_K, LORA_MAX_TOKENS, threads)
             }.getOrElse { "{\"error\":\"${it.javaClass.simpleName}\"}" }
             publishLora(json)
+            // v4.1: ciclo aceito → ativações preparadas pela ponte são consolidadas no Orçamento Sináptico.
+            if (json.contains("\"lastAccepted\":true")) com.enhikyy.girassol.synaptic.SynapticBudgetEngine.onLoraCycleFinished()
             onDone(json)
         }
     }

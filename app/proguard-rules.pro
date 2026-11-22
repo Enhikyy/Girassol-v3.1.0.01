@@ -18,6 +18,9 @@
 -dontwarn com.google.android.filament.**
 # Pontes nativas do Girassol (nomes JNI Java_com_enhikyy_..., handles e callbacks).
 -keep class com.enhikyy.girassol.nativebridge.** { *; }
+# v4.1: Orçamento Sináptico — métodos registrados por RegisterNatives (nome + assinatura exatos).
+-keep class com.enhikyy.girassol.nativebridge.SynapticBudgetNative { *; }
+-keepclasseswithmembernames,includedescriptorclasses class com.enhikyy.girassol.nativebridge.SynapticBudgetNative { native <methods>; }
 -keep class com.enhikyy.girassol.llm.** { *; }
 -keep class com.enhikyy.girassol.audio.** { *; }
 -keepclassmembers class * { @androidx.annotation.Keep *; }

@@ -396,13 +396,26 @@ object SimulationHub {
         publish(force = true)
     }
 
-    /** Snapshot completo (cabeçalho GRS + SHA-256) para exportar como arquivo .grs. */
-    suspend fun exportSnapshotBytes(): ByteArray? = withContext(simDispatcher) {
-        if (!_status.value.loaded) null else WorldSnapshotCodec.encode(core.state)
+    /**
+     * Snapshot completo para exportar como .grs: mundo (cabeçalho GRS + SHA-256) seguido do bloco
+     * GRSB (FNV-1a 64) do Orçamento Sináptico, no contêiner [com.enhikyy.girassol.data.GirassolRecordCodec].
+     */
+    suspend fun exportSnapshotBytes(): ByteArray? {
+        val world = withContext(simDispatcher) { if (!_status.value.loaded) null else WorldSnapshotCodec.encode(core.state) } ?: return null
+        val synaptic = com.enhikyy.girassol.synaptic.SynapticBudgetEngine.serialize()
+        return com.enhikyy.girassol.data.GirassolRecordCodec.encode(world, synaptic)
     }
 
     /** Importa um .grs (valida cabeçalho e SHA-256) e substitui o mundo atual. */
-    suspend fun importSnapshot(bytes: ByteArray): String = withContext(simDispatcher) {
+    suspend fun importSnapshot(bytes: ByteArray): String {
+        val container = runCatching { com.enhikyy.girassol.data.GirassolRecordCodec.decode(bytes) }
+            .getOrElse { return "Contêiner .grs inválido: ${it.message}" }
+        val worldMsg = importWorld(container.world)
+        val sb = container.synaptic ?: return worldMsg
+        return "$worldMsg · " + com.enhikyy.girassol.synaptic.SynapticBudgetEngine.restore(sb)
+    }
+
+    private suspend fun importWorld(bytes: ByteArray): String = withContext(simDispatcher) {
         if (!_status.value.loaded) return@withContext "Mundo não carregado"
         val state = runCatching { WorldSnapshotCodec.decode(bytes) }.getOrElse { return@withContext "Snapshot inválido: ${it.message}" }
         val wasRunning = loopJob?.isActive == true

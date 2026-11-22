@@ -32,7 +32,8 @@ REQUIRED = {
     "com/k2fsa/sherpa/onnx/GenerationConfig": ["phonemeCodepoints", "sid", "speed"],
     "com/enhikyy/girassol/nativebridge/GeaNativeBridge": [],
     "com/enhikyy/girassol/nativebridge/ProceduralAssetsNative": ["nativeMipChainBytes", "nativeGenerateSurface", "nativeCubemapBytes", "nativeGenerateIbl"],
-    "com/enhikyy/girassol/nativebridge/LlmNativeBridge": ["nativeLlmLoad", "nativeLlmGenerate", "nativeLlmEvictParked", "nativeLlmPoolStatus"],
+    "com/enhikyy/girassol/nativebridge/LlmNativeBridge": ["nativeLlmLoad", "nativeLlmGenerate", "nativeLlmEvictParked", "nativeLlmPoolStatus", "nativeLlmSetGradientProjector"],
+    "com/enhikyy/girassol/nativebridge/SynapticBudgetNative": ["nativeStateBytes", "nativeSerializedBytes", "nativeAlignOffset", "nativeInit", "nativeObserve", "nativeCommit", "nativeCommitForTail", "nativeRelease", "nativeProject", "nativeTelemetry", "nativeEigenvalues", "nativeEnableEpsHistory", "nativeEpsHistory", "nativeForgettingBound", "nativeRankForTail", "nativeSerialize", "nativeDeserialize", "nativePlanProtection", "nativeAnalyzeSpectrum", "nativeCumulativeBound", "nativeFnv1a64", "nativeSetActive", "nativeBridgeHandle", "nativeConsolidateStaged", "nativeRunSelfTests", "nativeAbi"],
     "com/enhikyy/girassol/core/world/NativeWorldTick": ["nativeStreamSeed", "nativeStepNeeds", "nativeStepDaily"],
     "com/enhikyy/girassol/core/world/NativeCognition": ["nativePerceive", "nativeCognitionBatch", "nativeVerifyChain", "nativeLedgerZeroSum"],
 }
